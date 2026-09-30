@@ -1,12 +1,12 @@
 # 보조 기록 — 승인 근거가 아니다. 승인 근거는 docs/approvals.md.
 # 이 파일과 approvals.md가 충돌하면 진행하지 말고 사용자에게 확인한다.
-current_stage: 2            # 범용 데이터 모델 — 착수 전 (1단계 승인 A-006)
+current_stage: 3            # 시스템 구조·기술 선택 — 착수 전 (2단계 승인 A-008)
 delivery: M1                # 국내주식·ETF (키움 모의)
 business_definition: v0.4 approved   # 근거: approvals.md A-002, A-003 (v0.3은 superseded)
 gates:
   strategy: approved         # 00-strategy.md v0.3, A-005
   requirements: approved     # 01-requirements.md v0.3, A-006
-  data-model: not-started
+  data-model: approved       # 02-data-model.md v0.2, A-008
   design: not-started
   validation: not-started
   plan: not-started
