@@ -1,0 +1,40 @@
+# 비밀정보 — 절대 커밋하지 않음 (R-12)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# 실행 산출물 (모드별 데이터·로그·상태 DB) — var/backtest, var/paper, var/live
+var/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# 시장 데이터 원본 (라이선스·용량)
+data/raw/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# 에디터·OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Claude Code 개인 설정
+.claude/settings.local.json
