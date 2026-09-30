@@ -40,3 +40,13 @@
 - (추가) 사용자: 02-data-model v0.2 승인 → A-008 전사(A-007은 커밋 지시), 문서 approved, .status 현재 단계 3.
 - 다음 세션 첫 행동: 3단계 착수 — 키움 REST API·KRX 공식 문서 확인(docs/broker-specs/kiwoom-kr.md), 3단계 통과 기준(확인됨 또는 보수적 대안+PAPER 검증 등록) 제안, 03-design.md 초안.
 - (추가) 사용자 지시로 커밋·push (A-009), 이어서 3단계 착수 지시(누락 없이 수행).
+
+## 2026-10-01 (4) — 3단계 착수: 공식 문서 확인, 설계 초안
+- 수행: 키움 REST API 공식 자료(포털 API 가이드·소개, 공식 GitHub 명세 JSON 커밋 953e5db) 열람·추출, KRX 규정 페이지·영문 가이드 열람, PyPI 메타데이터(requests·websockets·pytest·hypothesis·httpx·tzdata) 조회, 텔레그램 Bot API 문서 열람. docs/broker-specs/kiwoom-kr.md, krx-market.md, docs/03-design.md v0.1 draft 작성(D-037~D-066, PV-01~12, CP-011~013 제안).
+- 실행 명령: curl로 공식 GitHub 파일을 scratchpad(저장소 밖)에 내려받아 python으로 필드 추출. `python -c sqlite3` → 3.50.4, `zoneinfo.ZoneInfo('Asia/Seoul')` → 실패(시간대 데이터 없음). 설치·API 호출·로그인 없음. PDF 렌더 도구(poppler) 없음 → 표준 라이브러리로 텍스트 추출.
+- 주요 발견: 고객 주문 식별자 없음, 정정·취소 시 새 주문번호, 모의 호출 제한 TR당 1초 1회, 토큰 IP 바인딩(8010), 공식 클라이언트는 인증 실패 시 요청 자동 재전송(주문 경로 사용 금지), 조회·실시간 응답에 계좌번호 포함, KRX 호가단위 출처 간 불일치.
+- 라이선스: 키움 명세는 복제·배포 금지 → 저장소에 원문 미포함, 사실만 요약.
+- 미해결: Q-1~Q-5(03 §16), 사용자 확인 K-U1·K-U4·X-U3.
+- 다음 세션 첫 행동: Q-1~Q-5 답변 반영 → 03-design 승인 요청 → 승인 시 CP-011~013 반영(승인본 archive 후 새 버전).
+- (추가) Q-1~Q-5 권장안 → 03-design.md v0.2 draft. 사용자가 Claude 계정 전환 시 세션 유지 여부 질의.
+- (추가) 사용자 지시로 커밋·push (A-010). 03-design은 draft 상태로 커밋.
