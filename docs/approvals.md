@@ -15,3 +15,6 @@
 | A-008 | 2026-10-01 | 산출물 (게이트 data-model:approved) | 02-data-model.md v0.2 | 범용 논리 데이터 모델 전체: D-027~D-036, ENT-01~29, 멱등키(§4), 상태 전이 ST-01~07, 불변 조건 INV-01~16, 가상 전략 적용, 상황별 검증. [제안] 항목 포함: D-029, D-034, 일봉 전략 판정 시각 가이드(§7.1) | 브로커 사양 의존 항목(M1 부록, §9 미확인)은 3단계 확인. 물리 설계·구현 승인 아님 | 에이전트(대화 승인 전사) |
 | A-009 | 2026-10-01 | 커밋 | 저장소 (origin, 브랜치 docs/initial-setup) | 2단계 문서와 승인 기록 변경을 커밋하고 origin에 push | 1회 지시. 상시 정책은 5단계 | 에이전트(대화 승인 전사) |
 | A-010 | 2026-10-01 | 커밋 | 저장소 (origin, 브랜치 docs/initial-setup) | 3단계 초안(03-design v0.2 draft, broker-specs)과 기록 변경을 커밋하고 origin에 push | 1회 지시. 03-design 승인 아님 | 에이전트(대화 승인 전사) |
+| A-011 | 2026-10-01 | 산출물 (게이트 design:approved) | 03-design.md v0.2 | 시스템 구조·기술 선택 전체: D-037~D-066, PV-01~12, 3단계 통과 기준(D-037), 텔레그램·SNTP·키움 차트 API·watchdog 알림만, 폴더 구조, CP-011~013 반영 지시 | broker-specs/kiwoom-kr.md·krx-market.md(2026-10-01)를 근거로 함. 설치·구현·실전 주문 코드 승인 아님. CP 반영 문서(02 v0.3, 01 v0.4, 업무정의서 v0.5)는 draft로 별도 승인 | 에이전트(대화 승인 전사) |
+| A-012 | 2026-10-01 | 산출물 (CP 반영 개정) | 02-data-model.md v0.3, 01-requirements.md v0.4, 업무정의서 v0.5 | CP-011·CP-013·CP-012 반영본 승인. 이전 승인본(02 v0.2, 01 v0.3, 업무정의서 v0.4)은 superseded | 게이트 상태 유지 (data-model·requirements approved) | 에이전트(대화 승인 전사) |
+| A-013 | 2026-10-01 | 커밋 | 저장소 (origin, 브랜치 docs/initial-setup) | 3단계 승인·CP 반영본·.gitattributes 변경을 커밋하고 origin에 push | 1회 지시. 상시 정책은 5단계 | 에이전트(대화 승인 전사) |
