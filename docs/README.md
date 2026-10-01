@@ -12,9 +12,9 @@
 | 03-design.md | 시스템 구조·기술 선택 | 3 | design:approved | v0.2 approved (A-011) |
 | broker-specs/ | 브로커 API 확인 기록 (출처·확인일·버전) | 3~ | — | kiwoom-kr.md, krx-market.md (2026-10-01) |
 | 04-validation.md | 검증 계획 | 4 | validation:approved | v0.2 approved (A-014) |
-| 05-plan.md | 구현 계획 (T-ID) | 5 | plan:approved | 미작성 |
+| 05-plan.md | 구현 계획 (T-ID) | 5 | plan:approved | v0.2 approved (A-017) |
 | 07-paper-review.md | PAPER 검토·LIVE 인계 (시장별) | 7 | — | 미작성 |
-| approvals.md | 사용자 승인 기록 (사용자만 기록) | 전체 | — | A-001~A-016 |
+| approvals.md | 사용자 승인 기록 (사용자만 기록) | 전체 | — | A-001~A-018 |
 | .status | 현재 단계 보조 기록 (승인 근거 아님) | 전체 | — | — |
 | worklog.md | 세션별 작업 기록 | 전체 | — | — |
 | process/ | 에이전트 단계별 가이드 (계획 / 구현) | — | — | — |
