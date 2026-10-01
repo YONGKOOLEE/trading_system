@@ -6,7 +6,7 @@ business_definition: v0.5 approved   # 근거: A-012 (v0.4·v0.3 superseded)
 gates:
   strategy: approved         # 00-strategy.md v0.3, A-005
   requirements: approved     # 01-requirements.md v0.4, A-012 (v0.3 A-006 superseded)
-  data-model: approved       # 02-data-model.md v0.3, A-012 (v0.2 A-008 superseded)
+  data-model: approved       # 02-data-model.md v0.4, A-019 (v0.3·v0.2 superseded)
   design: approved           # 03-design.md v0.2, A-011
   validation: approved       # 04-validation.md v0.2, A-014
   plan: approved             # 05-plan.md v0.2, A-017
