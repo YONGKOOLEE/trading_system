@@ -25,3 +25,4 @@
 | A-018 | 2026-10-01 | 커밋 | 저장소 (origin, 브랜치 docs/initial-setup) | 5단계 승인 변경을 커밋하고 origin에 push | 1회 지시 | 에이전트(대화 승인 전사) |
 | A-019 | 2026-10-01 | 산출물 (CP 반영 개정) | 02-data-model.md v0.4 (CP-015) | INV-15를 새 주문 의도에만 적용, INV-17(취소·정정 의도는 대상 주문당 1개) 추가. 이전 승인본 v0.3 superseded. 함께 지시: CLAUDE.md 커밋 정책(A-017 반영)·폴더 구조(A-011 반영) 문구 갱신 | 게이트 상태 유지 | 에이전트(대화 승인 전사) |
 | A-020 | 2026-10-01 | 커밋 | 저장소 (origin, 브랜치 docs/initial-setup) | CP-015·CLAUDE.md 갱신을 커밋하고 origin에 push | 1회 지시 | 에이전트(대화 승인 전사) |
+| A-021 | 2026-10-01 | 커밋 (병합) | 저장소 (origin) | docs/initial-setup을 main에 fast-forward 병합하고 main을 origin에 push (D-085) | 1회 지시. docs/initial-setup 브랜치는 삭제하지 않음 | 에이전트(대화 승인 전사) |
