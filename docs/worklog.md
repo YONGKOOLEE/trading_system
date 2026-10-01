@@ -54,3 +54,7 @@
 - 다음 세션 첫 행동: CP 반영 초안 3건 승인 확인 → 4단계 04-validation.md 착수.
 - (추가) 사용자: CP 반영 초안 3건 승인 → A-012 전사. 02 v0.3·01 v0.4·업무정의서 v0.5 approved, 이전 승인본 superseded 표기.
 - (추가) 사용자 지시로 커밋·push (A-013), 이어서 4단계 착수 지시.
+- (추가) 4단계 착수: docs/04-validation.md v0.1 draft 작성(D-067~D-077, 백테스트 공통 틀, 실행 안전성 V-01~V-111, PAPER-0/PAPER-1, PV 확인 절차, LIVE 체크리스트 C-01~14, R-ID·E-ID 추적). 질문 Q-1~Q-5 대기.
+- (추가) Q-1 수정안(공통 기준+전략별 기준, 거래 1건=왕복) + Q-2~Q-5 권장 → 04-validation.md v0.2 draft. CP-014(strategy-template 항목 추가) 제안.
+- (추가) 사용자: 04-validation v0.2 승인 → A-014 전사, .status 현재 단계 5. CP-014: 양식 보관(archive/strategy-template-A005.md) 후 백테스트 통과 기준·PAPER-1 전략별 기준 항목 추가(draft, 승인 대기).
+- (추가) 사용자: CP-014 양식 승인(A-015), 커밋·push 지시(A-016), 5단계 착수 지시.
