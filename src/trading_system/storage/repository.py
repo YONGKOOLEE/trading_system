@@ -67,6 +67,11 @@ CREATE TABLE IF NOT EXISTS reservation (
 CREATE TABLE IF NOT EXISTS halt (
   halt_id TEXT PRIMARY KEY, mode TEXT NOT NULL, halt_type TEXT NOT NULL, account TEXT,
   state TEXT NOT NULL, actor TEXT NOT NULL, reason TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS settings_version (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT NOT NULL, version_hash TEXT NOT NULL, kind TEXT NOT NULL,
+  target TEXT NOT NULL, values_json TEXT NOT NULL, previous_hash TEXT, direction TEXT NOT NULL,
+  submitted_at TEXT NOT NULL, effective_at TEXT NOT NULL, deferred INTEGER NOT NULL, ref_time_used TEXT,
+  source TEXT NOT NULL, result TEXT NOT NULL, reason TEXT);
 CREATE TABLE IF NOT EXISTS audit_event (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT NOT NULL, at TEXT NOT NULL, kind TEXT NOT NULL,
   actor TEXT NOT NULL, ref TEXT, summary TEXT NOT NULL);
@@ -401,6 +406,29 @@ class Repository:
 
     def release_reservation(self, reservation_id: str) -> None:
         self._x("UPDATE reservation SET state='RELEASED' WHERE reservation_id=?", (reservation_id,))
+
+    # --- 설정 버전 (02 ENT-08) ---------------------------------------------------
+    def insert_settings_version(self, row: dict) -> int:
+        row = {**row, "mode": self.mode.value}
+        cols = ",".join(row)
+        cur = self._x(f"INSERT INTO settings_version({cols}) VALUES({','.join('?' * len(row))})", tuple(row.values()))
+        return int(cur.lastrowid)
+
+    def settings_rows(self, kind: str, target: str) -> list[dict]:
+        return [dict(r) for r in self._x(
+            "SELECT * FROM settings_version WHERE kind=? AND target=? ORDER BY seq", (kind, target))]
+
+    def effective_settings_row(self, kind: str, target: str, at: datetime) -> dict | None:
+        """적용 시각이 지난 통과 버전 중 가장 나중에 제출된 것. 나중 제출이 대기 중인 이전 완화를 덮는다."""
+        r = self._x(
+            "SELECT * FROM settings_version WHERE kind=? AND target=? AND result='PASSED' AND effective_at <= ? "
+            "ORDER BY seq DESC LIMIT 1", (kind, target, to_iso(at))).fetchone()
+        return dict(r) if r else None
+
+    def latest_passed_settings_row(self, kind: str, target: str) -> dict | None:
+        r = self._x("SELECT * FROM settings_version WHERE kind=? AND target=? AND result='PASSED' "
+                    "ORDER BY seq DESC LIMIT 1", (kind, target)).fetchone()
+        return dict(r) if r else None
 
     # --- 정지 ---------------------------------------------------------------
     def insert_halt(self, halt_type: str, account: str | None, actor: str, reason: str | None, at: datetime) -> str:

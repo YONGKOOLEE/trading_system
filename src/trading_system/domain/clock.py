@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta, timezone
+from datetime import time as dtime
 from typing import Protocol
 
 KST = timezone(timedelta(hours=9), "KST")
@@ -28,6 +29,18 @@ def to_iso(value: datetime) -> str:
 
 def from_iso(text: str) -> datetime:
     return datetime.fromisoformat(text.replace("Z", "+00:00"))
+
+
+def next_kst_time_after(after: datetime, at: dtime) -> datetime:
+    """`after` 이후(엄격히) 처음 오는 KST `at` 시각을 UTC로 돌려준다.
+
+    정확히 `at`에 제출하면 다음 날이다. 휴장·주말은 고려하지 않는다 (달력은 T-010).
+    """
+    local = require_aware(after).astimezone(KST)
+    candidate = datetime.combine(local.date(), at, tzinfo=KST)
+    if candidate <= local:
+        candidate += timedelta(days=1)
+    return candidate.astimezone(UTC)
 
 
 class SystemClock:

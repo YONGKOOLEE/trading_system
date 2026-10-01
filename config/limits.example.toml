@@ -1,0 +1,24 @@
+# 한도·시간 설정 형식 예제 (01 D-026, §2.3.1). 값(리스크 수치)은 사용자가 정한다.
+# 이 파일은 자리표시자만 담는다. 그대로는 시작할 수 없다 (기본값 없음).
+# 사용: 복사해 config/limits.<mode>.toml 로 만들고 값을 채운다 (mode = backtest | paper). 비밀정보는 넣지 않는다.
+# 형식: 비율·금액은 문자열 또는 정수 (float 금지), 시각은 "HH:MM".
+# 변경: 더 엄격해지면 즉시, 완화·혼합·기준 시각 변경은 다음 일일 기준 시각부터 적용된다. 메신저로는 바꿀 수 없다.
+
+account = "<계좌 별칭, 예: KR-PAPER-01>"
+
+[limits]
+l1_max_loss_ratio = "<비율>"            # L1 1회 최대 손실 (기준 금액 대비)
+l2_max_symbol_ratio = "<비율>"          # L2 종목 비중
+l3_max_total_ratio = "<비율>"           # L3 총 노출. 100% 초과 시 경고
+l4_daily_loss_ratio = "<비율>"          # L4 일일 손실
+l5_daily_new_orders = "<건수, 정수>"    # L5 일일 신규 주문 수 (1 이상)
+l6_max_positions = "<개수, 정수>"       # L6 보유 종목 수 (1 이상)
+l7_max_order_amount = "<금액, 원>"      # L7 1회 주문 최대 금액
+l10_leverage_total_ratio = "<비율 또는 none>"  # L10 레버리지·인버스 상품 총 노출. none = 별도 한도 없음
+warn_usage_ratio = "<비율>"             # 한도 사용률 경고 기준 (0 초과 1 이하)
+
+[time]
+order_window_start = "<HH:MM>"          # 위험 확대 주문 허용 시작 (정규장 09:00 이후)
+order_window_end = "<HH:MM>"            # 종료 (정규장 15:30 이전)
+daily_reference_time = "<HH:MM>"        # 일일 기준 시각 (장 시작 09:00 전)
+report_time = "<HH:MM>"                 # 일일 보고 시각 (장 마감 15:30 후)

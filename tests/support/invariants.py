@@ -1,13 +1,16 @@
 """불변 조건 검사기 (02-data-model §6, 04 D-069).
 
 모든 시나리오 테스트가 끝날 때 실행한다. 위반 목록을 문자열로 돌려준다.
-T-001 범위: INV-01·03·04·05·06·07·08·09·10·12·15·17. 나머지는 해당 작업에서 추가한다.
+T-001 범위: INV-01·03·04·05·06·07·08·09·10·12·15·17, T-002: INV-14. 나머지는 해당 작업에서 추가한다.
 """
 
 from __future__ import annotations
 
 import sqlite3
+from datetime import time as dtime
 from decimal import Decimal
+
+from trading_system.domain.clock import from_iso, next_kst_time_after
 
 ACTIVE_INTENT_STATES = ("PENDING_SEND", "SENT", "UNKNOWN", "ACCEPTED", "PARTIAL")
 NEW_ORDER_TYPES = ("ENTRY", "INCREASE", "REDUCE", "EXIT")
@@ -84,10 +87,20 @@ def check_invariants(conn: sqlite3.Connection, mode: str) -> list[str]:
 
     # INV-12 모든 레코드의 모드 = 저장소 모드
     for table in ("account", "gate_decision", "intent", "attempt", "broker_order", "fill",
-                  "position", "ownership", "reservation", "halt", "audit_event"):
+                  "position", "ownership", "reservation", "halt", "audit_event", "settings_version"):
         for r in _rows(conn, f"SELECT COUNT(*) c FROM {table} WHERE mode <> ?", (mode,)):
             if r["c"]:
                 v.append(f"INV-12 모드 불일치 {table} {r['c']}건")
+
+    # INV-14 완화·혼합·기준 시각 변경은 제출 후 첫 일일 기준 시각 이후에 적용
+    for r in _rows(conn, "SELECT * FROM settings_version WHERE result = 'PASSED' AND direction <> 'INITIAL'"):
+        if r["direction"] in ("LOOSENED", "MIXED") and not r["deferred"]:
+            v.append(f"INV-14 완화·혼합이 즉시 적용됨 seq={r['seq']}")
+        if r["deferred"]:
+            hh, mm = (r["ref_time_used"] or "00:00").split(":")
+            earliest = next_kst_time_after(from_iso(r["submitted_at"]), dtime(int(hh), int(mm)))
+            if from_iso(r["effective_at"]) < earliest:
+                v.append(f"INV-14 기준 시각 전에 적용 seq={r['seq']}")
 
     # INV-15 (계좌, 종목, 방향)당 활성 새 주문 의도 최대 1
     for r in _rows(conn, f"""SELECT account, instrument, side, COUNT(*) c FROM intent

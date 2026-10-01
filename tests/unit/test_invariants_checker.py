@@ -42,6 +42,38 @@ def test_detects_intent_without_approved_decision_and_mode_mismatch(tmp_path: Pa
     repo.close()
 
 
+def _settings_row(repo: Repository, **kw: object) -> None:
+    row = {"mode": "BACKTEST", "version_hash": "h", "kind": "ACCOUNT_LIMITS", "target": "A", "values_json": "{}",
+           "previous_hash": None, "direction": "LOOSENED", "submitted_at": "2026-10-01T01:00:00.000000Z",
+           "effective_at": "2026-10-01T23:00:00.000000Z", "deferred": 1, "ref_time_used": "08:00",
+           "source": "LOCAL", "result": "PASSED", "reason": None}
+    row.update(kw)
+    cols = ",".join(row)
+    repo.connection.execute(f"INSERT INTO settings_version({cols}) VALUES({','.join('?' * len(row))})", tuple(row.values()))
+
+
+def test_inv14_detects_loosening_applied_immediately(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _settings_row(repo, deferred=0, effective_at="2026-10-01T01:00:00.000000Z")
+    assert any(v.startswith("INV-14") for v in check_invariants(repo.connection, "BACKTEST"))
+    repo.close()
+
+
+def test_inv14_detects_effective_before_next_reference_time(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)  # 제출 10:00 KST, 기준 08:00 → 다음 날 08:00(=23:00Z) 이전 적용은 위반
+    _settings_row(repo, deferred=1, effective_at="2026-10-01T05:00:00.000000Z")
+    assert any(v.startswith("INV-14") for v in check_invariants(repo.connection, "BACKTEST"))
+    repo.close()
+
+
+def test_inv14_accepts_correct_deferral_and_ignores_rejected(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _settings_row(repo)
+    _settings_row(repo, result="REJECTED", deferred=0, effective_at="2026-10-01T01:00:00.000000Z", version_hash="h2")
+    assert check_invariants(repo.connection, "BACKTEST") == []
+    repo.close()
+
+
 def test_detects_negative_position(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     repo.connection.execute("INSERT INTO position VALUES('A','X','BACKTEST','-1','0')")
