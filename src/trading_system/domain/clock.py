@@ -1,0 +1,48 @@
+"""주입 가능한 시계 (implementation-guide, 03 D-040).
+
+시각은 항상 시간대가 있는 UTC 값으로 다룬다. KST는 고정 오프셋 +09:00 (M1, 서머타임 없음).
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta, timezone
+from typing import Protocol
+
+KST = timezone(timedelta(hours=9), "KST")
+
+
+class Clock(Protocol):
+    def now(self) -> datetime: ...
+
+
+def require_aware(value: datetime) -> datetime:
+    """시간대 없는 시각을 거부하고 UTC로 바꾼다."""
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("시간대 없는 시각(naive datetime)은 허용하지 않는다")
+    return value.astimezone(UTC)
+
+
+def to_iso(value: datetime) -> str:
+    return require_aware(value).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def from_iso(text: str) -> datetime:
+    return datetime.fromisoformat(text.replace("Z", "+00:00"))
+
+
+class SystemClock:
+    def now(self) -> datetime:
+        return datetime.now(UTC)
+
+
+class FixedClock:
+    """테스트·백테스트용 시계."""
+
+    def __init__(self, start: datetime) -> None:
+        self._now = require_aware(start)
+
+    def now(self) -> datetime:
+        return self._now
+
+    def advance(self, delta: timedelta) -> None:
+        self._now = self._now + delta
