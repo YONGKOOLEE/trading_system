@@ -1,23 +1,17 @@
-# src/trading_system — [제안] 모듈 구조
+# src/trading_system — 모듈 구조 (확정)
 
-**6단계 전까지 코드를 두지 않는다.** 아래 구조는 CLAUDE.md §8 주문 통제 원칙에서 나온 제안이며, 3단계 설계(03-design.md)에서 확정·수정한다.
+구조는 [03-design.md](../../docs/03-design.md) §13(승인 A-011), 의존 방향은 §7을 따른다. 의존 방향은 `tests/architecture/test_imports.py`(V-93)가 자동으로 검사한다. 구조·규칙 변경은 CP로 한다.
 
-```
-trading_system/
-├── core/            모드(TRADE_MODE) 검증, 시계 인터페이스, 공통 타입(금액·수량·시각)
-├── strategies/      신호 생성만 (순수 계산). brokers/execution import 금지 (R-02)
-├── risk/            중앙 주문 통제·리스크 게이트, 예약 노출, 킬 스위치 상태 (R-04, R-07)
-├── execution/       주문 실행기, 주문 의도·전송 시도 상태, 결과 불명 처리 (R-03, R-05, R-06)
-├── brokers/         공통 어댑터 인터페이스 (R-16)
-│   ├── fake/        테스트·PAPER 1차용 가짜 브로커
-│   ├── kiwoom/      M1(국내), M3(미국)
-│   └── binance/     M2(크립토 현물)
-├── reconciliation/  브로커 ↔ 내부 상태 대조, 재시작 복구 (R-08)
-├── data/            시장 데이터 수집·품질 검사·캘린더 (R-14, R-22, R-27)
-├── ops/             운영 요청 수신·인증 (R-21)
-├── monitoring/      프로세스 감시, 알림, 일일 보고 (R-13, R-18, R-26)
-├── audit/           감사 기록, 마스킹 (R-11)
-└── backtest/        백테스트 엔진·비용 모델 (R-10)
-```
+| 패키지 | 책임 | 내부 의존 허용 |
+|---|---|---|
+| app | 시작·모드 검사·시작 점검·배선 | 전부 |
+| domain | 엔티티·열거·Decimal·시각 | 없음 (표준 라이브러리만) |
+| strategy | 신호 생성 (순수 계산) | domain (표준 라이브러리 중 네트워크·저장소·시계·난수·파일 금지) |
+| evaluation | 판정 트리거·스냅샷 | 규칙 미정 (app 금지) |
+| gate | 중앙 게이트·예약·소유권 | domain, storage |
+| execution | 실행기·실행 정책·주문 추적 | domain, broker, storage |
+| broker (fake, kiwoom) | 어댑터 인터페이스·구현 | domain, broker |
+| marketdata · reconciliation · halt · ops · monitoring · reporting · storage · config | 03 §2 참조 | 규칙 미정 (app 금지) |
 
-의존 방향(제안): strategies → core 만 허용. risk → core. execution → risk, brokers(인터페이스). brokers/* 는 상위 모듈을 import하지 않는다.
+- `broker/kiwoom`은 모의(PAPER) 전용이다. 실전 주문 코드는 승인 구조 3번 전에는 두지 않는다.
+- 금액·가격·수량은 `Decimal`, 시각은 시간대가 있는 값만 쓴다 (implementation-guide).

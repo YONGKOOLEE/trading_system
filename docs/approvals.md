@@ -26,3 +26,5 @@
 | A-019 | 2026-10-01 | 산출물 (CP 반영 개정) | 02-data-model.md v0.4 (CP-015) | INV-15를 새 주문 의도에만 적용, INV-17(취소·정정 의도는 대상 주문당 1개) 추가. 이전 승인본 v0.3 superseded. 함께 지시: CLAUDE.md 커밋 정책(A-017 반영)·폴더 구조(A-011 반영) 문구 갱신 | 게이트 상태 유지 | 에이전트(대화 승인 전사) |
 | A-020 | 2026-10-01 | 커밋 | 저장소 (origin, 브랜치 docs/initial-setup) | CP-015·CLAUDE.md 갱신을 커밋하고 origin에 push | 1회 지시 | 에이전트(대화 승인 전사) |
 | A-021 | 2026-10-01 | 커밋 (병합) | 저장소 (origin) | docs/initial-setup을 main에 fast-forward 병합하고 main을 origin에 push (D-085) | 1회 지시. docs/initial-setup 브랜치는 삭제하지 않음 | 에이전트(대화 승인 전사) |
+| A-022 | 2026-10-01 | 구현 시작 | 05-plan.md v0.2 (A-017) | 사용자 "구현 시작" 지시. T-000부터 계획 순서대로 착수 (작업별 설치·외부 연결은 별도 승인, D-087 재안내) | 실전 주문 코드·LIVE 범위 밖 (승인 구조 3·4 없음) | 에이전트(대화 승인 전사) |
+| A-023 | 2026-10-01 | 설치·외부 연결 | 05-plan D-081 1차 | 프로젝트 .venv에 pytest 9.1.1, iniconfig 2.3.0, packaging 26.3, pluggy 1.6.0, pygments 2.21.0, colorama 0.4.6 설치 (PyPI 연결, 해시 고정) | 1차만. 2차(requests·websockets)는 T-014 착수 시 별도 승인 | 에이전트(대화 승인 전사) |

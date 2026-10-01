@@ -1,6 +1,6 @@
 # 보조 기록 — 승인 근거가 아니다. 승인 근거는 docs/approvals.md.
 # 이 파일과 approvals.md가 충돌하면 진행하지 말고 사용자에게 확인한다.
-current_stage: 6            # 구현 — 착수 전 (5단계 승인 A-017). "구현 시작" 지시 대기
+current_stage: 6            # 구현 — T-000 완료(로컬 커밋), 다음 T-001
 delivery: M1                # 국내주식·ETF (키움 모의)
 business_definition: v0.5 approved   # 근거: A-012 (v0.4·v0.3 superseded)
 gates:
@@ -10,7 +10,7 @@ gates:
   design: approved           # 03-design.md v0.2, A-011
   validation: approved       # 04-validation.md v0.2, A-014
   plan: approved             # 05-plan.md v0.2, A-017
-implementation_start: not-authorized
+implementation_start: authorized   # A-022 (2026-10-01)
 live_order_code: not-authorized
 live_run: not-authorized    # 시장별: M1/M2/M3 모두 없음
 commit_policy: D-082 (A-017)   # 작업 완료·테스트 통과 시 로컬 커밋, push·main 병합은 지시 시

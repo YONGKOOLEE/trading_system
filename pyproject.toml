@@ -1,0 +1,14 @@
+[project]
+name = "trading-system"
+version = "0.0.0"
+description = "개인용 자동매매 시스템 (CLAUDE.md, docs/)"
+requires-python = ">=3.14"
+dependencies = []
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers -m \"not paper\""
+markers = [
+    "paper: 키움 모의(PAPER) 연동 테스트. 실제 네트워크 사용 — 사용자 승인 후 -m paper로만 실행",
+]

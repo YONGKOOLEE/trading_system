@@ -3,7 +3,8 @@
 개인용 자동매매 시스템 (국내주식·ETF → 크립토 현물 → 미국주식).
 목표는 수익 보장이 아니라, 승인된 전략과 리스크 규칙이 의도대로 실행되고 불확실한 상태에서 위험이 커지지 않는 것이다.
 
-- 현재 상태: **계획 0단계 착수 전** (`docs/.status`). 애플리케이션 코드 없음.
+- 현재 상태: **6단계 구현 중** (`docs/.status`, 계획 0~5단계 승인 완료). 작업 목록: [docs/05-plan.md](docs/05-plan.md)
+- 개발 환경: Python 3.14, 프로젝트 가상환경 `.venv` + `requirements-dev.txt`(해시 고정). 테스트: `.venv\Scripts\python -m pytest`
 - 에이전트 규칙: [CLAUDE.md](CLAUDE.md)
 - 범위·요구사항: [docs/business-definition.md](docs/business-definition.md)
 - 문서 체계: [docs/README.md](docs/README.md)

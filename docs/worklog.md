@@ -64,3 +64,14 @@
 - (추가) 산출물 재검토 결과: ① CP-015(INV-15가 취소·정정 의도를 막는 충돌) → 02 v0.3 보관 후 v0.4 draft, ⑦ CLAUDE.md 커밋 정책(A-017)·폴더 구조 확정(A-011) 문구 갱신. ②~④ 정책 결과는 값 설정 시 재안내, ⑤·⑥은 T-014~T-016에서 처리.
 - (추가) 사용자: CP-015 승인(A-019), 커밋·push(A-020).
 - (추가) 사용자 지시로 docs/initial-setup → main fast-forward 병합 후 push (A-021). 이후 작업 브랜치 기준은 main.
+
+## 2026-10-01 (5) — 구현 시작, T-000 개발 환경·골격
+- 승인: 구현 시작(A-022), 1차 설치(A-023). 브랜치 `feat/T-000-dev-env` (main에서 분기).
+- 수행: `.venv` 생성, `requirements-dev.txt`(pytest 9.1.1·iniconfig 2.3.0·packaging 26.3·pluggy 1.6.0·pygments 2.21.0·colorama 0.4.6, PyPI SHA-256 고정), `pyproject.toml`(pytest 설정, paper 마커 기본 제외), 03 §13 패키지 골격(15개 + broker/fake·kiwoom), tests 하위 폴더, 의존 방향 검사기·테스트(V-93), README 3개 갱신.
+- 실행 명령과 결과:
+  - `python -m venv .venv`; `pip install --require-hashes -r requirements-dev.txt` → 6개 설치 성공. `pytest --version` → 9.1.1 (Python 3.14.7)
+  - 골격 생성 전 `pytest -q` → 1 failed(패키지 15개 없음, 기대한 실패), 23 passed
+  - 골격 생성 후 → 24 passed
+  - 임시 위반 모듈(strategy → broker, datetime.now) 추가 → 1 failed, 위반 2건 검출 → 모듈 삭제 → 24 passed
+- 남은 위험: 03 §7에 규칙이 없는 패키지(evaluation 등 9개)는 app import 금지만 검사. broker 규칙을 fake까지 확장 적용(D-062 근거). V-94(주문 경로 단일성)는 T-001.
+- 다음 세션 첫 행동: T-001 착수 전 준비 항목 안내(D-087: 외부 연결·설치 없음) → T-001 테스트 작성.
