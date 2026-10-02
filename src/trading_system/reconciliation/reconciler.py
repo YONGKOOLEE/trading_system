@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from trading_system.broker.base import BrokerAdapter, BrokerQueryError
+from trading_system.broker.ratelimit import Priority, call_priority
 from trading_system.domain.clock import Clock
 from trading_system.domain.enums import HaltType, IntentState, Mode
 from trading_system.domain.sinks import AlertSink, HaltControl
@@ -64,9 +65,10 @@ class Reconciler:
         if self._repo.in_transaction:
             raise RuntimeError("대조 조회는 저장 단위(tx) 밖에서만 한다")
         try:
-            positions = self._broker.query_positions(account)
-            orders = self._broker.query_orders(account)
-            fills = self._broker.query_fills(account)
+            with call_priority(Priority.RECONCILE):  # 03 D-048
+                positions = self._broker.query_positions(account)
+                orders = self._broker.query_orders(account)
+                fills = self._broker.query_fills(account)
         except BrokerQueryError as exc:
             err = Masker().text(str(exc))  # 브로커 오류 문구에 URL 토큰·계좌번호가 섞일 수 있다
             with self._repo.tx():

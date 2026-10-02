@@ -15,6 +15,7 @@ from collections.abc import Callable
 from enum import StrEnum
 
 from trading_system.broker.base import BrokerAdapter, BrokerQueryError
+from trading_system.broker.ratelimit import Priority, call_priority
 from trading_system.domain.clock import Clock, from_iso, to_iso
 from trading_system.domain.enums import HaltType, IntentState, OrderType, RequestType
 from trading_system.domain.models import BrokerOrderRecord, FillRecord, OrderEvent
@@ -61,8 +62,9 @@ class UnknownResolver:
             if self._repo.intent(intent_id).state is not IntentState.UNKNOWN:
                 return ResolveOutcome.FOUND  # 보류 통보 반영 등으로 이미 해소됨
             try:
-                orders = self._broker.query_orders(intent.account)
-                fills = self._broker.query_fills(intent.account)
+                with call_priority(Priority.RESOLVE):  # 호출 제한기 최우선 (03 D-048)
+                    orders = self._broker.query_orders(intent.account)
+                    fills = self._broker.query_fills(intent.account)
             except BrokerQueryError as exc:
                 clean = False
                 notes.append(f"{n}회 조회 실패: {exc}")

@@ -103,6 +103,30 @@
 | 법인 미지원 | 8200 | 해당 없음 |
 | 예기치 못한 오류 | 1999 | 주문이면 **결과 불명** 처리 (접수 여부 모름) |
 
+## 7a. T-014 구현 전 재확인 (2026-10-03, 에이전트 — S2 공개 명세 JSON·공식 클라이언트 코드·예제 열람만, 로그인·API 호출 없음)
+출처: S2 main 브랜치(2026-10-03 내려받음) `kiwoom/_data/kiwoom_api_spec.json`(API 337개, 오류 코드 표), `kiwoom/core/{client,auth,ws_client,errors}.py`, `examples/국내주식/실시간시세/subscribe_domestic_order_fill_async.py`. 원문은 저장소에 넣지 않고 사실만 적는다.
+
+| 항목 | 확인한 사실 | 근거 | 구현 위치 |
+|---|---|---|---|
+| 요청 헤더 | `api-id`, `authorization: Bearer <토큰>`, `Content-Type: application/json;charset=UTF-8`, 연속조회 `cont-yn`·`next-key` | 명세 JSON, client.py | `broker/kiwoom/http.py` |
+| 주문 필드 | kt10000/1: `dmst_stex_tp·stk_cd·ord_qty·ord_uv·trde_tp(0 보통, 3 시장가)·cond_uv` → `ord_no`. kt10002: `orig_ord_no·mdfy_qty·mdfy_uv·mdfy_cond_uv` → `ord_no·base_orig_ord_no`. kt10003: `orig_ord_no·cncl_qty('0'=잔량 전부)` | 명세 JSON | `adapter.py` |
+| 주문번호 길이 | 주문 응답 예시는 5자리("00024"), 조회는 7자리 → 7자리로 0 채워 맞춤 | 명세 예시 | `parse.order_no` |
+| 조회 필드 | kt00009 `acnt_ord_cntr_prst_array`(ord_no, stk_cd 접두어, io_tp_nm 예 "현금매수", ord_qty, ord_uv, cntr_no, cntr_qty, cntr_uv, cntr_tm "HH:mm:ss", acpt_tp, orig_ord_no, mdfy_cncl_tp, 거래소 구분 '%'=전체). ka10075 `oso`(acnt_no, ord_no, ord_stt, ord_qty, ord_pric, oso_qty, orig_ord_no, io_tp_nm 예 "+매수", stex_tp 0=통합). kt00018 `acnt_evlt_remn_indv_tot`(stk_cd, rmnd_qty, pur_pric). kt00005 `entr`·`ord_alowa`. 숫자는 좌측 0 채움·부호 포함 문자열 | 명세 JSON·예시 | `adapter.build_orders/build_fills/query_*` |
+| 실시간 00 FID | 9201 계좌, 9203 주문번호, 913 상태(접수/체결/확인/취소/거부), 900 주문수량, 901 주문가격, 902 미체결, 904 원주문, 905 주문구분("+매수", "매수정정", "매수취소" 등), 907 매도수(1 매도, 2 매수), 908 HHmmss, 909 체결번호, 910 체결가, 911 체결량, 914 단위체결가, 915 단위체결량, 919 거부사유 | 명세 JSON | `realtime.parse_order_event` |
+| 실시간 04 FID | 9201 계좌, 9001 종목, 930 보유수량, 931 매입단가, 933 주문가능수량 | 명세 JSON | `realtime.parse_balance` |
+| WS 절차 | 경로 `/api/dostk/websocket`, `{"trnm":"LOGIN","token":..}` → LOGIN 응답 return_code. PING(문자열 또는 trnm PING)은 그대로 돌려보냄. 등록 `{"trnm":"REG","grp_no":"1","refresh":"1","data":[{"item":[...],"type":["00"]}]}`(item·type은 목록, 00은 item 빈 목록) → 응답 return_code | ws_client.py, 공식 예제 | `realtime.py` |
+| 오류 표현 | 업무 오류는 HTTP 200 + return_code. return_code가 숫자 또는 숫자 문자열. 일반 코드(예: 3)와 함께 구체 코드를 return_msg 안에 `[8005:...]`(REST)·`CODE=8005`(WS)로 넣는 경우가 있음 → 구체 코드 우선 분류 | errors.py·client.py(코드 근거, 공식 표에는 3 없음) | `errors.py` |
+| 오류 코드 표 | 1501~1517, 1687, 1700~1702, 1901~1903, 1999, 8001~8050, 8103, 8104, 8200 (§7과 같음) | 명세 JSON `error_codes` | `errors.classify` |
+
+추가 미확인 (모두 비차단 — 보수적으로 구현, PAPER-0에서 확인):
+
+| # | 항목 | 보수적 구현 | 확인 |
+|---|---|---|---|
+| K-U14 | kt00009 행 단위(주문별 1행인지 체결별 1행인지), cntr_no가 실시간 909와 같은 값인지 | 주문번호로 묶고 체결번호별 수량 합. 합이 주문 수량을 넘으면 조회 실패. 체결번호가 다르면 대조에서 누락 체결 후보로 잡혀 사람이 판단(자동 반영 없음) | ② PV-04·PV-05 |
+| K-U16 | 00의 911(체결량)이 누계인지 이번 체결분인지 | 이번 체결분 915·914를 사용, 비어 있으면 해석 불가로 버리고 대조로 보완 | ② PV-04 |
+| K-U17 | 정정·취소·거부 행의 io_tp_nm·mdfy_cncl_tp·acpt_tp·ord_stt 실제 문자열 | '취소'·'정정'·'매수'·'매도'·'거부' 포함 여부로 판정. 둘 다 있거나 없으면 조회 전체 실패 | ② PV-14 |
+| K-U18 | 반환 코드 3(일반 인증 실패)의 공식 정의 | 인증 오류로 분류 → 주문이면 결과 불명 | ③ |
+
 ## 8. 미확인 목록 요약
 | # | 항목 | 경로 | 차단 |
 |---|---|---|---|
@@ -119,3 +143,7 @@
 | K-U11 | [2026-10-02 CP-018] 일부 수량 정정 시 원주문 잔량 처리 | ② PV-14 | 비차단 (확인 전 정정 수량 = 잔량 전부만, 01 §2.1) |
 | K-U12 | [2026-10-02 CP-018] 전송 후 인증 오류(8001~8031) 응답 시 주문 접수 여부, 오류 코드 범위(8010·8030·8031 행과 겹침) 정리 | ② PV-01 | 비차단 (결과 불명으로 처리, 03 §4) |
 | K-U13 | [2026-10-02 CP-018] 시세 조회 응답의 체결 시각 필드 유무, 조회 주기 | ② PV-15 | 비차단 (수신 시각 기준, 03 D-095) |
+| K-U14 | [2026-10-03 T-014] kt00009 행 단위·체결번호와 실시간 909의 일치 | ② PV-04·PV-05 | 비차단 (§7a) |
+| K-U16 | [2026-10-03 T-014] 00 체결량 911 누계 여부 | ② PV-04 | 비차단 (§7a) |
+| K-U17 | [2026-10-03 T-014] 정정·취소·거부 행의 문자열 값 | ② PV-14 | 비차단 (§7a) |
+| K-U18 | [2026-10-03 T-014] 반환 코드 3의 공식 정의 | ③ | 비차단 (§7a) |
