@@ -1,14 +1,14 @@
 # 보조 기록 — 승인 근거가 아니다. 승인 근거는 docs/approvals.md.
 # 이 파일과 approvals.md가 충돌하면 진행하지 말고 사용자에게 확인한다.
-current_stage: 6            # 구현 — T-002 완료(로컬 커밋), 다음 T-003 (T-000~T-002 push·main 병합 미실행)
+current_stage: 6            # 구현 — 검토 반영 완료(A-024), 다음 T-003. 인계: docs/handoff.md
 delivery: M1                # 국내주식·ETF (키움 모의)
 business_definition: v0.5 approved   # 근거: A-012 (v0.4·v0.3 superseded)
 gates:
   strategy: approved         # 00-strategy.md v0.3, A-005
   requirements: approved     # 01-requirements.md v0.4, A-012 (v0.3 A-006 superseded)
-  data-model: approved       # 02-data-model.md v0.4, A-019 (v0.3·v0.2 superseded)
-  design: approved           # 03-design.md v0.2, A-011
-  validation: approved       # 04-validation.md v0.2, A-014
+  data-model: approved       # 02-data-model.md v0.5, A-024
+  design: approved           # 03-design.md v0.3, A-024
+  validation: approved       # 04-validation.md v0.3, A-024
   plan: approved             # 05-plan.md v0.2, A-017
 implementation_start: authorized   # A-022 (2026-10-01)
 live_order_code: not-authorized
