@@ -11,7 +11,7 @@ from __future__ import annotations
 import shutil
 import sqlite3
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,8 +20,12 @@ from .repository import SCHEMA_VERSION
 
 KEEP_BACKUPS = 7  # 01 §2.12
 
-# 버전 n에서 n+1로 가는 SQL. 지금은 기준선(1)뿐이다. 스키마를 바꾸면 여기에 추가하고 SCHEMA_VERSION을 올린다.
-MIGRATIONS: dict[int, str] = {}
+# 버전 n에서 n+1로 가는 SQL 문장 목록(문장 하나씩). 스키마를 바꾸면 여기에 추가하고
+# SCHEMA_VERSION을 올린다. ';'로 나누지 않는다 — 트리거 본문·문자열 안의 ';'가 깨진다.
+MIGRATIONS: dict[int, tuple[str, ...]] = {
+    1: ("ALTER TABLE gate_decision ADD COLUMN rule_id TEXT",
+        "ALTER TABLE ownership ADD COLUMN released_at TEXT"),
+}
 
 
 class MaintenanceError(RuntimeError):
@@ -71,6 +75,11 @@ def restore_test(backup_file: Path, expected_mode: str) -> RestoreReport:
                 check("integrity", False, f"열 수 없음: {exc}")
                 return rep
             check("integrity", r is not None and r[0] == "ok", str(r[0] if r else None))
+            tables = {n for (n,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            missing = {"meta", "audit_event"} - tables
+            if missing:
+                check("schema", False, f"이 시스템 DB가 아님 (없는 표: {', '.join(sorted(missing))})")
+                return rep
             meta = dict(conn.execute("SELECT key, value FROM meta").fetchall())
             check("mode", meta.get("mode") == expected_mode, f"{meta.get('mode')} (기대 {expected_mode})")
             check("schema_version", meta.get("schema_version") == SCHEMA_VERSION,
@@ -94,7 +103,7 @@ def schema_version_of(db: Path) -> str | None:
         conn.close()
 
 
-def migrate(db: Path, backup_dir: Path, migrations: Mapping[int, str] | None = None,
+def migrate(db: Path, backup_dir: Path, migrations: Mapping[int, Sequence[str]] | None = None,
             target: int | None = None) -> list[int]:
     """전진 전용. 적용 전 백업. 적용한 버전 목록을 돌려준다. 코드보다 높은 버전·건너뛴 단계가 있으면 거부."""
     steps = dict(MIGRATIONS if migrations is None else migrations)
@@ -110,6 +119,8 @@ def migrate(db: Path, backup_dir: Path, migrations: Mapping[int, str] | None = N
     missing = [v for v in range(cur, goal) if v not in steps]
     if missing:
         raise MaintenanceError(f"마이그레이션 단계 없음: {missing}")
+    if any(isinstance(steps[v], str) for v in range(cur, goal)):
+        raise MaintenanceError("마이그레이션 단계는 SQL 문장 목록이어야 함 (문자열 하나 아님)")
     backup(db, backup_dir)
     applied: list[int] = []
     conn = sqlite3.connect(db, isolation_level=None)
@@ -117,9 +128,8 @@ def migrate(db: Path, backup_dir: Path, migrations: Mapping[int, str] | None = N
         for v in range(cur, goal):
             conn.execute("BEGIN IMMEDIATE")
             try:
-                for stmt in (s.strip() for s in steps[v].split(";")):
-                    if stmt:
-                        conn.execute(stmt)
+                for stmt in steps[v]:
+                    conn.execute(stmt)
                 conn.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(v + 1),))
                 conn.execute("COMMIT")
             except sqlite3.Error as exc:

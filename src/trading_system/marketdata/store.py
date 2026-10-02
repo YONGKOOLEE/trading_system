@@ -17,6 +17,7 @@ from decimal import Decimal
 
 from trading_system.domain.clock import KST
 from trading_system.domain.enums import HaltType
+from trading_system.domain.history import RECENT_ENTRY_DAYS, history_view
 from trading_system.domain.market import InstrumentInfo, Quote, SessionInfo, TradingStatus
 from trading_system.domain.sinks import AlertSink, HaltControl
 from trading_system.domain.strategy import Bar, EvaluationSnapshot, InstrumentView, PositionView
@@ -36,6 +37,19 @@ def daily_bar_available(day: date, as_of: datetime, calendar: KrxCalendar | None
     if close is None:
         close = datetime(day.year, day.month, day.day, 15, 30, tzinfo=KST)
     return close <= as_of
+
+
+def latest_complete_day(as_of: datetime, calendar: KrxCalendar | None) -> date:
+    """as_of 시점에 일봉이 확정됐어야 하는 가장 최근 거래일. 달력에 없는 연도는 평일을 거래일로 본다(보수적:
+    휴장일을 거래일로 보면 '일봉 없음'으로 판정이 막힐 뿐 오래된 데이터를 통과시키지 않는다)."""
+    d = as_of.astimezone(KST).date()
+    for _ in range(31):
+        known = calendar.is_trading_day(d) if calendar is not None else None
+        trading = known if known is not None else d.weekday() < 5
+        if trading and daily_bar_available(d, as_of, calendar):
+            return d
+        d -= timedelta(days=1)
+    return d
 
 
 @dataclass
@@ -132,13 +146,25 @@ class MarketDataStore:
     # --- 판정 스냅샷 (V-90) ----------------------------------------------------------------
     def snapshot(self, evaluation_id: str, market: str, account: str, as_of: datetime, base_amount: Decimal,
                  instruments: list[str], positions: Callable[[str], PositionView | None],
-                 pending: Callable[[str], bool], next_evaluation_at: datetime | None = None) -> EvaluationSnapshot:
+                 pending: Callable[[str], bool], next_evaluation_at: datetime | None = None,
+                 history: Callable[[str], dict] | None = None,
+                 recent_days: int = RECENT_ENTRY_DAYS) -> EvaluationSnapshot:
+        """history: 종목 → 저장소 `strategy_history` 원자료. 주면 보유 거래일 수·직전 청산·최근 진입을 채운다."""
         views = []
+        cal = self.calendar.is_trading_day if self.calendar is not None else None
         for i in instruments:
             inst = self._data.get(i)
+            pos = positions(i)
+            extra: dict = {}
+            if history is not None:
+                h = history_view(history(i), as_of, cal, recent_days)
+                if pos is not None and h.holding_days is not None:
+                    pos = replace(pos, holding_days=h.holding_days)
+                extra = {"last_exit_at": h.last_exit_at, "last_exit_reason": h.last_exit_reason,
+                         "entries_recent": h.entries_recent}
             if inst is None or inst.raw is None:
-                views.append(InstrumentView(instrument=i, data_ok=False, position=positions(i),
-                                            has_pending_order=pending(i)))
+                views.append(InstrumentView(instrument=i, data_ok=False, position=pos,
+                                            has_pending_order=pending(i), **extra))
                 continue
             known = [r for r in inst.raw if daily_bar_available(r.day, as_of, self.calendar)]
             prepared = preprocess_daily(known, self._trading_days, data_version=inst.data_version)
@@ -147,7 +173,8 @@ class MarketDataStore:
             views.append(InstrumentView(
                 instrument=i, daily_bars=bars,
                 last_price=q.price if q is not None and q.at <= as_of else None,
-                statuses=inst.statuses or frozenset(), position=positions(i), has_pending_order=pending(i),
-                data_ok=prepared.report.ok and bool(bars)))
+                statuses=inst.statuses or frozenset(), position=pos, has_pending_order=pending(i), **extra,
+                # 공급이 끊겨 마지막 일봉이 오래됐으면 품질 실패 (지난 확정 거래일 일봉이 있어야 함)
+                data_ok=prepared.report.ok and bool(bars) and bars[-1].at >= latest_complete_day(as_of, self.calendar)))
         return EvaluationSnapshot(evaluation_id, market, account, as_of, base_amount, tuple(views),
                                   next_evaluation_at)

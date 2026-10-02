@@ -21,6 +21,7 @@ from trading_system.broker.base import BrokerAdapter, BrokerQueryError
 from trading_system.domain.clock import Clock
 from trading_system.domain.enums import HaltType, IntentState, Mode
 from trading_system.domain.sinks import AlertSink, HaltControl
+from trading_system.storage.jsonlog import Masker
 from trading_system.storage.repository import Repository
 
 OPEN = ("ACCEPTED", "PARTIAL")
@@ -67,10 +68,11 @@ class Reconciler:
             orders = self._broker.query_orders(account)
             fills = self._broker.query_fills(account)
         except BrokerQueryError as exc:
+            err = Masker().text(str(exc))  # 브로커 오류 문구에 URL 토큰·계좌번호가 섞일 수 있다
             with self._repo.tx():
                 rid = self._repo.insert_reconciliation(account, trigger, "QUERY_FAILED",
-                                                       {"error": str(exc)}, self._clock.now())
-            self._alerts.alert("WARNING", f"대조 조회 실패 ({trigger}): {exc}", rid)
+                                                       {"error": err}, self._clock.now())
+            self._alerts.alert("WARNING", f"대조 조회 실패 ({trigger}): {err}", rid)
             return ReconcileResult(rid, "QUERY_FAILED")
 
         now = self._clock.now()
@@ -89,7 +91,9 @@ class Reconciler:
         for o in orders:
             if o.order_no not in known and o.kind != "CANCEL":
                 found.append((ItemKind.UNKNOWN_BROKER_ORDER, o.instrument, o.order_no, None,
-                              f"{o.side} {o.quantity} {o.state}", {"side": o.side, "quantity": str(o.quantity)}))
+                              f"{o.side} {o.quantity} {o.state}",
+                              {"side": o.side, "quantity": str(o.quantity), "trade_date": today,
+                               "detected_at": now.isoformat()}))
         for io in self._repo.open_orders(account):
             trade_date = io.order_key.split("|")[1]
             if trade_date != today:
@@ -107,25 +111,32 @@ class Reconciler:
             if not f.fill_id:
                 continue  # 체결번호 없는 조회 체결은 반영 후보로 쓰지 않는다 (D-094)
             order = self._repo.broker_order_by_no(f.order_no, today, account)
-            if order is not None and order.intent_id is not None and                     not self._repo.fill_exists(order.order_key, f.fill_id):  # 외부 주문 체결은 수량 대조로
+            # 외부 주문 체결은 수량 대조로
+            if order is not None and order.intent_id is not None and                     not self._repo.fill_exists(order.order_key, f.fill_id):
                 found.append((ItemKind.MISSING_FILL, order.instrument, f.order_no, None, f"{f.quantity}@{f.price}",
                               {"order_key": order.order_key, "fill_id": f.fill_id, "quantity": str(f.quantity),
                                "price": str(f.price), "at": f.at.isoformat()}))
 
-        result = "MISMATCH" if found else "MATCH"
         with self._repo.tx():
+            # 같은 내용의 열린 항목은 다시 만들지 않는다. 이번에 안 보여도 열린 항목은 사람이 해소하기 전까지 남는다
+            # (예: 외부 주문이 다음 날 조회에서 사라짐) — 열린 항목이 있으면 일치로 보지 않는다
+            open_before = {(i["kind"], i["instrument"], i["ref"], i["internal_value"], i["broker_value"]): i["item_id"]
+                           for i in self._repo.open_recon_items(account)}
+            result = "MISMATCH" if found or open_before else "MATCH"
             rid = self._repo.insert_reconciliation(account, trigger, result, {
                 "positions": {k: str(v) for k, v in broker_pos.items()}, "orders": len(orders), "fills": len(fills),
-                "items": len(found)}, now)
-            ids = tuple(self._repo.insert_recon_item(rid, account, kind, inst, ref, iv, bv, json.dumps(detail))
+                "items": len(found), "open_items_before": len(open_before)}, now)
+            ids = tuple(open_before.get((kind, inst, ref, iv, bv)) or
+                        self._repo.insert_recon_item(rid, account, kind, inst, ref, iv, bv, json.dumps(detail))
                         for kind, inst, ref, iv, bv, detail in found)
             self._repo.audit(now, "RECONCILE", "reconciler", rid, {"trigger": trigger, "result": result,
-                                                                 "items": len(found)})
-        if found:
+                                                                 "items": len(found), "open_before": len(open_before)})
+        if result == "MISMATCH":
+            n = len(set(ids) | set(open_before.values()))
             if self._halts is not None:
-                self._halts.activate(HaltType.K4, "reconciler", f"대조 불일치 {len(found)}건 ({trigger})", account)
+                self._halts.activate(HaltType.K4, "reconciler", f"대조 불일치 {n}건 ({trigger})", account)
                 self._halts.report_condition(HaltType.K4, account, "reconciled", False, rid)
-            self._alerts.alert("EMERGENCY", f"대조 불일치 {len(found)}건 — 사람 확인 필요 (reconcile-resolve)", rid)
+            self._alerts.alert("EMERGENCY", f"대조 불일치 {n}건 — 사람 확인 필요 (reconcile-resolve)", rid)
         elif self._halts is not None:
             for k in (HaltType.K3, HaltType.K4, HaltType.K5):
                 self._halts.report_condition(k, account, "reconciled", True, rid)
@@ -168,6 +179,11 @@ class RecoveryChecker:
         unknown = [i for i in self._repo.intents_in_state(IntentState.UNKNOWN) if i.account == account]
         if unknown:
             fail(HaltType.K3, f"5. 결과 불명 의도 {len(unknown)}건 미해소")
+        # 재시작 정리(recover_on_start)를 거치지 않았다는 뜻 — 전송 결과를 모르는 의도가 남아 있다
+        unsettled = [i for st in (IntentState.SENT, IntentState.PENDING_SEND)
+                     for i in self._repo.intents_in_state(st) if i.account == account]
+        if unsettled:
+            fail(HaltType.K3, f"5. 전송 대기·응답 대기 의도 {len(unsettled)}건 — 재시작 정리 미실행")
         if rep.ok:
             self._halts.report_condition(HaltType.K8, None, "recovery_ok", True, f"대조 {r.recon_id}")
         else:

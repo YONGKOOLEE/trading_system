@@ -77,6 +77,11 @@ class HaltManager:
                 halt_id = existing["halt_id"]
                 if existing["state"] == HaltState.AWAITING_RESUME.value:  # 다시 발동되면 조건을 처음부터
                     self._repo.update_halt(halt_id, state=HaltState.ACTIVE.value, conditions={})
+                if variant is not None and existing.get("variant") != variant:
+                    # 사유가 바뀌면(예: 교체 중지 → 폐기 = 사용자 판단) 정지표 행도 바뀐다 (01 K9)
+                    self._repo.update_halt(halt_id, variant=variant)
+                    self._repo.audit(now, "HALT_VARIANT", actor, halt_id, {
+                        "type": halt_type.value, "from": existing.get("variant"), "to": variant, "reason": reason})
             else:
                 halt_id = self._repo.insert_halt(halt_type.value, account, actor, reason, now,
                                                  instrument=instrument, owner=owner, variant=variant)

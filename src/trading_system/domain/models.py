@@ -92,6 +92,7 @@ class GateRequest:
     signal_id: str | None = None
     target_order_key: str | None = None
     stop_price: Decimal | None = None
+    rule_id: str | None = None          # 신호의 규칙 ID (청산 사유·거래 이력, 00 §2.2)
 
     def __post_init__(self) -> None:
         _require_decimal("quantity", self.quantity)
@@ -123,6 +124,7 @@ class GateRequest:
             valid_until=s.valid_until,
             signal_id=s.signal_id,
             stop_price=s.stop_price,
+            rule_id=s.rule_id,
         )
 
     @classmethod

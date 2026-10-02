@@ -484,7 +484,7 @@ class Gate:
             "decision_id": decision_id, "created_at": to_iso(ctx.now), "source": req.source.value,
             "request_type": req.request_type.value, "account": req.account, "instrument": req.instrument,
             "side": req.side.value, "quantity": str(req.quantity), "price": str(req.price),
-            "idem_key": req.idem_key, "signal_id": req.signal_id, "owner": req.owner,
+            "idem_key": req.idem_key, "signal_id": req.signal_id, "rule_id": req.rule_id, "owner": req.owner,
             "target_order_key": req.target_order_key, "result": result.value,
             "failed_check": rej.check.value if rej else None, "reason": rej.reason if rej else None,
             "checks": json.dumps([(c.value, ok) for c, ok in results]),

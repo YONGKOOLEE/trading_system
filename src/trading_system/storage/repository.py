@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS gate_decision (
   signal_id TEXT, owner TEXT, target_order_key TEXT,
   result TEXT NOT NULL, failed_check TEXT, reason TEXT, checks TEXT NOT NULL,
   symbol_after TEXT, symbol_limit TEXT, total_after TEXT, total_limit TEXT,
-  settings_hash TEXT, limit_snapshot TEXT);
+  settings_hash TEXT, limit_snapshot TEXT, rule_id TEXT);
 CREATE TABLE IF NOT EXISTS intent (
   intent_id TEXT PRIMARY KEY, mode TEXT NOT NULL, decision_id TEXT NOT NULL REFERENCES gate_decision(decision_id),
   idem_key TEXT NOT NULL UNIQUE, signal_id TEXT, source TEXT NOT NULL, request_type TEXT NOT NULL,
@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS position (
   quantity TEXT NOT NULL, avg_price TEXT NOT NULL, PRIMARY KEY (account, instrument));
 CREATE TABLE IF NOT EXISTS ownership (
   ownership_id TEXT PRIMARY KEY, mode TEXT NOT NULL, account TEXT NOT NULL, instrument TEXT NOT NULL,
-  owner TEXT NOT NULL, state TEXT NOT NULL, intent_id TEXT, created_at TEXT NOT NULL, released_reason TEXT);
+  owner TEXT NOT NULL, state TEXT NOT NULL, intent_id TEXT, created_at TEXT NOT NULL, released_reason TEXT,
+  released_at TEXT);
 CREATE TABLE IF NOT EXISTS reservation (
   reservation_id TEXT PRIMARY KEY, mode TEXT NOT NULL, intent_id TEXT NOT NULL REFERENCES intent(intent_id),
   account TEXT NOT NULL, instrument TEXT NOT NULL, amount TEXT NOT NULL, consumed TEXT NOT NULL,
@@ -130,7 +131,7 @@ class SchemaMismatch(RuntimeError):
     """저장소 스키마 버전이 코드와 다름. 마이그레이션(T-011) 없이 열지 않는다."""
 
 
-SCHEMA_VERSION = "1"  # 기준선 (CP-018). 바꾸면 T-011 마이그레이션 필요
+SCHEMA_VERSION = "2"  # 1: 기준선 (CP-018). 2: 신호 규칙 ID·소유 해제 시각 (거래 이력). maintenance.MIGRATIONS
 
 
 @dataclass(frozen=True)
@@ -522,15 +523,46 @@ class Repository:
                     (account, instrument)).fetchone()
         return OwnershipRow(r["ownership_id"], r["owner"], r["state"], r["intent_id"]) if r else None
 
+    def active_ownerships_of(self, owner: str) -> list[dict]:
+        return [dict(r) for r in self._x("SELECT * FROM ownership WHERE owner=? AND state IN ('RESERVED','CONFIRMED')",
+                                         (owner,))]
+
     def insert_ownership(self, account: str, instrument: str, owner: str, intent_id: str | None,
                          at: datetime) -> None:
         self._x("INSERT INTO ownership(ownership_id, mode, account, instrument, owner, state, intent_id, created_at) "
                 "VALUES(?,?,?,?,?,?,?,?)",
                 (new_id("own"), self.mode.value, account, instrument, owner, "RESERVED", intent_id, to_iso(at)))
 
-    def set_ownership_state(self, ownership_id: str, state: str, reason: str | None = None) -> None:
-        self._x("UPDATE ownership SET state=?, released_reason=COALESCE(?, released_reason) WHERE ownership_id=?",
-                (state, reason, ownership_id))
+    def set_ownership_state(self, ownership_id: str, state: str, reason: str | None = None,
+                            at: datetime | None = None) -> None:
+        self._x("UPDATE ownership SET state=?, released_reason=COALESCE(?, released_reason), "
+                "released_at=COALESCE(?, released_at) WHERE ownership_id=?",
+                (state, reason, to_iso(at) if at is not None and state == "RELEASED" else None, ownership_id))
+
+    def strategy_history(self, account: str, owner: str, instrument: str) -> dict:
+        """전략·종목 거래 이력 원자료 (00 §2.2 거래 이력). 체결 0주로 끝난 진입은 진입으로 세지 않는다."""
+        lots = [dict(r) for r in self._x(
+            "SELECT * FROM ownership WHERE account=? AND instrument=? AND owner=? "
+            "AND NOT (state='RELEASED' AND released_reason='체결 0주 종결') ORDER BY created_at, rowid",
+            (account, instrument, owner))]
+        entry_at = None
+        active = next((o for o in lots if o["state"] in ("RESERVED", "CONFIRMED")), None)
+        if active is not None and active["intent_id"]:
+            r = self._x("SELECT MIN(f.at) FROM fill f JOIN broker_order b ON f.order_key=b.order_key "
+                        "WHERE b.intent_id=?", (active["intent_id"],)).fetchone()
+            entry_at = r[0] if r and r[0] else None
+        released = [o for o in lots if o["state"] == "RELEASED" and o["released_at"]]
+        last_exit_at = max((o["released_at"] for o in released), default=None)
+        reason = None
+        if last_exit_at is not None:
+            r = self._x("SELECT i.source, d.rule_id FROM intent i JOIN gate_decision d ON i.decision_id=d.decision_id "
+                        "WHERE i.account=? AND i.instrument=? AND i.side='SELL' AND i.filled_quantity<>'0' "
+                        "AND i.created_at<=? ORDER BY i.created_seq DESC LIMIT 1",
+                        (account, instrument, last_exit_at)).fetchone()
+            if r is not None:
+                reason = r["rule_id"] if r["source"] == "SIGNAL" and r["rule_id"] else r["source"]
+        return {"entry_at": entry_at, "last_exit_at": last_exit_at, "last_exit_reason": reason,
+                "entries": [o["created_at"] for o in lots]}
 
     # --- 한도 예약 ----------------------------------------------------------
     def insert_reservation(self, intent_id: str, account: str, instrument: str, amount: Decimal,
@@ -626,7 +658,10 @@ class Repository:
         return dict(r) if r else None
 
     def update_halt(self, halt_id: str, *, state: str | None = None, conditions: dict | None = None,
-                    released_at: datetime | None = None, released_by: str | None = None) -> None:
+                    released_at: datetime | None = None, released_by: str | None = None,
+                    variant: str | None = None) -> None:
+        if variant is not None:
+            self._x("UPDATE halt SET variant=? WHERE halt_id=?", (variant, halt_id))
         if state is not None:
             self._x("UPDATE halt SET state=? WHERE halt_id=?", (state, halt_id))
         if conditions is not None:

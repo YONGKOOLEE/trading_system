@@ -4,7 +4,9 @@
 - 쓰기 전에 마스킹한다(원문을 먼저 저장하지 않음):
   - 민감 키(계좌번호·토큰·앱키·시크릿·비밀번호 등)는 값 전체를 "***"로.
   - 등록된 비밀값(앱키·토큰 등 실제 값)은 어디에 나와도 "***"로.
-  - 계좌번호 형태(10자리 숫자, 8자리-2자리)는 "**********"로. 같은 자릿수의 금액도 가려질 수 있다(과잉 마스킹은 허용).
+  - 계좌번호 형태(8·10자리 숫자, 8-2·4-4-2·3-6-2자리)는 "*"로. 같은 자릿수의 금액·날짜도 가려질 수 있다(과잉 마스킹 허용).
+  - 문장 속 자격정보: `Bearer <값>`, URL 질의의 token·signature·apikey 등 값은 "***"로.
+- 파일 날짜는 KST 기준(거래일·일일 보고와 같은 날짜).
 - 주문 요청·응답 원문은 로그에 넣지 않는다(호출자 책임, 필요한 필드만).
 """
 
@@ -17,8 +19,13 @@ from collections.abc import Iterable, Mapping
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
-SENSITIVE_KEYS = re.compile(r"(acnt|account_?no|acct_?no|계좌번호|token|appkey|app_key|secret|password|passwd|pin)", re.I)
-ACCOUNT_LIKE = re.compile(r"(?<!\d)(\d{10}|\d{8}-\d{2})(?!\d)")
+from trading_system.domain.clock import KST
+
+SENSITIVE_KEYS = re.compile(r"(acnt|account_?no|acct_?no|계좌번호|token|app_?key|api_?key|secret|password|passwd|pin|"
+                            r"authorization|signature|listen_?key|cookie|credential)", re.I)
+ACCOUNT_LIKE = re.compile(r"(?<!\d)(\d{10}|\d{8}-\d{2}|\d{4}-\d{4}-\d{2}|\d{3}-\d{6}-\d{2}|\d{8})(?!\d)")
+INLINE_SECRET = re.compile(r"(?i)(bearer\s+)[^\s\"',;]+|((?:access_?token|token|signature|api_?key|listen_?key|secret|"
+                           r"appkey)=)[^&\s\"',;]+")
 MASK = "***"
 
 
@@ -29,6 +36,7 @@ class Masker:
     def text(self, s: str) -> str:
         for secret in self._secrets:
             s = s.replace(secret, MASK)
+        s = INLINE_SECRET.sub(lambda m: (m.group(1) or m.group(2)) + MASK, s)
         return ACCOUNT_LIKE.sub(lambda m: "*" * len(m.group(0)), s)
 
     def value(self, key: str, v: object) -> object:
@@ -60,7 +68,7 @@ class JsonLogger:
         record = {"at": now.isoformat()}
         record.update({str(k): self._masker.value(str(k), v) for k, v in event.items()})
         self._dir.mkdir(parents=True, exist_ok=True)
-        with self.path_for(now.date()).open("a", encoding="utf-8", newline="\n") as f:
+        with self.path_for(now.astimezone(KST).date()).open("a", encoding="utf-8", newline="\n") as f:
             f.write(json.dumps(record, ensure_ascii=False, default=lambda o: self._masker.text(str(o))) + "\n")
 
 

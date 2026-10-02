@@ -263,7 +263,7 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
                         or repo.active_new_intents(ACCOUNT, inst, Side.SELL.value))
 
         snap = store.snapshot(ev_id, "M1", ACCOUNT, clock.now(), base, sorted(cfg.data), pos_view, pending,
-                              next_eval)
+                              next_eval, history=lambda inst: repo.strategy_history(ACCOUNT, spec.owner, inst))
         result = run_evaluation(cfg.strategy, snap, cfg.params)
         for s in result.signals:
             signals.append(s.signal_id)
@@ -402,12 +402,25 @@ def perturbation_check(cfg: BacktestConfig, check_days: list[date]) -> list[str]
         r = run_evaluation(cfg.strategy, snap, cfg.params)
         return [(s.signal_id, s.kind.value, s.instrument, str(s.quantity), str(s.price)) for s in r.signals]
 
+    def factor(inst: str, d: date) -> Decimal:
+        # 종목·날짜마다 다른 결정적 배율(0.50~1.99). 균일 배율은 미래 봉끼리의 비율을 보존해 누출을 놓친다
+        h = hashlib.sha256(f"{inst}|{d.isoformat()}".encode()).digest()
+        return Decimal(50 + int.from_bytes(h[:2], "big") % 150) / 100
+
+    def scaled(r: RawDaily, f: Decimal, vf: Decimal) -> RawDaily:
+        return RawDaily(r.day, r.open * f, r.high * f, r.low * f, r.close * f, r.volume * vf, r.corporate_action)
+
     bad: list[str] = []
     for day in check_days:
-        perturbed = {inst: [RawDaily(r.day, r.open * 3, r.high * 3, r.low * 3, r.close * 3, r.volume * 3,
-                                     r.corporate_action) if r.day >= day else r for r in raw]
-                     for inst, raw in cfg.data.items()}
-        if signals_at(cfg.data, day) != signals_at(perturbed, day):
+        base = signals_at(cfg.data, day)
+        variants = (
+            {inst: [scaled(r, Decimal(3), Decimal(3)) if r.day >= day else r for r in raw]   # 균일 배율
+             for inst, raw in cfg.data.items()},
+            {inst: [scaled(r, factor(inst, r.day), 2 - factor(inst, r.day) + Decimal("0.5")) if r.day >= day else r
+                    for r in raw] for inst, raw in cfg.data.items()},                            # 봉마다 다른 배율
+            {inst: [r for r in raw if r.day < day] for inst, raw in cfg.data.items()},       # 미래 봉 제거
+        )
+        if any(signals_at(v, day) != base for v in variants):
             bad.append(day.isoformat())
     return bad
 
@@ -463,6 +476,8 @@ def render_report(cfg: BacktestConfig, result: BacktestResult, *, settings_hash:
         "- 생존편향: 상장폐지 종목 데이터 확보 여부 미확인(04 §2.1). U-A 고정 목록은 목록 작성 시점 이전 구간이 사후 선택.",
         "- 거래 상태(VI·거래정지) 이력 미반영: 그날 봉이 없으면 체결 없음으로만 처리.",
         "- 모의·실전 체결 차이는 PAPER에서 확인.",
+        "- 일일 손실(K2)은 판정 시각에 한 번만 평가: 장중 손실로 K2가 걸려 이후 주문이 막히는 경우는 재현하지 않음(DP-6).",
+        "- 판정 시각(기본 09:05) 주문을 그날 시가로 체결: 09:00~판정 시각 사이 가격 변동을 무시(DP-7).",
         "",
         "## 판정 (04 §2.7 v0.5 — 실행 기록, 성과 기준 아님)",
         f"- 오류 없이 완료: {'예' if ok_run else '아니오'}",

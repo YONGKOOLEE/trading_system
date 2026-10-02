@@ -66,6 +66,15 @@ def parse_calendar(raw: dict, expected_year: int | None = None) -> YearCalendar:
         except (KeyError, TypeError, MarketDataError) as exc:
             problems.append(f"special_sessions: {exc}")
             continue
+        # 문자열 날짜는 조회 때 date와 맞지 않아 조용히 무시된다 — 시작 시 거부
+        if not isinstance(d, date) or isinstance(d, datetime):
+            problems.append(f"special_sessions: 날짜 형식이 아님 ({d!r}) — TOML 날짜(따옴표 없이)로")
+            continue
+        if isinstance(year, int) and d.year != year:
+            problems.append(f"special_sessions: 다른 연도 날짜 {d}")
+            continue
+        if d in holidays or d.weekday() >= 5:
+            problems.append(f"special_sessions {d}: 휴장일·주말에는 개장 시간 변경을 둘 수 없음")
         if not o < c:
             problems.append(f"special_sessions {d}: 시작 < 종료")
         special[d] = (o, c)

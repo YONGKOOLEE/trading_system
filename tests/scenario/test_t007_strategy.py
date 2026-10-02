@@ -204,6 +204,11 @@ def test_v83_stopped_and_retired_reject_entries(env: Env) -> None:
     reg.transition("t-cross", 1, StrategyState.PAPER, "A-904")
     assert "K9" not in env.repo.active_halts(ACCOUNT)
     assert run(env, sig(spec, RequestType.ENTRY, "TST-B", ev="d")).result is GateResult.APPROVED
+    # 묶음 B 검토 B-10(2026-10-03): 소유 보유가 남은 전략은 폐기하지 않는다 → 청산 후 폐기로 시험 변경
+    with pytest.raises(ValueError, match="소유"):
+        reg.transition("t-cross", 1, StrategyState.RETIRED, "A-905")
+    for inst, ev in (("TST-A", "xa"), ("TST-B", "xb")):
+        assert run(env, sig(spec, RequestType.EXIT, inst, ev=ev)).result is GateResult.APPROVED
     reg.transition("t-cross", 1, StrategyState.RETIRED, "A-905")
     assert env.gate.decide(sig(spec, RequestType.ENTRY, "TST-C", ev="e")).result is GateResult.REJECTED
 

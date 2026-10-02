@@ -397,9 +397,9 @@ class Executor:
         pos = self._repo.position(intent.account, intent.instrument)
         filled = self._repo.intent(intent.intent_id).filled_quantity
         if own.state == "RESERVED" and own.intent_id == intent.intent_id and filled == 0:
-            self._repo.set_ownership_state(own.ownership_id, "RELEASED", "체결 0주 종결")
+            self._repo.set_ownership_state(own.ownership_id, "RELEASED", "체결 0주 종결", self._clock.now())
         elif own.state == "CONFIRMED" and pos.quantity == 0 and not self._repo.active_new_intents(
                 intent.account, intent.instrument, Side.SELL.value) and not self._repo.active_new_intents(
                 intent.account, intent.instrument, Side.BUY.value) and not self._repo.unknown_intents(
                 intent.account, intent.instrument):  # 미체결 증액이 남아 있으면 해제하지 않음 (CP-018 R-6)
-            self._repo.set_ownership_state(own.ownership_id, "RELEASED", "전량 청산")
+            self._repo.set_ownership_state(own.ownership_id, "RELEASED", "전량 청산", self._clock.now())

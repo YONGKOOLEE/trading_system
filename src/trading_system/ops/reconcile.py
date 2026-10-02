@@ -33,6 +33,9 @@ class ResolveError(ValueError):
     pass
 
 
+_NOT_APPLIED = "NOT_APPLIED"
+
+
 class ReconcileResolver:
     def __init__(self, repo: Repository, executor: Executor, clock: Clock) -> None:
         self._repo = repo
@@ -49,9 +52,15 @@ class ReconcileResolver:
         with self._repo.tx():
             now = self._clock.now()
             note = self._apply(item, method, detail)
-            self._repo.resolve_recon_item(item_id, method, actor, now)
-            self._repo.audit(now, "RECONCILE_RESOLVE", actor, item_id,
-                             {"kind": item["kind"], "method": method, "note": note})
+            if note is _NOT_APPLIED:
+                self._repo.audit(now, "RECONCILE_RESOLVE_FAILED", actor, item_id,
+                                 {"kind": item["kind"], "method": method})
+            else:
+                self._repo.resolve_recon_item(item_id, method, actor, now)
+                self._repo.audit(now, "RECONCILE_RESOLVE", actor, item_id,
+                                 {"kind": item["kind"], "method": method, "note": note})
+        if note is _NOT_APPLIED:
+            raise ResolveError("체결이 반영되지 않음(이상 통보로 거부) — 감사 기록 확인 후 BROKER_ACTION")
         return note
 
     def _apply(self, item: dict, method: str, detail: dict) -> str:
@@ -60,6 +69,12 @@ class ReconcileResolver:
             return "사람이 증권사에서 조치 — 재대조로 확인"
         if item["kind"] == "QTY_MISMATCH":
             internal, broker = Decimal(item["internal_value"]), Decimal(item["broker_value"])
+            if any(i["kind"] == "MISSING_FILL" and i["instrument"] == inst
+                   for i in self._repo.open_recon_items(account)):
+                raise ResolveError("같은 종목에 누락 체결 항목이 열려 있음 — APPLY_FILL로 먼저 반영 후 재대조")
+            if self._repo.position(account, inst).quantity != internal:
+                # 대조 뒤에 체결 등으로 원장이 바뀌었다. 브로커 값으로 덮으면 그 사이 체결이 사라진다
+                raise ResolveError("대조 이후 내부 보유가 바뀜 — 재대조 후 새 항목으로 해소 (이 항목은 BROKER_ACTION)")
             own = self._repo.active_ownership(account, inst)
             if broker > internal and own is not None and own.owner != MANUAL_OWNER:
                 raise ResolveError("전략 소유 종목에 외부 매수가 섞임 — 증권사에서 정리 후 BROKER_ACTION")
@@ -71,7 +86,7 @@ class ReconcileResolver:
                 assert new_own is not None
                 self._repo.set_ownership_state(new_own.ownership_id, "CONFIRMED", None)
             elif broker == 0 and own is not None:
-                self._repo.set_ownership_state(own.ownership_id, "RELEASED", "외부 거래로 보유 0")
+                self._repo.set_ownership_state(own.ownership_id, "RELEASED", "외부 거래로 보유 0", self._clock.now())
             return f"내부 보유 {internal} → {broker} (외부 거래 반영, 평균단가 미상이면 유지)"
         if item["kind"] == "UNKNOWN_BROKER_ORDER":
             side = detail.get("side")
@@ -79,8 +94,12 @@ class ReconcileResolver:
                 raise ResolveError("같은 종목·방향에 결과 불명 의도가 있음 — 우리 주문일 수 있으니 결과 불명부터 확정 (K3)")
             # 외부 주문으로 기록해 다음 대조에서 다시 "미확인"으로 잡히지 않게 한다. 의도·포지션은 바꾸지 않는다
             # (체결분은 수량 대조 항목으로 따로 해소)
+            # 발견한 거래일로 기록한다. 해소일로 적으면 다음 날 같은 주문번호의 우리 주문과 충돌한다 (D-046)
+            at = from_iso(detail["detected_at"]) if detail.get("detected_at") else self._clock.now()
+            if self._repo.broker_order_by_no(item["ref"], self._repo.trade_date_of(at), account) is not None:
+                return "이미 기록된 주문 — 원장 변경 없음"
             self._repo.insert_broker_order(
-                account=account, order_no=item["ref"], at=self._clock.now(), intent_id=None, instrument=inst,
+                account=account, order_no=item["ref"], at=at, intent_id=None, instrument=inst,
                 side=detail.get("side", "BUY"), quantity=Decimal(detail.get("quantity", "0")), origin="EXTERNAL")
             return "외부 주문으로 인정 — 원장 변경 없음(체결분은 수량 대조로 반영)"
         if item["kind"] == "MISSING_FILL":
@@ -91,6 +110,8 @@ class ReconcileResolver:
                 kind="FILL", order_no=order.order_no, fill_id=detail["fill_id"],
                 quantity=Decimal(detail["quantity"]), price=Decimal(detail["price"]), at=from_iso(detail["at"]),
                 account=account, trade_date=detail["order_key"].split("|")[1]))
+            if not self._repo.fill_exists(order.order_key, detail["fill_id"]):
+                return _NOT_APPLIED  # 이상 통보로 거부됨. 이상 기록(감사·K4)은 남기고 항목은 열어 둔다
             return "누락 체결 반영"
         order = self._repo.broker_order(detail["order_key"])
         if order is None or order.state not in ("ACCEPTED", "PARTIAL"):

@@ -160,6 +160,12 @@ class StrategyRegistry:
                 parsed = validate_params(spec, params)
             except ConfigError as exc:
                 problems = list(exc.problems)
+        if not problems:
+            prior = self._repo.latest_registration(spec.strategy_id, spec.version)
+            if prior is not None and (prior["spec_hash"] != spec.spec_hash() or
+                                      prior["params_hash"] != params_hash(parsed)):
+                # 같은 ID·버전은 같은 명세·파라미터여야 한다. 바꾸려면 버전을 올려 새로 등록·승인 (D-011)
+                problems = [f"버전 {spec.version}은 다른 명세·파라미터로 이미 등록됨 — 버전을 올려 새로 등록 (D-011)"]
         with self._repo.tx():
             now = self._clock.now()
             reg_id = self._repo.insert_strategy_registration({
@@ -204,6 +210,9 @@ class StrategyRegistry:
                 raise ValueError("PAPER·LIVE 대상 등록 검증(능력 '지원')을 통과한 기록이 없다 (D-004)")
 
         owner = f"{strategy_id}:{version}"
+        if to_state is StrategyState.RETIRED and self._repo.active_ownerships_of(owner):
+            # 폐기된 전략은 신호를 못 내므로 보유가 고아가 된다. 청산(또는 사람 정리) 후 폐기 (D-011 소유권 미승계)
+            raise ValueError("이 전략 소유 보유·예약이 남아 있음 — 청산 후 폐기")
         prev = row["prev_state"]
         if to_state is StrategyState.STOPPED:
             prev = current.value
@@ -229,7 +238,7 @@ class StrategyRegistry:
         if to is StrategyState.STOPPED:
             self._halts.activate(HaltType.K9, actor, f"전략 중지 ({reason.value if reason else ''})", None,
                                  owner=owner, variant=(reason or StopReason.USER).value)
-        elif to is StrategyState.RETIRED and frm is not StrategyState.STOPPED:
+        elif to is StrategyState.RETIRED:  # 교체 중지였어도 폐기는 사용자 판단 행으로 바꾼다
             self._halts.activate(HaltType.K9, actor, "전략 폐기", None, owner=owner, variant=StopReason.USER.value)
         elif frm is StrategyState.STOPPED and to is not StrategyState.RETIRED:
             self._halts.report_condition(HaltType.K9, None, "strategy_resumed", True, f"상태 전이 → {to.value}",

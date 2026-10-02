@@ -94,27 +94,27 @@ def _db(tmp_path: Path) -> Path:
 
 def test_migration_forward_with_backup(tmp_path: Path) -> None:
     p = _db(tmp_path)
-    applied = migrate(p, tmp_path / "bk", {1: "CREATE TABLE extra(a TEXT); ALTER TABLE halt ADD COLUMN note TEXT"},
-                      target=2)
-    assert applied == [2] and schema_version_of(p) == "2"
+    applied = migrate(p, tmp_path / "bk", {2: ["CREATE TABLE extra(a TEXT)", "ALTER TABLE halt ADD COLUMN note TEXT"]},
+                      target=3)
+    assert applied == [3] and schema_version_of(p) == "3"
     assert list((tmp_path / "bk").glob("trading-*.db"))  # 적용 전 백업
     with pytest.raises(SchemaMismatch):
-        Repository(p, Mode.BACKTEST)  # 코드(1)와 DB(2) 버전이 다르면 열지 않음
+        Repository(p, Mode.BACKTEST)  # 코드(2)와 DB(3) 버전이 다르면 열지 않음
 
 
 def test_migration_failure_rolls_back_and_refuses_bad_paths(tmp_path: Path) -> None:
     p = _db(tmp_path)
     with pytest.raises(MaintenanceError, match="롤백"):
-        migrate(p, tmp_path / "bk", {1: "CREATE TABLE ok1(a); THIS IS NOT SQL"}, target=2)
-    assert schema_version_of(p) == "1"
+        migrate(p, tmp_path / "bk", {2: ["CREATE TABLE ok1(a)", "THIS IS NOT SQL"]}, target=3)
+    assert schema_version_of(p) == "2"
     conn = sqlite3.connect(p)
     assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='ok1'").fetchone()[0] == 0
     conn.close()
     with pytest.raises(MaintenanceError, match="단계 없음"):
-        migrate(p, tmp_path / "bk", {}, target=2)
-    assert migrate(p, tmp_path / "bk", {}, target=1) == []
+        migrate(p, tmp_path / "bk", {}, target=3)
+    assert migrate(p, tmp_path / "bk", {}, target=2) == []
     with pytest.raises(MaintenanceError, match="높음"):
-        migrate(p, tmp_path / "bk", {}, target=0)
+        migrate(p, tmp_path / "bk", {}, target=1)
 
 
 def test_older_schema_refused_with_guidance(tmp_path: Path) -> None:
