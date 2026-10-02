@@ -122,6 +122,7 @@ class BrokerOrderState(StrEnum):
     CANCELLED = "CANCELLED"
     EXPIRED = "EXPIRED"
     REJECTED = "REJECTED"
+    MODIFIED = "MODIFIED"  # 정정되어 잔량이 새 주문으로 옮겨 감 (종결)
 
 
 class HaltType(StrEnum):

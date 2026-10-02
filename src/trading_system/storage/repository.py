@@ -326,6 +326,14 @@ class Repository:
                "AND request_type IN ('CANCEL','MODIFY')")
         return [self._intent(r) for r in self._x(sql, (target_order_key,))]
 
+    def intents_in_state(self, state: IntentState) -> list[IntentRow]:
+        return [self._intent(r) for r in self._x("SELECT * FROM intent WHERE state=? ORDER BY created_seq",
+                                                 (state.value,))]
+
+    def set_intent_terms(self, intent_id: str, quantity: Decimal, price: Decimal) -> None:
+        """정정 확인 시 의도의 수량·가격을 정정 후 조건으로 바꾼다 (체결 누계는 유지)."""
+        self._x("UPDATE intent SET quantity=?, price=? WHERE intent_id=?", (str(quantity), str(price), intent_id))
+
     def unknown_intents(self, account: str, instrument: str) -> list[IntentRow]:
         """결과 불명 의도 (01 D-018, INV-02)."""
         return [self._intent(r) for r in self._x(
@@ -360,6 +368,18 @@ class Repository:
         self._x("INSERT INTO attempt(attempt_id, mode, intent_id, state, created_at, created_seq) VALUES(?,?,?,?,?,?)",
                 (attempt_id, self.mode.value, intent_id, "AWAITING_RESPONSE", to_iso(at), self.next_seq()))
         return attempt_id
+
+    def attempts_awaiting_response(self) -> list[dict]:
+        return [dict(r) for r in self._x("SELECT * FROM attempt WHERE state='AWAITING_RESPONSE' ORDER BY created_seq")]
+
+    def attempt_for(self, intent_id: str) -> dict | None:
+        r = self._x("SELECT * FROM attempt WHERE intent_id=?", (intent_id,)).fetchone()
+        return dict(r) if r else None
+
+    def recent_attempt_results(self, n: int) -> list[tuple[str, str | None]]:
+        """최근 응답 확정된 전송 시도 n개의 (결과, 사유), 최신 순."""
+        return [(r["outcome"], r["reason"]) for r in self._x(
+            "SELECT outcome, reason FROM attempt WHERE outcome IS NOT NULL ORDER BY created_seq DESC LIMIT ?", (n,))]
 
     def finish_attempt(self, attempt_id: str, state: str, outcome: str, reason: str | None, at: datetime) -> None:
         self._x("UPDATE attempt SET state=?, outcome=?, reason=?, result_at=? WHERE attempt_id=?",
@@ -397,7 +417,8 @@ class Repository:
         return self._order(r) if r else None
 
     def open_orders(self, account: str, side: str | None = None) -> list[BrokerOrderRow]:
-        sql = "SELECT * FROM broker_order WHERE account=? AND state IN ('ACCEPTED','PARTIAL') AND origin='INTERNAL_NEW'"
+        sql = ("SELECT * FROM broker_order WHERE account=? AND state IN ('ACCEPTED','PARTIAL') "
+               "AND origin IN ('INTERNAL_NEW','INTERNAL_MODIFY')")
         params: tuple = (account,)
         if side:
             sql += " AND side=?"
@@ -468,6 +489,17 @@ class Repository:
 
     def consume_reservation(self, reservation_id: str, consumed: Decimal) -> None:
         self._x("UPDATE reservation SET consumed=? WHERE reservation_id=?", (str(consumed), reservation_id))
+
+    def add_to_reservation(self, reservation_id: str, amount: Decimal, cash_amount: Decimal) -> None:
+        r = self._x("SELECT amount, cash_amount FROM reservation WHERE reservation_id=?", (reservation_id,)).fetchone()
+        self._x("UPDATE reservation SET amount=?, cash_amount=? WHERE reservation_id=?",
+                (str(Decimal(r["amount"]) + amount), str(Decimal(r["cash_amount"]) + cash_amount), reservation_id))
+
+    def known_order_nos(self, account: str) -> set[str]:
+        return {r["order_no"] for r in self._x("SELECT order_no FROM broker_order WHERE account=?", (account,))}
+
+    def audit_count_since(self, kind: str, since: str) -> int:
+        return int(self._x("SELECT COUNT(*) FROM audit_event WHERE kind=? AND at>=?", (kind, since)).fetchone()[0])
 
     def release_reservation(self, reservation_id: str) -> None:
         self._x("UPDATE reservation SET state='RELEASED' WHERE reservation_id=?", (reservation_id,))

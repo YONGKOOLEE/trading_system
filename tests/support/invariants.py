@@ -1,11 +1,13 @@
 """불변 조건 검사기 (02-data-model §6, 04 D-069).
 
 모든 시나리오 테스트가 끝날 때 실행한다. 위반 목록을 문자열로 돌려준다.
-T-001 범위: INV-01·03·04·05·06·07·08·09·10·12·15·17, T-002: INV-14. 나머지는 해당 작업에서 추가한다.
+T-001 범위: INV-01·03·04·05·06·07·08·09·10·12·15·17, T-002: INV-14, T-004: INV-02·11 (감사 이력 재생).
+INV-13(전략 상태 전이 승인)은 T-007, INV-16(수동 소유 종목)은 T-008에서 추가한다.
 """
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import time as dtime
 from decimal import Decimal
@@ -108,9 +110,47 @@ def check_invariants(conn: sqlite3.Connection, mode: str) -> list[str]:
                              GROUP BY account, instrument, side HAVING c > 1"""):
         v.append(f"INV-15 활성 새 주문 {r['c']}개 {r['account']}/{r['instrument']}/{r['side']}")
 
+    v.extend(_replay_intent_states(conn))
+
     # INV-17 대상 주문당 활성 취소·정정 의도 최대 1
     for r in _rows(conn, f"""SELECT target_order_key, COUNT(*) c FROM intent
                              WHERE request_type IN ('CANCEL','MODIFY') AND state IN ({act})
                              GROUP BY target_order_key HAVING c > 1"""):
         v.append(f"INV-17 활성 취소·정정 {r['c']}개 {r['target_order_key']}")
+    return v
+
+
+TERMINAL = {"FILLED", "CANCELLED", "EXPIRED", "REJECTED", "NOT_SENT", "NOT_ACCEPTED", "DONE"}
+
+
+def _replay_intent_states(conn: sqlite3.Connection) -> list[str]:
+    """감사 이벤트의 의도 상태 기록을 순서대로 재생해 INV-02·INV-11을 검사한다."""
+    v: list[str] = []
+    meta = {r["intent_id"]: r for r in _rows(conn, "SELECT intent_id, account, instrument, side, request_type FROM intent")}
+    state: dict[str, str] = {}
+    for e in _rows(conn, "SELECT seq, ref, summary FROM audit_event WHERE kind = 'INTENT_STATE' ORDER BY seq"):
+        iid, new = e["ref"], json.loads(e["summary"])["state"]
+        m = meta.get(iid)
+        if m is None:
+            v.append(f"감사 기록의 의도가 없음 {iid}")
+            continue
+        old = state.get(iid)
+        # INV-11 종결 상태 의도는 다시 열리지 않는다
+        if old in TERMINAL:
+            v.append(f"INV-11 종결 후 상태 변경 {iid} {old}→{new} (seq {e['seq']})")
+        if old is None and new == "PENDING_SEND":
+            # INV-02 결과 불명이 있는 종목에는 위험 확대 의도를 만들 수 없다. 결과 불명 매도가 있으면 매도도 불가
+            unknown = [o for o, s in state.items() if s == "UNKNOWN" and o != iid
+                       and meta[o]["account"] == m["account"] and meta[o]["instrument"] == m["instrument"]]
+            rt, side = m["request_type"], m["side"]
+            increasing = rt in ("ENTRY", "INCREASE") or (rt == "MODIFY" and side == "BUY")
+            if unknown and increasing:
+                v.append(f"INV-02 결과 불명 중 위험 확대 의도 {iid}")
+            if side == "SELL" and rt in NEW_ORDER_TYPES and any(
+                    meta[o]["side"] == "SELL" and meta[o]["request_type"] in NEW_ORDER_TYPES for o in unknown):
+                v.append(f"INV-02 결과 불명 매도 중 매도 의도 {iid}")
+        state[iid] = new
+    for iid in meta:
+        if iid not in state:
+            v.append(f"상태 감사 기록 없는 의도 {iid}")
     return v

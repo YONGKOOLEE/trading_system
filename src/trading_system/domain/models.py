@@ -150,7 +150,7 @@ class GateDecision:
 class OrderRequest:
     """브로커 어댑터 입력."""
 
-    kind: str  # NEW / CANCEL
+    kind: str  # NEW / CANCEL / MODIFY
     account: str
     instrument: str
     side: str
@@ -169,7 +169,10 @@ class SubmitResult:
 
 @dataclass(frozen=True)
 class OrderEvent:
-    """브로커 통보 (정규화). kind: FILL / CANCELLED / REJECTED."""
+    """브로커 통보 (정규화). kind: FILL / CANCELLED / REJECTED / EXPIRED / MODIFIED.
+
+    MODIFIED: 원주문(order_no)이 정정되어 잔량이 새 주문(new_order_no)으로 옮겨 갔다 (키움: 정정 시 새 주문번호).
+    """
 
     kind: str
     order_no: str
@@ -177,3 +180,35 @@ class OrderEvent:
     quantity: Decimal = Decimal("0")
     price: Decimal = Decimal("0")
     at: datetime | None = None
+    new_order_no: str | None = None
+
+
+@dataclass(frozen=True)
+class BrokerOrderRecord:
+    """브로커 조회의 주문 한 건 (정규화, 계좌번호 없음). kt00009·ka10075 대응 (03 §6.3).
+
+    kind: NEW / CANCEL / MODIFY. state: ACCEPTED / PARTIAL / FILLED / CANCELLED / EXPIRED / REJECTED / MODIFIED
+    (취소 주문 자체는 CONFIRMED. 정정 주문은 잔량을 이어받은 새 주문이다).
+    """
+
+    order_no: str
+    kind: str
+    instrument: str
+    side: str
+    quantity: Decimal
+    filled_quantity: Decimal
+    price: Decimal
+    order_type: OrderType
+    state: str
+    original_order_no: str | None = None
+
+
+@dataclass(frozen=True)
+class FillRecord:
+    """브로커 조회의 체결 한 건 (정규화). 체결번호가 있어야 중복 없이 반영할 수 있다."""
+
+    order_no: str
+    fill_id: str
+    quantity: Decimal
+    price: Decimal
+    at: datetime

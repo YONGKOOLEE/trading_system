@@ -79,3 +79,48 @@ def test_detects_negative_position(tmp_path: Path) -> None:
     repo.connection.execute("INSERT INTO position VALUES('A','X','BACKTEST','-1','0')")
     assert any(v.startswith("INV-04") for v in check_invariants(repo.connection, "BACKTEST"))
     repo.close()
+
+
+def _intent_with_history(repo: Repository, iid: str, rt: str, side: str, states: list[str], seq: int) -> None:
+    c = repo.connection
+    c.execute("PRAGMA foreign_keys=OFF")
+    c.execute("""INSERT INTO gate_decision(decision_id, mode, created_at, seq, source, request_type, account, instrument,
+                 side, quantity, price, idem_key, result, checks) VALUES(?, 'BACKTEST','t',?, 'SIGNAL',?,'A','X',?,
+                 '1','1',?, 'APPROVED','[]')""", (f"d-{iid}", seq, rt, side, f"k-{iid}"))
+    c.execute("""INSERT INTO intent(intent_id, mode, decision_id, idem_key, source, request_type, account, instrument,
+                 side, quantity, order_type, price, state, filled_quantity, created_at, created_seq)
+                 VALUES(?, 'BACKTEST', ?, ?, 'SIGNAL', ?, 'A', 'X', ?, '1', 'MARKET', '1', ?, '0', 't', ?)""",
+              (iid, f"d-{iid}", f"k-{iid}", rt, side, states[-1], seq))
+
+
+def _state_event(repo: Repository, iid: str, st: str) -> None:
+    repo.connection.execute("INSERT INTO audit_event(mode, at, kind, actor, ref, summary) VALUES"
+                            "('BACKTEST','t','INTENT_STATE','x',?,?)", (iid, f'{{"state": "{st}"}}'))
+
+
+def test_inv02_detects_risk_increase_created_while_unknown(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _intent_with_history(repo, "i1", "ENTRY", "BUY", ["UNKNOWN"], 1)
+    _intent_with_history(repo, "i2", "INCREASE", "BUY", ["PENDING_SEND"], 2)
+    for iid, st in [("i1", "PENDING_SEND"), ("i1", "SENT"), ("i1", "UNKNOWN"), ("i2", "PENDING_SEND")]:
+        _state_event(repo, iid, st)
+    assert any(v.startswith("INV-02") for v in check_invariants(repo.connection, "BACKTEST"))
+    repo.close()
+
+
+def test_inv11_detects_reopened_terminal_intent(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _intent_with_history(repo, "i1", "ENTRY", "BUY", ["ACCEPTED"], 1)
+    for st in ["PENDING_SEND", "SENT", "REJECTED", "ACCEPTED"]:
+        _state_event(repo, "i1", st)
+    assert any(v.startswith("INV-11") for v in check_invariants(repo.connection, "BACKTEST"))
+    repo.close()
+
+
+def test_replay_accepts_normal_history(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _intent_with_history(repo, "i1", "ENTRY", "BUY", ["FILLED"], 1)
+    for st in ["PENDING_SEND", "SENT", "ACCEPTED", "FILLED"]:
+        _state_event(repo, "i1", st)
+    assert check_invariants(repo.connection, "BACKTEST") == []
+    repo.close()

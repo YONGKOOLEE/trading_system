@@ -17,7 +17,7 @@ from tests.support.gate_fakes import TEST_POLICY, scenario_limits
 from trading_system.broker.fake.broker import FakeBehavior
 from trading_system.config.versioning import ChangeSource, SettingsManager
 from trading_system.domain.enums import (
-    Check, GateResult, IntentState, OrderType, RequestSource, RequestType, Side,
+    Check, GateResult, OrderType, RequestSource, RequestType, Side,
 )
 from trading_system.domain.market import (
     CashView, CostRates, DailyRisk, InstrumentKind, SessionInfo, TradingStatus, estimate_cost,
@@ -494,14 +494,6 @@ def test_modify_buy_rechecks_limits_with_worst_case(env: Env) -> None:
     assert d.result is GateResult.APPROVED
     added = env.repo.reservation_for(d.approved.intent_id)
     assert added is not None and added.amount == Decimal("450000")  # 원주문보다 커지는 만큼만 추가 예약
-
-
-def test_modify_is_not_sent_until_t004(env: Env) -> None:
-    key = _open_buy(env)
-    d = env.gate.decide(_modify(key, "100", "9995"))
-    sent = len(env.broker.sent)
-    assert env.executor.submit(d.approved) is IntentState.NOT_SENT
-    assert len(env.broker.sent) == sent
 
 
 def test_modify_side_must_match_target(env: Env) -> None:
