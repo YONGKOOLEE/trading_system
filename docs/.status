@@ -1,17 +1,17 @@
 # 보조 기록 — 승인 근거가 아니다. 승인 근거는 docs/approvals.md.
 # 이 파일과 approvals.md가 충돌하면 진행하지 말고 사용자에게 확인한다.
-current_stage: 6            # 구현 — 검토 반영 완료(A-024), 다음 T-003. 인계: docs/handoff.md
+current_stage: 6            # 구현 — 묶음 A(T-003~T-006) 완료(A-026), CP-018 승인·반영(A-028·A-029), 무인 진행 A-030: 묶음 B → C(오프라인) → T-020 → T-021. 인계: docs/handoff.md
 delivery: M1                # 국내주식·ETF (키움 모의)
-business_definition: v0.5 approved   # 근거: A-012 (v0.4·v0.3 superseded)
+business_definition: v0.6 approved   # 근거: A-029 (v0.5·v0.4·v0.3 superseded)
 gates:
-  strategy: approved         # 00-strategy.md v0.3, A-005
-  requirements: approved     # 01-requirements.md v0.4, A-012 (v0.3 A-006 superseded)
-  data-model: approved       # 02-data-model.md v0.5, A-024
-  design: approved           # 03-design.md v0.3, A-024
-  validation: approved       # 04-validation.md v0.3, A-024
-  plan: approved             # 05-plan.md v0.2, A-017
+  strategy: approved         # 00-strategy.md v0.4, A-029
+  requirements: approved     # 01-requirements.md v0.5, A-029
+  data-model: approved       # 02-data-model.md v0.7, A-029
+  design: approved           # 03-design.md v0.5, A-029
+  validation: approved       # 04-validation.md v0.5, A-029
+  plan: approved             # 05-plan.md v0.4, A-029
 implementation_start: authorized   # A-022 (2026-10-01)
 live_order_code: not-authorized
 live_run: not-authorized    # 시장별: M1/M2/M3 모두 없음
-commit_policy: D-082 (A-017)   # 작업 완료·테스트 통과 시 로컬 커밋, push·main 병합은 지시 시
-last_updated: 2026-10-01
+commit_policy: D-082 (A-017) + A-030   # 작업 완료·테스트 통과 시 로컬 커밋(문서 포함, A-030), push·main 병합은 지시 시
+last_updated: 2026-10-02
