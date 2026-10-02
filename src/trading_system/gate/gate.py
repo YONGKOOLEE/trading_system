@@ -141,6 +141,11 @@ class Gate:
             raise _Reject(Check.G3, "취소·정정 대상 주문이 없음")
         if req.valid_until is not None and ctx.now > req.valid_until:
             raise _Reject(Check.G3, "신호 유효 기한 만료")
+        if req.stop_price is not None:
+            if rt not in (RequestType.ENTRY, RequestType.INCREASE):
+                raise _Reject(Check.G3, "손절가는 진입·증액 신호에만 쓸 수 있음 (00 §2.5)")
+            if req.stop_price <= 0 or req.stop_price >= req.price:
+                raise _Reject(Check.G3, f"손절가 형식 오류: 진입 기준가({req.price})보다 낮은 양수여야 함")
 
     def _g4_duplicate(self, ctx: _Ctx) -> None:
         req = ctx.req
@@ -212,7 +217,8 @@ class Gate:
         if not daily.evaluable:
             raise _Reject(Check.G7, "평가 불능 (시세 신선도 초과, 01 §2.4)")
         base = daily.base_amount
-        notional = req.quantity * self._reserve_price(ctx)  # 시세가 없으면 여기서 G11로 거부
+        reserve_price = self._reserve_price(ctx)  # 시세가 없으면 여기서 G11로 거부
+        notional = req.quantity * reserve_price
         info = self._info(req.instrument, Check.G7)
         exposure_new = notional * info.exposure_multiplier
         cash_new = notional + estimate_cost(notional, False, self._policy.cost_rates)
@@ -253,9 +259,15 @@ class Gate:
                  total_after=str(total + ctx.exposure_add), total_limit=str(base * lim.l3_max_total_ratio),
                  loss_ratio=str(daily.loss_ratio))
 
-        # L1 1회 최대 손실: 손절 규칙이 없으면 주문 금액 전체 × |배수| (01 D-020)
-        if exposure_new > base * lim.l1_max_loss_ratio:
-            raise _Reject(Check.G7, f"L1 1회 최대 손실 초과 ({exposure_new} > {base * lim.l1_max_loss_ratio})")
+        # L1 1회 최대 손실: 손절가가 있으면 (진입 기준가 − 손절가) × 수량 × |배수|, 없으면 주문 금액 전체 × |배수|
+        # 진입 기준가 = 예약 가격(지정가는 주문가, 시장가는 상한가) (01 L1·D-020 v0.5)
+        if req.stop_price is not None:
+            order_risk = max(_ZERO, reserve_price - req.stop_price) * req.quantity * info.exposure_multiplier
+        else:
+            order_risk = exposure_new
+        s["order_risk"] = str(order_risk)
+        if order_risk > base * lim.l1_max_loss_ratio:
+            raise _Reject(Check.G7, f"L1 1회 최대 손실 초과 ({order_risk} > {base * lim.l1_max_loss_ratio})")
         if symbol + ctx.exposure_add > base * lim.l2_max_symbol_ratio:
             raise _Reject(Check.G7, f"L2 종목 비중 한도 초과 ({s['symbol_after']} > {s['symbol_limit']})")
         if total + ctx.exposure_add > base * lim.l3_max_total_ratio:
@@ -279,6 +291,40 @@ class Gate:
             cap = base * lim.l10_leverage_total_ratio
             if leveraged + ctx.exposure_add > cap:
                 raise _Reject(Check.G7, f"L10 레버리지 상품 총 노출 초과 ({leveraged + ctx.exposure_add} > {cap})")
+        if req.source is RequestSource.SIGNAL and req.owner:
+            self._strategy_limits(ctx, base, order_risk, symbol, notional)
+
+    def _strategy_limits(self, ctx: _Ctx, base: Decimal, order_risk: Decimal, symbol: Decimal,
+                         notional: Decimal) -> None:
+        """전략별 한도 (01 §2.3.1-8): 실제 한도 = min(전략 한도, 계좌 한도). 계좌 한도는 이미 통과."""
+        req = ctx.req
+        sl = self._in.strategies.strategy_limits(req.owner or "")
+        if sl is None:
+            return
+        if sl.l1_max_loss_ratio is not None and order_risk > base * sl.l1_max_loss_ratio:
+            raise _Reject(Check.G7, f"전략 L1 초과 ({order_risk} > {base * sl.l1_max_loss_ratio})")
+        if sl.l2_max_symbol_ratio is not None and symbol + ctx.exposure_add > base * sl.l2_max_symbol_ratio:
+            raise _Reject(Check.G7, f"전략 L2 초과 ({symbol + ctx.exposure_add} > {base * sl.l2_max_symbol_ratio})")
+        if sl.l7_max_order_amount is not None and notional > sl.l7_max_order_amount:
+            raise _Reject(Check.G7, f"전략 L7 초과 ({notional} > {sl.l7_max_order_amount})")
+        if sl.l3_max_total_ratio is not None:
+            owned = self._owned_exposure(ctx, req.owner or "")
+            if owned + ctx.exposure_add > base * sl.l3_max_total_ratio:
+                raise _Reject(Check.G7, f"전략 L3 초과 ({owned + ctx.exposure_add} > {base * sl.l3_max_total_ratio})")
+
+    def _owned_exposure(self, ctx: _Ctx, owner: str) -> Decimal:
+        """이 전략이 소유한 종목의 보유 노출 + 이 전략 의도의 활성 예약."""
+        req = ctx.req
+        total = _ZERO
+        for inst, pos in self._repo.positions(req.account).items():
+            own = self._repo.active_ownership(req.account, inst)
+            if pos.quantity > 0 and own is not None and own.owner == owner:
+                info = self._info(inst, Check.G7)
+                total += pos.quantity * self._valuation_price(inst, ctx) * info.exposure_multiplier
+        for r in self._repo.active_reservations(req.account):
+            if self._repo.intent(r.intent_id).owner == owner:
+                total += r.remaining
+        return total
 
     def _g8_cash(self, ctx: _Ctx) -> None:
         """주문 가능 현금 = min(브로커 주문가능현금, 예수금 − 활성 매수 예약 현금) (03 §6.2)."""
@@ -463,6 +509,7 @@ class Gate:
             "account": req.account, "instrument": req.instrument, "side": req.side.value,
             "quantity": str(req.quantity), "order_type": req.order_type.value, "price": str(req.price),
             "owner": req.owner, "target_order_key": req.target_order_key,
+            "stop_price": None if req.stop_price is None else str(req.stop_price),
             "state": IntentState.PENDING_SEND.value, "filled_quantity": "0", "created_at": to_iso(now),
         })
         if req.is_risk_increasing and ctx.exposure_add > 0:

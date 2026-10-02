@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS intent (
   intent_id TEXT PRIMARY KEY, mode TEXT NOT NULL, decision_id TEXT NOT NULL REFERENCES gate_decision(decision_id),
   idem_key TEXT NOT NULL UNIQUE, signal_id TEXT, source TEXT NOT NULL, request_type TEXT NOT NULL,
   account TEXT NOT NULL, instrument TEXT NOT NULL, side TEXT NOT NULL, quantity TEXT NOT NULL,
-  order_type TEXT NOT NULL, price TEXT NOT NULL, owner TEXT, target_order_key TEXT,
+  order_type TEXT NOT NULL, price TEXT NOT NULL, owner TEXT, target_order_key TEXT, stop_price TEXT,
   state TEXT NOT NULL, filled_quantity TEXT NOT NULL, broker_order_key TEXT,
   created_at TEXT NOT NULL, created_seq INTEGER NOT NULL, closed_reason TEXT);
 CREATE TABLE IF NOT EXISTS attempt (
@@ -80,6 +80,18 @@ CREATE TABLE IF NOT EXISTS settings_version (
   target TEXT NOT NULL, values_json TEXT NOT NULL, previous_hash TEXT, direction TEXT NOT NULL,
   submitted_at TEXT NOT NULL, effective_at TEXT NOT NULL, deferred INTEGER NOT NULL, ref_time_used TEXT,
   source TEXT NOT NULL, result TEXT NOT NULL, reason TEXT);
+CREATE TABLE IF NOT EXISTS strategy_registration (
+  reg_id TEXT PRIMARY KEY, mode TEXT NOT NULL, strategy_id TEXT NOT NULL, version INTEGER NOT NULL,
+  spec_hash TEXT NOT NULL, spec_json TEXT NOT NULL, params_hash TEXT, params_json TEXT,
+  target_mode TEXT NOT NULL, result TEXT NOT NULL, reason TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS strategy_state (
+  strategy_id TEXT NOT NULL, version INTEGER NOT NULL, market TEXT NOT NULL, mode TEXT NOT NULL,
+  state TEXT NOT NULL, stop_reason TEXT, prev_state TEXT, spec_hash TEXT NOT NULL, updated_at TEXT NOT NULL,
+  PRIMARY KEY (strategy_id, version, market));
+CREATE TABLE IF NOT EXISTS strategy_transition (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT NOT NULL, strategy_id TEXT NOT NULL, version INTEGER NOT NULL,
+  market TEXT NOT NULL, from_state TEXT, to_state TEXT NOT NULL, approval_id TEXT NOT NULL, evidence TEXT,
+  stop_reason TEXT, at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS audit_event (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT NOT NULL, at TEXT NOT NULL, kind TEXT NOT NULL,
   actor TEXT NOT NULL, ref TEXT, summary TEXT NOT NULL);
@@ -603,6 +615,44 @@ class Repository:
         if released_at is not None:
             self._x("UPDATE halt SET released_at=?, released_by=? WHERE halt_id=?",
                     (to_iso(released_at), released_by, halt_id))
+
+    # --- 전략 등록·상태 (02 ENT-05·06) ------------------------------------------------
+    def insert_strategy_registration(self, row: dict) -> str:
+        reg_id = new_id("reg")
+        row = {**row, "reg_id": reg_id, "mode": self.mode.value}
+        cols = ",".join(row)
+        self._x(f"INSERT INTO strategy_registration({cols}) VALUES({','.join('?' * len(row))})", tuple(row.values()))
+        return reg_id
+
+    def latest_registration(self, strategy_id: str, version: int) -> dict | None:
+        r = self._x("SELECT * FROM strategy_registration WHERE strategy_id=? AND version=? AND result='PASSED' "
+                    "ORDER BY created_at DESC, rowid DESC LIMIT 1", (strategy_id, version)).fetchone()
+        return dict(r) if r else None
+
+    def strategy_state(self, strategy_id: str, version: int, market: str) -> dict | None:
+        r = self._x("SELECT * FROM strategy_state WHERE strategy_id=? AND version=? AND market=?",
+                    (strategy_id, version, market)).fetchone()
+        return dict(r) if r else None
+
+    def upsert_strategy_state(self, strategy_id: str, version: int, market: str, state: str, stop_reason: str | None,
+                              prev_state: str | None, spec_hash: str, at: datetime) -> None:
+        self._x("""INSERT INTO strategy_state(strategy_id, version, market, mode, state, stop_reason, prev_state,
+                   spec_hash, updated_at) VALUES(?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(strategy_id, version, market) DO UPDATE SET state=excluded.state,
+                   stop_reason=excluded.stop_reason, prev_state=excluded.prev_state, updated_at=excluded.updated_at""",
+                (strategy_id, version, market, self.mode.value, state, stop_reason, prev_state, spec_hash, to_iso(at)))
+
+    def insert_strategy_transition(self, strategy_id: str, version: int, market: str, from_state: str | None,
+                                   to_state: str, approval_id: str, evidence: str | None, stop_reason: str | None,
+                                   at: datetime) -> None:
+        self._x("INSERT INTO strategy_transition(mode, strategy_id, version, market, from_state, to_state, approval_id, "
+                "evidence, stop_reason, at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (self.mode.value, strategy_id, version, market, from_state, to_state, approval_id, evidence,
+                 stop_reason, to_iso(at)))
+
+    def strategy_transitions(self, strategy_id: str, version: int) -> list[dict]:
+        return [dict(r) for r in self._x("SELECT * FROM strategy_transition WHERE strategy_id=? AND version=? "
+                                         "ORDER BY seq", (strategy_id, version))]
 
     # --- 운영 명령 (03 §6.6) -------------------------------------------------------
     def insert_command(self, command_id: str, channel: str, actor: str, command: str, args: dict,

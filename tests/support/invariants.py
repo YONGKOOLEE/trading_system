@@ -2,12 +2,13 @@
 
 모든 시나리오 테스트가 끝날 때 실행한다. 위반 목록을 문자열로 돌려준다.
 T-001 범위: INV-01·03·04·05·06·07·08·09·10·12·15·17, T-002: INV-14, T-004: INV-02·11 (감사 이력 재생).
-INV-13(전략 상태 전이 승인)은 T-007, INV-16(수동 소유 종목)은 T-008에서 추가한다.
+T-007: INV-13. INV-16(수동 소유 종목)은 T-008에서 추가한다.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import time as dtime
 from decimal import Decimal
@@ -89,7 +90,8 @@ def check_invariants(conn: sqlite3.Connection, mode: str) -> list[str]:
 
     # INV-12 모든 레코드의 모드 = 저장소 모드
     for table in ("account", "gate_decision", "intent", "attempt", "broker_order", "fill",
-                  "position", "ownership", "reservation", "halt", "audit_event", "settings_version", "ops_command"):
+                  "position", "ownership", "reservation", "halt", "audit_event", "settings_version", "ops_command",
+                  "strategy_registration", "strategy_state", "strategy_transition"):
         for r in _rows(conn, f"SELECT COUNT(*) c FROM {table} WHERE mode <> ?", (mode,)):
             if r["c"]:
                 v.append(f"INV-12 모드 불일치 {table} {r['c']}건")
@@ -111,6 +113,11 @@ def check_invariants(conn: sqlite3.Connection, mode: str) -> list[str]:
         v.append(f"INV-15 활성 새 주문 {r['c']}개 {r['account']}/{r['instrument']}/{r['side']}")
 
     v.extend(_replay_intent_states(conn))
+
+    # INV-13 전략 상태 전이에는 승인 A-ID가 있어야 한다 (A-숫자 형식)
+    for r in _rows(conn, "SELECT seq, approval_id FROM strategy_transition"):
+        if not re.fullmatch(r"A-\d{3,}", r["approval_id"] or ""):
+            v.append(f"INV-13 승인 A-ID 없는 전략 상태 전이 seq={r['seq']}")
 
     # INV-17 대상 주문당 활성 취소·정정 의도 최대 1
     for r in _rows(conn, f"""SELECT target_order_key, COUNT(*) c FROM intent

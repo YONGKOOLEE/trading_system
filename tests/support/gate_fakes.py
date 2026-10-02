@@ -17,6 +17,7 @@ from trading_system.domain.limits import AccountLimits
 from trading_system.domain.market import (
     CashView, CostRates, DailyRisk, InstrumentInfo, InstrumentKind, Quote, SessionInfo, TradingStatus,
 )
+from trading_system.domain.strategy import StrategyLimits
 from trading_system.gate.ports import GateInputs, GatePolicy
 
 TEST_POLICY = GatePolicy(
@@ -110,8 +111,13 @@ class FakeAccount:
 class FakeStrategies:
     blocked: dict[str, str] = field(default_factory=dict)  # owner → 사유
 
+    limits: dict[str, StrategyLimits] = field(default_factory=dict)
+
     def signal_rejection(self, owner: str, request_type: RequestType) -> str | None:
         return self.blocked.get(owner)
+
+    def strategy_limits(self, owner: str) -> StrategyLimits | None:
+        return self.limits.get(owner)
 
 
 @dataclass

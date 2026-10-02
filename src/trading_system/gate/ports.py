@@ -13,6 +13,7 @@ from typing import Protocol
 
 from trading_system.domain.enums import RequestType
 from trading_system.domain.limits import AccountLimits
+from trading_system.domain.strategy import StrategyLimits
 from trading_system.domain.market import CashView, CostRates, DailyRisk, InstrumentInfo, Quote, SessionInfo, TradingStatus
 
 
@@ -42,7 +43,11 @@ class LimitsSource(Protocol):
 
 class StrategyFacts(Protocol):
     def signal_rejection(self, owner: str, request_type: RequestType) -> str | None:
-        """전략 상태가 이 신호를 막으면 사유, 허용이면 None (01 G6, R-20). T-007에서 등록·상태와 연결."""
+        """전략 상태가 이 신호를 막으면 사유, 허용이면 None (01 G6, R-20, V-113)."""
+        ...
+
+    def strategy_limits(self, owner: str) -> StrategyLimits | None:
+        """전략별 한도 (01 §2.3.1-8). 없으면 None — 계좌 한도만 적용."""
         ...
 
 

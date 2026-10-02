@@ -48,12 +48,15 @@ class Signal:
     price: Decimal
     as_of: datetime
     valid_until: datetime
+    stop_price: Decimal | None = None  # 선택. 있으면 L1 = (진입 기준가 − 손절가) × 수량 × |배수| (00 §2.5 v0.4)
 
     def __post_init__(self) -> None:
         if not self.kind.is_new_order:
             raise ValueError("전략 신호는 진입·증액·감액·청산만 낼 수 있다 (00 D-005)")
         _require_decimal("quantity", self.quantity)
         _require_decimal("price", self.price)
+        if self.stop_price is not None:
+            _require_decimal("stop_price", self.stop_price)
         if self.quantity <= 0:
             raise ValueError("수량은 0보다 커야 한다")
         require_aware(self.as_of)
@@ -85,6 +88,7 @@ class GateRequest:
     valid_until: datetime | None = None
     signal_id: str | None = None
     target_order_key: str | None = None
+    stop_price: Decimal | None = None
 
     def __post_init__(self) -> None:
         _require_decimal("quantity", self.quantity)
@@ -115,6 +119,7 @@ class GateRequest:
             owner=s.owner,
             valid_until=s.valid_until,
             signal_id=s.signal_id,
+            stop_price=s.stop_price,
         )
 
     @classmethod

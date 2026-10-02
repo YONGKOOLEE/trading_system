@@ -36,7 +36,7 @@ REQUIRED_CONDITIONS: dict[HaltType, tuple[str, ...]] = {
     HaltType.K6: ("clock_ok",),
     HaltType.K7: ("storage_ok",),
     HaltType.K8: ("recovery_ok",),                      # 01 §2.11 조건 전부 (T-008이 판정해 알림)
-    HaltType.K9: (),                                    # 사용자 상태 전환 (T-007)
+    HaltType.K9: ("strategy_resumed",),                 # 전략 상태 전환(승인 A-ID)으로만 (01 K9 v0.5, INV-13)
     HaltType.K10: ("data_ok",),
     HaltType.K11: ("notify_ok",),
 }
@@ -131,7 +131,7 @@ class HaltManager:
 
     # --- 조건·해제 -------------------------------------------------------------------
     def report_condition(self, halt_type: HaltType, account: str | None, name: str, ok: bool,
-                         evidence: str = "", *, instrument: str | None = None) -> list[str]:
+                         evidence: str = "", *, instrument: str | None = None, owner: str | None = None) -> list[str]:
         """재개 조건 충족 여부를 기록한다 (대조·시계·연결·저장 점검 등이 호출). 자동 해제 유형은 여기서 해제된다.
 
         K10은 종목 범위가 정확히 같은 정지에만 적용한다 (instrument=None은 계좌 전체 K10, CP-018 R-7).
@@ -142,6 +142,8 @@ class HaltManager:
             rows = self._rows(halt_type, account)
             if halt_type is HaltType.K10:
                 rows = [r for r in rows if r["scope_instrument"] == instrument]
+            if halt_type is HaltType.K9:
+                rows = [r for r in rows if r["scope_owner"] == owner]
             for row in rows:
                 conds = json.loads(row["conditions"])
                 conds[name] = {"ok": ok, "at": now.isoformat(), "evidence": evidence}
@@ -162,11 +164,14 @@ class HaltManager:
                     released.append(row["halt_id"])
         return released
 
-    def resume(self, halt_type: HaltType, account: str | None, channel: str, actor: str) -> ResumeResult:
-        """사용자 재개 명령. 원격 허용·재개 조건을 검사하고 감사 기록한다."""
+    def resume(self, halt_type: HaltType, account: str | None, channel: str, actor: str, *,
+               owner: str | None = None) -> ResumeResult:
+        """사용자 재개 명령. 원격 허용·재개 조건을 검사하고 감사 기록한다. K9는 전략(owner)별."""
         with self._repo.tx():
             now = self._clock.now()
             rows = self._rows(halt_type, account)
+            if halt_type is HaltType.K9:
+                rows = [r for r in rows if r["scope_owner"] == owner]
             result = self._check_resume(halt_type, rows, channel)
             if result.ok:
                 for row in rows:
