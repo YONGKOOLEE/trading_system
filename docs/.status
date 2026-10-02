@@ -1,6 +1,6 @@
 # 보조 기록 — 승인 근거가 아니다. 승인 근거는 docs/approvals.md.
 # 이 파일과 approvals.md가 충돌하면 진행하지 말고 사용자에게 확인한다.
-current_stage: 6            # 구현 — 묶음 A(T-003~T-006) 완료(A-026), CP-018 승인·반영(A-028·A-029), 무인 진행 A-030: 묶음 B → C(오프라인) → T-020 → T-021. 인계: docs/handoff.md
+current_stage: 6            # 구현 — T-000~T-014·T-020·T-021 완료(A-030 무인 진행, 오프라인). 다음: 결정 대기 검토, T-015(모의 접속) 승인 여부. 인계: docs/handoff.md
 delivery: M1                # 국내주식·ETF (키움 모의)
 business_definition: v0.6 approved   # 근거: A-029 (v0.5·v0.4·v0.3 superseded)
 gates:
@@ -14,4 +14,4 @@ implementation_start: authorized   # A-022 (2026-10-01)
 live_order_code: not-authorized
 live_run: not-authorized    # 시장별: M1/M2/M3 모두 없음
 commit_policy: D-082 (A-017) + A-030   # 작업 완료·테스트 통과 시 로컬 커밋(문서 포함, A-030), push·main 병합은 지시 시
-last_updated: 2026-10-02
+last_updated: 2026-10-03
