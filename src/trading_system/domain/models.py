@@ -181,6 +181,8 @@ class OrderEvent:
     price: Decimal = Decimal("0")
     at: datetime | None = None
     new_order_no: str | None = None
+    account: str | None = None      # 계좌 별칭 (어댑터가 계좌번호를 별칭으로 바꿔 넣음). 없으면 거래일로만 찾음
+    trade_date: str | None = None   # KST 거래일 (YYYY-MM-DD). 없으면 반영 시점의 KST 날짜
 
 
 @dataclass(frozen=True)

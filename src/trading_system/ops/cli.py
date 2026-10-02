@@ -22,6 +22,9 @@ from trading_system.domain.enums import HaltType, IntentState, Mode
 from trading_system.storage.repository import ModeMismatch, Repository, StorageFailure
 
 
+REPO_ROOT = Path(__file__).resolve().parents[3]  # src/trading_system/ops/cli.py → 저장소 루트
+
+
 def default_paths(root: Path, mode: Mode) -> tuple[Path, Path]:
     base = root / "var" / mode.value.lower()
     return base / "trading.db", base / "KILL"
@@ -30,7 +33,7 @@ def default_paths(root: Path, mode: Mode) -> tuple[Path, Path]:
 def _parser(prog: str) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog=prog)
     p.add_argument("--mode", required=True, help="BACKTEST|PAPER|LIVE (대문자 정확히)")
-    p.add_argument("--root", default=".", help="저장소 루트 (기본: 현재 폴더)")
+    p.add_argument("--root", default=str(REPO_ROOT), help="저장소 루트 (기본: 이 도구가 있는 저장소, 현재 폴더 아님)")
     p.add_argument("--db", help="DB 경로 (기본: var/<mode>/trading.db)")
     p.add_argument("--kill-file", help="KILL 파일 경로 (기본: var/<mode>/KILL)")
     p.add_argument("--account", help="계좌 별칭 (없으면 전체)")
@@ -40,7 +43,9 @@ def _parser(prog: str) -> argparse.ArgumentParser:
 def _resolve(ns: argparse.Namespace) -> tuple[Mode, Path, Path]:
     mode = parse_trade_mode(ns.mode)
     db, kill = default_paths(Path(ns.root), mode)
-    return mode, Path(ns.db) if ns.db else db, Path(ns.kill_file) if ns.kill_file else kill
+    db = Path(ns.db) if ns.db else db
+    kill = Path(ns.kill_file) if ns.kill_file else kill
+    return mode, db.resolve(), kill.resolve()
 
 
 def _record(db: Path, mode: Mode, command: str, args: dict) -> str:
@@ -95,12 +100,29 @@ def resume_main(argv: Sequence[str] | None = None) -> int:
         return 1
     print(f"재개 요청 기록: {cid} (판정은 본 프로세스, 결과는 status로 확인)")
     if halt_type is HaltType.K1 and kill.exists():
-        if ns.clear_kill_file:
+        if ns.clear_kill_file and _k1_released(db, mode):
             kill.unlink()
             print(f"KILL 파일 삭제: {kill}")
+        elif ns.clear_kill_file:
+            # 재개 판정 전에 지우면 유일한 차단 수단이 먼저 사라진다 (CP-018 R-11)
+            print("거부: K1이 해제된 기록이 없어 KILL 파일을 지우지 않음. 본 프로세스가 재개를 처리한 뒤 다시 실행")
         else:
             print(f"주의: KILL 파일이 남아 있어 위험 확대 전송은 계속 막힘 ({kill}). 지우려면 --clear-kill-file")
     return 0
+
+
+def _k1_released(db: Path, mode: Mode) -> bool:
+    """가장 최근 K1이 해제되었고 해제되지 않은 K1이 없는지."""
+    try:
+        repo = Repository(db, mode)
+    except (ModeMismatch, StorageFailure):
+        return False
+    try:
+        latest = repo.latest_halt(HaltType.K1.value)
+        return latest is not None and latest["state"] == "RELEASED" and "K1" not in {
+            h["halt_type"] for h in repo.halt_rows(None)}
+    finally:
+        repo.close()
 
 
 def status_main(argv: Sequence[str] | None = None) -> int:

@@ -37,6 +37,7 @@ class _Order:
     account: str
     record: BrokerOrderRecord
     visible_after: int = 0  # 이 횟수만큼 조회한 뒤에야 조회 결과에 나타남 (반영 지연)
+    day: int = 0            # 거래일 번호 (조회는 당일 주문만, kt00009 대응)
 
 
 class FakeBroker:
@@ -49,9 +50,10 @@ class FakeBroker:
         self.disconnected = False           # 단절: 주문은 전송 전 실패, 조회는 실패
         self.raise_after_send = False       # 브로커는 받았지만 응답 전에 연결이 끊김 → 어댑터 예외
         self._seq = 0
+        self._day = 0
         self._fill_seq = 0
         self._book: dict[str, _Order] = {}
-        self._fills: list[tuple[str, FillRecord]] = []
+        self._fills: list[tuple[str, int, FillRecord]] = []  # (계좌, 거래일 번호, 체결)
         self._events: list[OrderEvent] = []
 
     # --- 주문 변경 -------------------------------------------------------------
@@ -121,7 +123,7 @@ class FakeBroker:
     def _new_order(self, account: str, kind: str, instrument: str, side: str, quantity: Decimal, price: Decimal,
                    order_type: OrderType, original: str | None, state: str = "ACCEPTED") -> str:
         no = self._next_no()
-        self._book[no] = _Order(account, BrokerOrderRecord(
+        self._book[no] = _Order(account, day=self._day, record=BrokerOrderRecord(
             order_no=no, kind=kind, instrument=instrument, side=side, quantity=quantity,
             filled_quantity=Decimal("0"), price=price, order_type=order_type, state=state,
             original_order_no=original))
@@ -145,7 +147,7 @@ class FakeBroker:
         filled = o.filled_quantity + qty
         self._set(order_no, filled_quantity=filled, state="FILLED" if filled == o.quantity else "PARTIAL")
         at = _EPOCH
-        self._fills.append((self._book[order_no].account, FillRecord(order_no, fill_id, qty, px, at)))
+        self._fills.append((self._book[order_no].account, self._day, FillRecord(order_no, fill_id, qty, px, at)))
         self._events.append(OrderEvent(kind="FILL", order_no=order_no, fill_id=fill_id, quantity=qty, price=px))
 
     def expire_open(self) -> list[str]:
@@ -164,6 +166,12 @@ class FakeBroker:
     def query_orders_unchecked(self) -> list[BrokerOrderRecord]:
         """테스트용: 장애 주입과 무관하게 주문장 전체를 본다 (조회 횟수에 세지 않음)."""
         return [o.record for o in self._book.values()]
+
+    def new_day(self) -> None:
+        """다음 거래일: 주문번호가 처음부터 다시 매겨진다고 가정한다 (키움 주문번호 유일 범위 미확인 K-U2, D-046)."""
+        self._day += 1
+        self._seq = 0
+        self._book = {f"d{o.day}-{no}" if o.day != self._day else no: o for no, o in self._book.items()}
 
     def open_order_nos(self) -> list[str]:
         return [no for no, o in self._book.items() if o.record.state in _OPEN and o.record.kind != "CANCEL"]
@@ -199,9 +207,10 @@ class FakeBroker:
 
     def query_orders(self, account: str) -> list[BrokerOrderRecord]:
         self._query()
-        return [o.record for o in self._book.values() if o.account == account and self.queries > o.visible_after]
+        return [o.record for o in self._book.values()
+                if o.account == account and o.day == self._day and self.queries > o.visible_after]
 
     def query_fills(self, account: str) -> list[FillRecord]:
         self._query()
-        visible = {no for no, o in self._book.items() if self.queries > o.visible_after}
-        return [f for a, f in self._fills if a == account and f.order_no in visible]
+        visible = {no for no, o in self._book.items() if self.queries > o.visible_after and o.day == self._day}
+        return [f for a, d, f in self._fills if a == account and d == self._day and f.order_no in visible]

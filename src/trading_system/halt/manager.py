@@ -22,7 +22,7 @@ from trading_system.domain.market import DailyRisk
 from trading_system.domain.models import GateRequest
 from trading_system.execution.executor import ExecutionBlocked, Executor
 from trading_system.gate.gate import Gate
-from trading_system.storage.repository import Repository, StorageFailure
+from trading_system.storage.repository import Repository, StorageFailure, new_id
 
 # 재개 조건 (01 §2.6 "재개 조건" 열). 외부에서 report_condition으로 알려 주는 항목.
 REQUIRED_CONDITIONS: dict[HaltType, tuple[str, ...]] = {
@@ -111,7 +111,9 @@ class HaltManager:
                     continue
                 req = GateRequest.cancel(
                     RequestSource.HALT_POLICY, acct, order.instrument, Side.BUY, order.order_key,
-                    idem_key=f"halt:{halt_id}:{order.order_key}", owner=order_owner,
+                    # 시도마다 새 멱등키: 다른 정지에 막혀 거부된 취소도 나중에 다시 시도할 수 있게 (CP-018 R-10).
+                    # 같은 주문의 이중 취소는 INV-17(활성 취소·정정 1개)이 막는다
+                    idem_key=f"halt:{halt_id}:{order.order_key}:{new_id('try')}", owner=order_owner,
                 )
                 decision = self._gate.decide(req)
                 if decision.result is GateResult.APPROVED and decision.approved is not None:
@@ -119,17 +121,23 @@ class HaltManager:
                         self._executor.submit(decision.approved)
                     except ExecutionBlocked:
                         return
-                elif decision.failed_check is not None and "중복" not in (decision.reason or ""):
+                elif decision.failed_check is not None and "INV-17" not in (decision.reason or ""):
                     self._alert("EMERGENCY", f"정지 정책 취소 거부: {decision.reason}", order.order_key)
 
     # --- 조건·해제 -------------------------------------------------------------------
     def report_condition(self, halt_type: HaltType, account: str | None, name: str, ok: bool,
-                         evidence: str = "") -> list[str]:
-        """재개 조건 충족 여부를 기록한다 (대조·시계·연결·저장 점검 등이 호출). 자동 해제 유형은 여기서 해제된다."""
+                         evidence: str = "", *, instrument: str | None = None) -> list[str]:
+        """재개 조건 충족 여부를 기록한다 (대조·시계·연결·저장 점검 등이 호출). 자동 해제 유형은 여기서 해제된다.
+
+        K10은 종목 범위가 정확히 같은 정지에만 적용한다 (instrument=None은 계좌 전체 K10, CP-018 R-7).
+        """
         released: list[str] = []
         with self._repo.tx():
             now = self._clock.now()
-            for row in self._rows(halt_type, account):
+            rows = self._rows(halt_type, account)
+            if halt_type is HaltType.K10:
+                rows = [r for r in rows if r["scope_instrument"] == instrument]
+            for row in rows:
                 conds = json.loads(row["conditions"])
                 conds[name] = {"ok": ok, "at": now.isoformat(), "evidence": evidence}
                 met = self._conditions_met(halt_type, row, conds)
@@ -164,7 +172,16 @@ class HaltManager:
                 "account": account, "channel": channel, "ok": result.ok, "reason": result.reason})
             self._alert("INFO" if result.ok else "WARNING",
                         f"정지 {halt_type.value} 재개 {'완료' if result.ok else '거부'}: {result.reason}", None)
+        if result.ok:
+            self._retry_halt_cancels()
         return result
+
+    def _retry_halt_cancels(self) -> None:
+        """한 정지가 풀리면 남은 정지의 매수 미체결 취소를 다시 시도한다 (다른 정지에 막혔던 취소, CP-018 R-10)."""
+        for row in self._repo.halt_rows(None):
+            k = HaltType(row["halt_type"])
+            if k in CANCELS_OPEN_BUYS:
+                self._cancel_open_buys(row["halt_id"], row["account"], row["scope_owner"] if k is HaltType.K9 else None)
 
     def _check_resume(self, halt_type: HaltType, rows: list[dict], channel: str) -> ResumeResult:
         if channel != Channel.LOCAL and halt_type not in REMOTE_RESUMABLE:

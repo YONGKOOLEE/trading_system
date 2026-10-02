@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 SRC = Path(__file__).resolve().parents[2] / "src" / "trading_system"
-ORDER_CALLS = {"place_order", "cancel_order"}
+ORDER_CALLS = {"place_order", "cancel_order", "modify_order"}
 
 
 def _calls(path: Path) -> list[tuple[str, int]]:

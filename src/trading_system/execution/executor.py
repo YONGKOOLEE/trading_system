@@ -10,16 +10,20 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
 from trading_system.broker.base import BrokerAdapter
-from trading_system.domain.clock import Clock
+from trading_system.domain.clock import Clock, from_iso
+from trading_system.domain.enums import HaltType
+from trading_system.domain.halts import HaltView, RequestView, halt_rejection
 from trading_system.domain.enums import IntentState, OrderType, RequestType, Side, SubmitOutcome
 from trading_system.domain.models import ApprovedIntent, OrderEvent, OrderRequest, SubmitResult
 from trading_system.storage.repository import BrokerOrderRow, IntentRow, Repository, StorageFailure
 
+PARKED_LIMIT = 1000     # 보류 통보 최대 보관 수 (넘으면 오래된 것부터 버림, 감사 기록은 남음)
 REJECT_ALERT_STREAK = 3  # 같은 사유 연속 거부 → 경고 알림 (01 §2.7)
 _ORIGIN = {"NEW": "INTERNAL_NEW", "CANCEL": "INTERNAL_CANCEL", "MODIFY": "INTERNAL_MODIFY"}
 
@@ -36,6 +40,7 @@ class Executor:
         self._kill_file = kill_file
         self._blocked: str | None = None
         self._pending: list[OrderEvent] = []
+        self._parked: list[OrderEvent] = []  # 짝 없는 통보 (접수 응답보다 먼저 온 체결 등). 주문이 연결되면 다시 반영
 
     @property
     def blocked_reason(self) -> str | None:
@@ -62,6 +67,9 @@ class Executor:
     def submit(self, approved: ApprovedIntent) -> IntentState:
         if not isinstance(approved, ApprovedIntent):
             raise TypeError("Executor는 게이트가 승인한 ApprovedIntent만 받는다 (R-03)")
+        if self._repo.in_transaction:
+            # 바깥 트랜잭션 안에서 보내면 시도 기록이 커밋되기 전에 전송된다 (INV-03 위반, CP-018 A-10)
+            raise RuntimeError("브로커 전송은 저장 단위(tx) 밖에서만 호출한다")
         if self._blocked is not None:
             raise ExecutionBlocked(self._blocked)
         req = approved.request
@@ -81,6 +89,11 @@ class Executor:
             return IntentState.NOT_SENT
         with self._repo.tx():
             now = self._clock.now()
+            # 승인과 전송 사이에 정지가 걸렸거나 신호 기한이 지났으면 보내지 않는다 (02 ST-01, CP-018 R-3)
+            blocked = self._pre_send_block(req, now)
+            if blocked:
+                self._close(self._repo.intent(intent.intent_id), IntentState.NOT_SENT, blocked)
+                return IntentState.NOT_SENT
             attempt_id = self._repo.insert_attempt(intent.intent_id, now)
             self._set_state(intent.intent_id, IntentState.SENT)
             self._repo.audit(now, "ATTEMPT", "executor", attempt_id, {"intent_id": intent.intent_id, "kind": order.kind})
@@ -105,6 +118,17 @@ class Executor:
             self._record_storage_halt(intent.account)
             raise
         return self._repo.intent(intent.intent_id).state
+
+    def _pre_send_block(self, req, now: datetime) -> str | None:  # type: ignore[no-untyped-def]
+        if req.valid_until is not None and now > req.valid_until:
+            return "전송 직전 신호 기한 초과"
+        view = RequestView(req.source, req.request_type, req.side, req.instrument, req.owner)
+        for row in self._repo.halt_rows(req.account):
+            reason = halt_rejection(HaltView(HaltType(row["halt_type"]), row["scope_instrument"], row["scope_owner"],
+                                             row["variant"]), view)
+            if reason:
+                return f"전송 직전 정지 확인: {reason}"
+        return None
 
     def _order_request(self, intent: IntentRow) -> OrderRequest | None:
         rt = intent.request_type
@@ -153,15 +177,26 @@ class Executor:
         if kind == "MODIFY":  # 정정 주문의 체결은 원주문 의도(경제적 주인)에 반영한다
             target = self._repo.broker_order(target_key or "")
             owner_intent = target.intent_id if target and target.intent_id else intent.intent_id
+        attempt = self._repo.attempt_for(intent.intent_id)
+        key_at = from_iso(attempt["created_at"]) if attempt else at  # 거래일은 전송 시각 기준 (확정 시각 아님)
         key = self._repo.insert_broker_order(
-            account=intent.account, order_no=order_no, at=at, intent_id=owner_intent,
+            account=intent.account, order_no=order_no, at=key_at, intent_id=owner_intent,
             instrument=intent.instrument, side=intent.side, quantity=intent.quantity,
             origin=_ORIGIN[kind], target_order_key=target_key,
         )
         self._repo.link_intent_order(intent.intent_id, key)
         self._repo.audit(at, "BROKER_ORDER", "executor", key, {"intent_id": intent.intent_id, "kind": kind})
         self._set_state(intent.intent_id, IntentState.ACCEPTED)
+        self._replay_parked(order_no, self._repo.trade_date_of(key_at), intent.account)
         return key
+
+    def _replay_parked(self, order_no: str, trade_date: str, account: str) -> None:
+        """이 주문번호로 먼저 와서 보류된 통보를 다시 반영한다 (CP-018 R-2)."""
+        mine = [e for e in self._parked if e.order_no == order_no
+                and (e.trade_date or trade_date) == trade_date and e.account in (None, account)]
+        self._parked = [e for e in self._parked if e not in mine]
+        for ev in mine:
+            self.apply_event(ev)
 
     def _record_storage_halt(self, account: str) -> None:
         """K7 기록 시도 (01 K7). 저장소가 계속 실패하면 기록하지 못해도 실행기 차단은 유지된다."""
@@ -202,9 +237,13 @@ class Executor:
     def apply_event(self, ev: OrderEvent) -> None:
         """통보 1건 반영. 호출자의 트랜잭션 안에서 실행한다."""
         now = self._clock.now()
-        order = self._repo.broker_order_by_no(ev.order_no)
+        trade_date = ev.trade_date or self._repo.trade_date_of(now)
+        order = self._repo.broker_order_by_no(ev.order_no, trade_date, ev.account)
         if order is None or order.intent_id is None:
-            self._repo.audit(now, "UNMATCHED_EVENT", "tracker", ev.order_no, {"kind": ev.kind})  # 대조 대상 (T-008)
+            # 접수 응답보다 먼저 온 통보일 수 있으므로 보류한다. 끝까지 짝이 없으면 대조 대상 (T-008)
+            self._repo.audit(now, "UNMATCHED_EVENT", "tracker", ev.order_no, {"kind": ev.kind, "trade_date": trade_date})
+            self._parked.append(ev if ev.trade_date else replace(ev, trade_date=trade_date))
+            del self._parked[:-PARKED_LIMIT]
             return
         intent = self._repo.intent(order.intent_id)
         if ev.kind == "FILL":
@@ -223,6 +262,8 @@ class Executor:
             self._close_changes_for(order, f"대상 주문 {ev.kind}")
         elif ev.kind == "MODIFIED":
             self._apply_modified(order, intent, ev, now)
+        elif ev.kind == "MODIFIED_PENDING":  # 보류했던 정정 확인: order_no=새 주문, new_order_no=원주문
+            self.apply_event(replace(ev, kind="MODIFIED", order_no=ev.new_order_no or "", new_order_no=ev.order_no))
         else:
             self._anomaly(ev, f"알 수 없는 통보 종류 {ev.kind}")
 
@@ -241,11 +282,16 @@ class Executor:
         """정정 확인: 원주문 종결(MODIFIED), 원 의도의 수량·가격을 정정 후로 바꾸고 정정 의도의 예약을 옮긴다."""
         if order.state not in ("ACCEPTED", "PARTIAL"):
             return
-        new = self._repo.broker_order_by_no(ev.new_order_no or "")
+        new = self._repo.broker_order_by_no(ev.new_order_no or "", ev.trade_date or self._repo.trade_date_of(now),
+                                            order.account)
         modify = next((c for c in self._repo.active_cancel_for(order.order_key)
                        if c.request_type == RequestType.MODIFY.value), None)
-        if new is None or modify is None:  # 정정 응답이 결과 불명이면 조회로 발견한 뒤 다시 반영한다 (resolver)
+        if new is None or modify is None:
+            # 정정 응답보다 먼저 온 확인이면 보류했다가 정정 주문이 연결될 때 다시 반영 (결과 불명이면 resolver가 반영)
             self._repo.audit(now, "UNMATCHED_EVENT", "tracker", ev.order_no, {"kind": ev.kind})
+            if ev.new_order_no:
+                self._parked.append(replace(ev, order_no=ev.new_order_no, kind="MODIFIED_PENDING",
+                                            new_order_no=ev.order_no))
             return None
         self._repo.update_broker_order(order.order_key, order.filled_quantity, "MODIFIED")
         self._repo.set_intent_terms(intent.intent_id, intent.filled_quantity + ev.quantity, ev.price)
@@ -296,8 +342,11 @@ class Executor:
         self._repo.set_position(intent.account, intent.instrument, qty, avg)
 
         rsv = self._repo.reservation_for(intent.intent_id)
-        if rsv is not None:  # 체결 비율만큼 예약 노출을 포지션 노출로 옮긴다 (배수 반영된 예약 금액 기준)
-            self._repo.consume_reservation(rsv.reservation_id, rsv.amount * min(intent_filled / intent.quantity, 1))
+        left_before = intent.quantity - intent.filled_quantity
+        if rsv is not None and left_before > 0:
+            # 남은 예약을 남은 수량에 비례해 옮긴다 (정정으로 수량·가격이 바뀌어도 미체결분 예약이 유지됨, CP-018 R-9)
+            moved = rsv.remaining * min(ev.quantity / left_before, Decimal("1"))
+            self._repo.consume_reservation(rsv.reservation_id, rsv.consumed + moved)
 
         own = self._repo.active_ownership(intent.account, intent.instrument)
         if intent.side == Side.BUY.value and own is not None and own.state == "RESERVED":
@@ -331,6 +380,7 @@ class Executor:
         if own.state == "RESERVED" and own.intent_id == intent.intent_id and filled == 0:
             self._repo.set_ownership_state(own.ownership_id, "RELEASED", "체결 0주 종결")
         elif own.state == "CONFIRMED" and pos.quantity == 0 and not self._repo.active_new_intents(
-                intent.account, intent.instrument, Side.SELL.value) and not self._repo.unknown_intents(
-                intent.account, intent.instrument):
+                intent.account, intent.instrument, Side.SELL.value) and not self._repo.active_new_intents(
+                intent.account, intent.instrument, Side.BUY.value) and not self._repo.unknown_intents(
+                intent.account, intent.instrument):  # 미체결 증액이 남아 있으면 해제하지 않음 (CP-018 R-6)
             self._repo.set_ownership_state(own.ownership_id, "RELEASED", "전량 청산")

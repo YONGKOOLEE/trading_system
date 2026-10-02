@@ -15,7 +15,7 @@ from collections.abc import Callable
 from enum import StrEnum
 
 from trading_system.broker.base import BrokerAdapter, BrokerQueryError
-from trading_system.domain.clock import Clock, to_iso
+from trading_system.domain.clock import Clock, from_iso, to_iso
 from trading_system.domain.enums import IntentState, OrderType, RequestType
 from trading_system.domain.models import BrokerOrderRecord, FillRecord, OrderEvent
 from trading_system.storage.repository import IntentRow, Repository
@@ -48,12 +48,18 @@ class UnknownResolver:
         intent = self._repo.intent(intent_id)
         if intent.state is not IntentState.UNKNOWN:
             raise ValueError(f"결과 불명 의도만 해소한다: {intent.state}")
+        if self._repo.in_transaction:
+            raise RuntimeError("결과 불명 조회는 저장 단위(tx) 밖에서만 한다")
         attempt = self._repo.attempt_for(intent_id)
         since = attempt["created_at"] if attempt else to_iso(self._clock.now())
+        self._trade_date = self._repo.trade_date_of(from_iso(since))
         clean = True
         notes: list[str] = []
         for n, w in enumerate(self._waits, start=1):
             self._wait(w)
+            self._executor.process_events()  # 대기 중 도착한 실시간 통보를 반영해야 "통보 없음"을 판단할 수 있다 (D-047)
+            if self._repo.intent(intent_id).state is not IntentState.UNKNOWN:
+                return ResolveOutcome.FOUND  # 보류 통보 반영 등으로 이미 해소됨
             try:
                 orders = self._broker.query_orders(intent.account)
                 fills = self._broker.query_fills(intent.account)
@@ -80,7 +86,7 @@ class UnknownResolver:
 
     # --- 매칭 -------------------------------------------------------------------
     def _match(self, intent: IntentRow, orders: list[BrokerOrderRecord]) -> tuple[list, list]:
-        known = self._repo.known_order_nos(intent.account)
+        known = self._repo.known_order_nos(intent.account, self._trade_date)
         kind = _KIND.get(intent.request_type, "NEW")
         target_no = None
         if kind != "NEW":

@@ -44,10 +44,9 @@ class OpsProcessor:
         self._clock = clock
 
     def process_pending(self) -> list[CommandOutcome]:
-        out = []
-        for cmd in self._repo.pending_commands():
-            out.append(self._process(cmd))
-        return out
+        """대기 명령을 처리한다. 킬 스위치를 먼저 처리하고, 명령 하나의 실패가 나머지를 막지 않게 한다 (CP-018 R-4)."""
+        cmds = sorted(self._repo.pending_commands(), key=lambda c: (c["command"] != "KILL", c["created_seq"]))
+        return [self._process(cmd) for cmd in cmds]
 
     def _process(self, cmd: dict) -> CommandOutcome:
         cid, channel, actor, name = cmd["command_id"], cmd["channel"], cmd["actor"], cmd["command"]
@@ -64,6 +63,9 @@ class OpsProcessor:
             status, result = "REJECTED", f"{type(exc).__name__}: {exc}"
         except ExecutionBlocked as exc:
             status, result = "FAILED", f"실행기 차단: {exc}"
+        except Exception as exc:  # noqa: BLE001 — 형식이 잘못된 인자·저장 오류 등. 큐를 막지 않고 실패로 기록
+            status, result = "FAILED", f"{type(exc).__name__}: {exc}"
+            self._executor.alert("EMERGENCY", f"운영 명령 처리 실패 ({name}): {type(exc).__name__}", cid)
         with self._repo.tx():
             now = self._clock.now()
             self._repo.finish_command(cid, status, result, now)
@@ -81,7 +83,10 @@ class OpsProcessor:
             r = self._halts.resume(HaltType(args["halt_type"]), account, channel, actor)
             return ("DONE" if r.ok else "REJECTED"), r.reason
         if name == "CONFIRM_UNKNOWN":
-            self._halts.confirm_unknown(args["intent_id"], bool(args["accepted"]), actor, args.get("order_no"))
+            accepted = args["accepted"]
+            if not isinstance(accepted, bool):  # 문자열 "false"가 참이 되는 것을 막음
+                raise CommandError("accepted는 true/false(불리언)여야 함")
+            self._halts.confirm_unknown(args["intent_id"], accepted, actor, args.get("order_no"))
             return "DONE", "결과 불명 확정"
         req = self._request(cid, name, args)
         d = self._gate.decide(req)

@@ -98,6 +98,13 @@ class ModeMismatch(RuntimeError):
     """저장소 모드와 다른 모드의 접근 (R-01, INV-12)."""
 
 
+class SchemaMismatch(RuntimeError):
+    """저장소 스키마 버전이 코드와 다름. 마이그레이션(T-011) 없이 열지 않는다."""
+
+
+SCHEMA_VERSION = "1"  # 기준선 (CP-018). 바꾸면 T-011 마이그레이션 필요
+
+
 @dataclass(frozen=True)
 class IntentRow:
     intent_id: str
@@ -189,6 +196,7 @@ class Repository:
         self.mode = mode
         self._lock = threading.RLock()
         self._depth = 0
+        self._tx_thread: int | None = None
         self.fail_next_transaction = False  # 테스트용 저장 실패 주입 (V-26)
         self.connection = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False)
         self.connection.row_factory = sqlite3.Row
@@ -198,13 +206,24 @@ class Repository:
         self._bind_mode()
 
     def _bind_mode(self) -> None:
-        """DB 파일을 처음 만든 모드에 묶는다. 다른 모드로 다시 열면 거부한다 (R-01, INV-12)."""
+        """DB 파일을 처음 만든 모드·스키마 버전에 묶는다. 다르면 거부한다 (R-01, INV-12, CP-018)."""
         row = self.connection.execute("SELECT value FROM meta WHERE key = 'mode'").fetchone()
+        ver = self.connection.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
         if row is None:
             self.connection.execute("INSERT INTO meta(key, value) VALUES('mode', ?)", (self.mode.value,))
-        elif row[0] != self.mode.value:
+            self.connection.execute("INSERT INTO meta(key, value) VALUES('schema_version', ?)", (SCHEMA_VERSION,))
+            return
+        if row[0] != self.mode.value:
             self.connection.close()
             raise ModeMismatch(f"이 저장소는 {row[0]} 모드로 만들어졌다 (요청 모드 {self.mode.value})")
+        if ver is None or ver[0] != SCHEMA_VERSION:
+            self.connection.close()
+            raise SchemaMismatch(f"저장소 스키마 버전 {ver[0] if ver else '없음'} ≠ 코드 {SCHEMA_VERSION}")
+
+    @property
+    def in_transaction(self) -> bool:
+        """현재 스레드가 저장 단위(tx) 안에 있는지. 브로커 전송은 트랜잭션 밖에서만 한다 (INV-03)."""
+        return bool(self._depth) and self._tx_thread == threading.get_ident()
 
     def close(self) -> None:
         self.connection.close()
@@ -229,6 +248,7 @@ class Repository:
             except sqlite3.Error as exc:
                 raise StorageFailure(str(exc)) from exc
             self._depth = 1
+            self._tx_thread = threading.get_ident()
             try:
                 yield
                 self.connection.execute("COMMIT")
@@ -240,6 +260,7 @@ class Repository:
                 raise
             finally:
                 self._depth = 0
+                self._tx_thread = None
 
     def _x(self, sql: str, params: tuple = ()) -> _Result:
         """모든 읽기·쓰기를 같은 잠금 아래에서 끝낸다.
@@ -393,6 +414,10 @@ class Repository:
 
     # --- 브로커 주문·체결 --------------------------------------------------
     @staticmethod
+    def trade_date_of(at: datetime) -> str:
+        return at.astimezone(KST).date().isoformat()
+
+    @staticmethod
     def order_key(account: str, at: datetime, order_no: str) -> str:
         """(계좌, 거래일, 주문번호) — 03 D-046."""
         return f"{account}|{at.astimezone(KST).date().isoformat()}|{order_no}"
@@ -417,10 +442,13 @@ class Repository:
         r = self._x("SELECT * FROM broker_order WHERE order_key = ?", (order_key,)).fetchone()
         return self._order(r) if r else None
 
-    def broker_order_by_no(self, order_no: str) -> BrokerOrderRow | None:
-        r = self._x("SELECT * FROM broker_order WHERE order_no = ? ORDER BY trade_date DESC LIMIT 1",
-                    (order_no,)).fetchone()
-        return self._order(r) if r else None
+    def broker_order_by_no(self, order_no: str, trade_date: str, account: str | None = None) -> BrokerOrderRow | None:
+        """주문번호는 거래일·계좌 안에서만 유일하다고 본다 (03 D-046). 계좌를 모르는데 여러 계좌에 있으면 None."""
+        sql, params = "SELECT * FROM broker_order WHERE order_no=? AND trade_date=?", (order_no, trade_date)
+        if account is not None:
+            sql, params = sql + " AND account=?", params + (account,)
+        rows = list(self._x(sql, params))
+        return self._order(rows[0]) if len(rows) == 1 else None
 
     def open_orders(self, account: str, side: str | None = None) -> list[BrokerOrderRow]:
         sql = ("SELECT * FROM broker_order WHERE account=? AND state IN ('ACCEPTED','PARTIAL') "
@@ -501,8 +529,13 @@ class Repository:
         self._x("UPDATE reservation SET amount=?, cash_amount=? WHERE reservation_id=?",
                 (str(Decimal(r["amount"]) + amount), str(Decimal(r["cash_amount"]) + cash_amount), reservation_id))
 
-    def known_order_nos(self, account: str) -> set[str]:
-        return {r["order_no"] for r in self._x("SELECT order_no FROM broker_order WHERE account=?", (account,))}
+    def known_order_nos(self, account: str, trade_date: str) -> set[str]:
+        return {r["order_no"] for r in self._x("SELECT order_no FROM broker_order WHERE account=? AND trade_date=?",
+                                               (account, trade_date))}
+
+    def latest_halt(self, halt_type: str) -> dict | None:
+        r = self._x("SELECT * FROM halt WHERE halt_type=? ORDER BY created_at DESC LIMIT 1", (halt_type,)).fetchone()
+        return dict(r) if r else None
 
     def audit_count_since(self, kind: str, since: str) -> int:
         return int(self._x("SELECT COUNT(*) FROM audit_event WHERE kind=? AND at>=?", (kind, since)).fetchone()[0])

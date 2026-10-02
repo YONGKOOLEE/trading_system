@@ -156,6 +156,11 @@ class Gate:
             raise _Reject(Check.G4, "취소·정정 대상 주문이 없거나 종결됨 (INV-17)")
         if target.account != req.account or target.instrument != req.instrument or target.side != req.side.value:
             raise _Reject(Check.G4, "취소·정정 요청의 계좌·종목·방향이 대상 주문과 다름")
+        if req.source is not RequestSource.OPERATOR:
+            # 정책 요청은 대상 주문 소유 전략의 이름으로만 낼 수 있다 (소유자를 비워 K9를 우회하는 것 방지, CP-018 R-8)
+            target_owner = self._repo.intent(target.intent_id).owner if target.intent_id else None
+            if req.owner != target_owner:
+                raise _Reject(Check.G4, f"취소·정정 요청의 소유자({req.owner})가 대상 주문 소유자({target_owner})와 다름")
         if self._repo.active_cancel_for(target.order_key):
             raise _Reject(Check.G4, "같은 주문에 처리 중인 취소·정정 있음 (INV-17)")
 
