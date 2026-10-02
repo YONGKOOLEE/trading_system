@@ -92,6 +92,13 @@ CREATE TABLE IF NOT EXISTS strategy_transition (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT NOT NULL, strategy_id TEXT NOT NULL, version INTEGER NOT NULL,
   market TEXT NOT NULL, from_state TEXT, to_state TEXT NOT NULL, approval_id TEXT NOT NULL, evidence TEXT,
   stop_reason TEXT, at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS reconciliation (
+  recon_id TEXT PRIMARY KEY, mode TEXT NOT NULL, account TEXT NOT NULL, trigger TEXT NOT NULL,
+  result TEXT NOT NULL, summary TEXT NOT NULL, created_at TEXT NOT NULL, created_seq INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS recon_item (
+  item_id TEXT PRIMARY KEY, mode TEXT NOT NULL, recon_id TEXT NOT NULL REFERENCES reconciliation(recon_id),
+  account TEXT NOT NULL, kind TEXT NOT NULL, instrument TEXT, ref TEXT, internal_value TEXT, broker_value TEXT,
+  detail TEXT, state TEXT NOT NULL, method TEXT, resolver TEXT, resolved_at TEXT);
 CREATE TABLE IF NOT EXISTS audit_event (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT NOT NULL, at TEXT NOT NULL, kind TEXT NOT NULL,
   actor TEXT NOT NULL, ref TEXT, summary TEXT NOT NULL);
@@ -503,7 +510,8 @@ class Repository:
                     (account, instrument)).fetchone()
         return OwnershipRow(r["ownership_id"], r["owner"], r["state"], r["intent_id"]) if r else None
 
-    def insert_ownership(self, account: str, instrument: str, owner: str, intent_id: str, at: datetime) -> None:
+    def insert_ownership(self, account: str, instrument: str, owner: str, intent_id: str | None,
+                         at: datetime) -> None:
         self._x("INSERT INTO ownership(ownership_id, mode, account, instrument, owner, state, intent_id, created_at) "
                 "VALUES(?,?,?,?,?,?,?,?)",
                 (new_id("own"), self.mode.value, account, instrument, owner, "RESERVED", intent_id, to_iso(at)))
@@ -653,6 +661,51 @@ class Repository:
     def strategy_transitions(self, strategy_id: str, version: int) -> list[dict]:
         return [dict(r) for r in self._x("SELECT * FROM strategy_transition WHERE strategy_id=? AND version=? "
                                          "ORDER BY seq", (strategy_id, version))]
+
+    # --- 대조 (02 ENT-24·24a) --------------------------------------------------------
+    def insert_reconciliation(self, account: str, trigger: str, result: str, summary: dict, at: datetime) -> str:
+        recon_id = new_id("rec")
+        self._x("INSERT INTO reconciliation(recon_id, mode, account, trigger, result, summary, created_at, created_seq) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (recon_id, self.mode.value, account, trigger, result, json.dumps(summary, ensure_ascii=False),
+                 to_iso(at), self.next_seq("recon")))
+        return recon_id
+
+    def insert_recon_item(self, recon_id: str, account: str, kind: str, instrument: str | None, ref: str | None,
+                          internal_value: str | None, broker_value: str | None, detail: str) -> str:
+        item_id = new_id("rci")
+        self._x("INSERT INTO recon_item(item_id, mode, recon_id, account, kind, instrument, ref, internal_value, "
+                "broker_value, detail, state) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (item_id, self.mode.value, recon_id, account, kind, instrument, ref, internal_value, broker_value,
+                 detail, "OPEN"))
+        return item_id
+
+    def open_recon_items(self, account: str | None = None) -> list[dict]:
+        sql, params = "SELECT * FROM recon_item WHERE state='OPEN'", ()
+        if account is not None:
+            sql, params = sql + " AND account=?", (account,)
+        return [dict(r) for r in self._x(sql + " ORDER BY rowid", params)]
+
+    def recon_item(self, item_id: str) -> dict | None:
+        r = self._x("SELECT * FROM recon_item WHERE item_id=?", (item_id,)).fetchone()
+        return dict(r) if r else None
+
+    def resolve_recon_item(self, item_id: str, method: str, resolver: str, at: datetime) -> None:
+        self._x("UPDATE recon_item SET state='RESOLVED', method=?, resolver=?, resolved_at=? WHERE item_id=?",
+                (method, resolver, to_iso(at), item_id))
+
+    def latest_reconciliation(self, account: str) -> dict | None:
+        r = self._x("SELECT * FROM reconciliation WHERE account=? ORDER BY created_seq DESC LIMIT 1",
+                    (account,)).fetchone()
+        return dict(r) if r else None
+
+    def fill_exists(self, order_key: str, fill_id: str) -> bool:
+        return self._x("SELECT 1 FROM fill WHERE fill_key=?", (f"{order_key}|{fill_id}",)).fetchone() is not None
+
+    def integrity_ok(self) -> bool:
+        with self._lock:
+            r = self.connection.execute("PRAGMA quick_check").fetchone()
+        return r is not None and r[0] == "ok"
 
     # --- 운영 명령 (03 §6.6) -------------------------------------------------------
     def insert_command(self, command_id: str, channel: str, actor: str, command: str, args: dict,

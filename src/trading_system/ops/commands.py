@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from typing import Protocol
 from decimal import Decimal, InvalidOperation
 
 from trading_system.domain.clock import Clock
@@ -20,8 +21,16 @@ from trading_system.gate.gate import Gate
 from trading_system.halt.manager import Channel, HaltManager
 from trading_system.storage.repository import Repository
 
-LOCAL_ONLY = frozenset({"CONFIRM_UNKNOWN"})
-KNOWN = frozenset({"KILL", "RESUME", "CANCEL", "REDUCE", "EXIT", "CONFIRM_UNKNOWN"})
+LOCAL_ONLY = frozenset({"CONFIRM_UNKNOWN", "RECONCILE", "RECONCILE_RESOLVE"})
+KNOWN = frozenset({"KILL", "RESUME", "CANCEL", "REDUCE", "EXIT", "CONFIRM_UNKNOWN", "RECONCILE", "RECONCILE_RESOLVE"})
+
+
+class _Reconciles(Protocol):
+    def run(self, account: str, trigger: str) -> object: ...
+
+
+class _Resolves(Protocol):
+    def resolve(self, item_id: str, method: str, actor: str) -> str: ...
 
 
 class CommandError(ValueError):
@@ -36,7 +45,10 @@ class CommandOutcome:
 
 
 class OpsProcessor:
-    def __init__(self, repo: Repository, gate: Gate, executor: Executor, halts: HaltManager, clock: Clock) -> None:
+    def __init__(self, repo: Repository, gate: Gate, executor: Executor, halts: HaltManager, clock: Clock, *,
+                 reconciler: _Reconciles | None = None, resolver: _Resolves | None = None) -> None:
+        self._reconciler = reconciler
+        self._resolver = resolver
         self._repo = repo
         self._gate = gate
         self._executor = executor
@@ -88,6 +100,15 @@ class OpsProcessor:
                 raise CommandError("accepted는 true/false(불리언)여야 함")
             self._halts.confirm_unknown(args["intent_id"], accepted, actor, args.get("order_no"))
             return "DONE", "결과 불명 확정"
+        if name == "RECONCILE":
+            if self._reconciler is None:
+                raise CommandError("대조기가 연결되지 않음")
+            r = self._reconciler.run(args["account"], "MANUAL")
+            return "DONE", f"대조 {getattr(r, 'result', r)}"
+        if name == "RECONCILE_RESOLVE":
+            if self._resolver is None:
+                raise CommandError("해소기가 연결되지 않음")
+            return "DONE", self._resolver.resolve(args["item_id"], args["method"], actor)
         req = self._request(cid, name, args)
         d = self._gate.decide(req)
         if d.result is not GateResult.APPROVED or d.approved is None:

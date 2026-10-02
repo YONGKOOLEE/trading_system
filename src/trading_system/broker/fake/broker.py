@@ -16,7 +16,10 @@ from enum import StrEnum
 
 from trading_system.broker.base import BrokerQueryError
 from trading_system.domain.enums import OrderType, SubmitOutcome
-from trading_system.domain.models import BrokerOrderRecord, FillRecord, OrderEvent, OrderRequest, SubmitResult
+from trading_system.domain.market import CashView
+from trading_system.domain.models import (
+    BrokerOrderRecord, BrokerPosition, FillRecord, OrderEvent, OrderRequest, SubmitResult,
+)
 
 _EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
 _OPEN = ("ACCEPTED", "PARTIAL")
@@ -47,6 +50,7 @@ class FakeBroker:
         self.query_failures = 0             # 다음 조회 N회 실패 (V-42)
         self.query_delay = 0                # 응답 유실 주문이 조회에 나타나기까지의 조회 횟수 (PV-05)
         self.queries = 0
+        self.cash: dict[str, CashView] = {}  # 계좌별 예수금·주문가능현금 (시험이 지정)
         self.disconnected = False           # 단절: 주문은 전송 전 실패, 조회는 실패
         self.raise_after_send = False       # 브로커는 받았지만 응답 전에 연결이 끊김 → 어댑터 예외
         self._seq = 0
@@ -171,7 +175,8 @@ class FakeBroker:
         """다음 거래일: 주문번호가 처음부터 다시 매겨진다고 가정한다 (키움 주문번호 유일 범위 미확인 K-U2, D-046)."""
         self._day += 1
         self._seq = 0
-        self._book = {f"d{o.day}-{no}" if o.day != self._day else no: o for no, o in self._book.items()}
+        # 지난 거래일 주문은 "d<일>-<번호>" 키로 옮겨 오늘 번호와 겹치지 않게 한다 (이미 옮긴 키는 그대로)
+        self._book = {(f"d{o.day}-{no}" if no.isdigit() else no): o for no, o in self._book.items()}
 
     def open_order_nos(self) -> list[str]:
         return [no for no, o in self._book.items() if o.record.state in _OPEN and o.record.kind != "CANCEL"]
@@ -214,3 +219,28 @@ class FakeBroker:
         self._query()
         visible = {no for no, o in self._book.items() if self.queries > o.visible_after and o.day == self._day}
         return [f for a, d, f in self._fills if a == account and d == self._day and f.order_no in visible]
+
+    def positions_unchecked(self, account: str) -> dict[str, Decimal]:
+        """체결 누적으로 만든 브로커 잔고 (모든 거래일). 조회 장애와 무관."""
+        qty: dict[str, Decimal] = {}
+        for a, d, f in self._fills:
+            if a != account:
+                continue
+            o = self._find(d, f.order_no)
+            sign = Decimal("1") if o.record.side == "BUY" else Decimal("-1")
+            qty[o.record.instrument] = qty.get(o.record.instrument, Decimal("0")) + sign * f.quantity
+        return {k: v for k, v in qty.items() if v != 0}
+
+    def _find(self, day: int, order_no: str) -> _Order:
+        key = order_no if day == self._day else f"d{day}-{order_no}"
+        return self._book[key]
+
+    def query_positions(self, account: str) -> list[BrokerPosition]:
+        self._query()
+        return [BrokerPosition(i, q, Decimal("0")) for i, q in sorted(self.positions_unchecked(account).items())]
+
+    def query_cash(self, account: str) -> CashView:
+        self._query()
+        if account not in self.cash:
+            raise BrokerQueryError("fake: 예수금 정보 없음")
+        return self.cash[account]

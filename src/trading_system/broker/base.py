@@ -9,7 +9,10 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from trading_system.domain.models import BrokerOrderRecord, FillRecord, OrderEvent, OrderRequest, SubmitResult
+from trading_system.domain.market import CashView
+from trading_system.domain.models import (
+    BrokerOrderRecord, BrokerPosition, FillRecord, OrderEvent, OrderRequest, SubmitResult,
+)
 
 
 class BrokerQueryError(RuntimeError):
@@ -28,3 +31,7 @@ class BrokerAdapter(Protocol):
     def query_orders(self, account: str) -> list[BrokerOrderRecord]: ...
 
     def query_fills(self, account: str) -> list[FillRecord]: ...
+
+    def query_positions(self, account: str) -> list[BrokerPosition]: ...
+
+    def query_cash(self, account: str) -> CashView: ...

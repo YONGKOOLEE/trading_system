@@ -2,7 +2,7 @@
 
 모든 시나리오 테스트가 끝날 때 실행한다. 위반 목록을 문자열로 돌려준다.
 T-001 범위: INV-01·03·04·05·06·07·08·09·10·12·15·17, T-002: INV-14, T-004: INV-02·11 (감사 이력 재생).
-T-007: INV-13. INV-16(수동 소유 종목)은 T-008에서 추가한다.
+T-007: INV-13, T-008: INV-16.
 """
 
 from __future__ import annotations
@@ -91,7 +91,7 @@ def check_invariants(conn: sqlite3.Connection, mode: str) -> list[str]:
     # INV-12 모든 레코드의 모드 = 저장소 모드
     for table in ("account", "gate_decision", "intent", "attempt", "broker_order", "fill",
                   "position", "ownership", "reservation", "halt", "audit_event", "settings_version", "ops_command",
-                  "strategy_registration", "strategy_state", "strategy_transition"):
+                  "strategy_registration", "strategy_state", "strategy_transition", "reconciliation", "recon_item"):
         for r in _rows(conn, f"SELECT COUNT(*) c FROM {table} WHERE mode <> ?", (mode,)):
             if r["c"]:
                 v.append(f"INV-12 모드 불일치 {table} {r['c']}건")
@@ -118,6 +118,14 @@ def check_invariants(conn: sqlite3.Connection, mode: str) -> list[str]:
     for r in _rows(conn, "SELECT seq, approval_id FROM strategy_transition"):
         if not re.fullmatch(r"A-\d{3,}", r["approval_id"] or ""):
             v.append(f"INV-13 승인 A-ID 없는 전략 상태 전이 seq={r['seq']}")
+
+    # INV-16 소유자가 "수동"인 종목에는 전략 신호 출처의 의도를 만들 수 없다 (소유권 생성 이후)
+    for r in _rows(conn, """SELECT o.account, o.instrument, o.created_at FROM ownership o
+                            WHERE o.owner = 'manual' AND o.state IN ('RESERVED','CONFIRMED')"""):
+        for i in _rows(conn, """SELECT d.decision_id FROM intent i JOIN gate_decision d ON d.decision_id = i.decision_id
+                                WHERE i.account=? AND i.instrument=? AND i.source='SIGNAL' AND d.created_at >= ?""",
+                       (r["account"], r["instrument"], r["created_at"])):
+            v.append(f"INV-16 수동 소유 종목에 전략 신호 의도 {i['decision_id']}")
 
     # INV-17 대상 주문당 활성 취소·정정 의도 최대 1
     for r in _rows(conn, f"""SELECT target_order_key, COUNT(*) c FROM intent

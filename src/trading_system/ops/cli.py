@@ -111,6 +111,37 @@ def resume_main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
+def reconcile_resolve_main(argv: Sequence[str] | None = None) -> int:
+    """불일치 항목 해소 또는 재대조 요청을 기록한다 (03 §6.3). 판정·반영은 본 프로세스가 한다."""
+    p = _parser("reconcile-resolve")
+    p.add_argument("item_id", nargs="?", help="불일치 항목 ID (status로 확인)")
+    p.add_argument("method", nargs="?", choices=["EXTERNAL", "APPLY_FILL", "CLOSE_ORDER", "BROKER_ACTION"])
+    p.add_argument("--run", action="store_true", help="재대조 요청 (--account 필요)")
+    ns = p.parse_args(argv)
+    try:
+        mode, db, _ = _resolve(ns)
+    except ConfigError as exc:
+        print(f"거부: {exc}")
+        return 2
+    if ns.run:
+        if not ns.account:
+            print("거부: --run에는 --account가 필요")
+            return 2
+        command, args = "RECONCILE", {"account": ns.account}
+    elif ns.item_id and ns.method:
+        command, args = "RECONCILE_RESOLVE", {"item_id": ns.item_id, "method": ns.method}
+    else:
+        print("거부: 항목 ID와 해소 방법, 또는 --run")
+        return 2
+    try:
+        cid = _record(db, mode, command, args)
+    except (StorageFailure, ModeMismatch) as exc:
+        print(f"명령 기록 실패(저장소): {exc}")
+        return 1
+    print(f"{command} 요청 기록: {cid} (결과는 status로 확인)")
+    return 0
+
+
 def _k1_released(db: Path, mode: Mode) -> bool:
     """가장 최근 K1이 해제되었고 해제되지 않은 K1이 없는지."""
     try:
@@ -150,6 +181,11 @@ def status_main(argv: Sequence[str] | None = None) -> int:
                   f"전략={h['scope_owner'] or '-'} 발동={h['created_at']} 사유={h['reason']}")
         pending = repo.pending_commands()
         print(f"처리 대기 명령: {len(pending)}건")
+        items = repo.open_recon_items(ns.account)
+        print(f"열린 대조 불일치: {len(items)}건")
+        for it in items:
+            print(f"  {it['item_id']} {it['kind']} 종목={it['instrument'] or '-'} 내부={it['internal_value'] or '-'} "
+                  f"브로커={it['broker_value'] or '-'}")
         unknown = repo.intents_in_state(IntentState.UNKNOWN)
         print(f"결과 불명 의도: {len(unknown)}건")
         for i in unknown:

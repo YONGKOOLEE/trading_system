@@ -19,6 +19,9 @@ def _require_decimal(name: str, value: object) -> Decimal:
     return value
 
 
+MANUAL_OWNER = "manual"  # 외부 수동 거래 보유분의 소유자 (02 D-034). 전략 신호는 이 종목에 낼 수 없다 (INV-16)
+
+
 def signal_id_of(strategy_id: str, version: int, evaluation_id: str, instrument: str, rule_id: str) -> str:
     """결정적 신호 ID (00 §2.5, 02 ENT-11)."""
     key = "\x1f".join([strategy_id, str(version), evaluation_id, instrument, rule_id])
@@ -219,3 +222,12 @@ class FillRecord:
     quantity: Decimal
     price: Decimal
     at: datetime
+
+
+@dataclass(frozen=True)
+class BrokerPosition:
+    """브로커 잔고 조회의 한 종목 (kt00018 대응, 계좌번호 없음). 대조 스냅샷으로만 쓴다 (02 D-035)."""
+
+    instrument: str
+    quantity: Decimal
+    avg_price: Decimal

@@ -245,11 +245,12 @@ class Executor:
                 self.apply_event(self._pending[0])
             self._pending.pop(0)
 
-    def _anomaly(self, ev: OrderEvent, reason: str) -> None:
-        """반영할 수 없는 통보. 원장을 바꾸지 않고 기록만 한다. 대조 불일치 정지(K4)는 T-008."""
+    def _anomaly(self, ev: OrderEvent, reason: str, account: str) -> None:
+        """반영할 수 없는 통보. 원장을 바꾸지 않고 기록한 뒤 대조 불일치 정지(K4)로 사람 확인을 요청한다."""
         self._repo.audit(self._clock.now(), "EVENT_ANOMALY", "tracker", ev.order_no, {
             "kind": ev.kind, "fill_id": ev.fill_id, "quantity": str(ev.quantity), "price": str(ev.price),
             "reason": reason})
+        self.raise_halt(HaltType.K4, "tracker", f"비정상 통보: {reason}", account)
 
     def apply_event(self, ev: OrderEvent) -> None:
         """통보 1건 반영. 호출자의 트랜잭션 안에서 실행한다."""
@@ -282,7 +283,7 @@ class Executor:
         elif ev.kind == "MODIFIED_PENDING":  # 보류했던 정정 확인: order_no=새 주문, new_order_no=원주문
             self.apply_event(replace(ev, kind="MODIFIED", order_no=ev.new_order_no or "", new_order_no=ev.order_no))
         else:
-            self._anomaly(ev, f"알 수 없는 통보 종류 {ev.kind}")
+            self._anomaly(ev, f"알 수 없는 통보 종류 {ev.kind}", order.account)
 
     def _close_changes_for(self, order: BrokerOrderRow, reason: str) -> None:
         """대상 주문이 종결되면 그 주문에 걸린 활성 취소·정정 의도도 종결한다 (예약 해제 포함).
@@ -324,16 +325,16 @@ class Executor:
 
     def _apply_fill(self, order: BrokerOrderRow, intent: IntentRow, ev: OrderEvent, now: datetime) -> None:
         if not ev.fill_id:
-            return self._anomaly(ev, "체결 식별자 없음")
+            return self._anomaly(ev, "체결 식별자 없음", order.account)
         if ev.quantity <= 0 or ev.price <= 0:
-            return self._anomaly(ev, "체결 수량·가격이 0 이하")
+            return self._anomaly(ev, "체결 수량·가격이 0 이하", order.account)
         filled = order.filled_quantity + ev.quantity
         if filled > order.quantity:
-            return self._anomaly(ev, f"주문 수량 초과 체결 ({filled} > {order.quantity})")
+            return self._anomaly(ev, f"주문 수량 초과 체결 ({filled} > {order.quantity})", order.account)
         if intent.side == Side.SELL.value and not intent.state.is_terminal:
             held = self._repo.position(intent.account, intent.instrument).quantity
             if ev.quantity > held:
-                return self._anomaly(ev, f"내부 보유({held})보다 큰 매도 체결 — 외부 거래 의심")
+                return self._anomaly(ev, f"내부 보유({held})보다 큰 매도 체결 — 외부 거래 의심", order.account)
         if not self._repo.insert_fill(order.order_key, ev.fill_id, ev.quantity, ev.price, ev.at or now):
             return None  # 중복 통보
         order_open = order.state in ("ACCEPTED", "PARTIAL")
@@ -345,6 +346,7 @@ class Executor:
             # INV-11: 종결된 의도는 다시 열지 않는다. 포지션 반영은 대조에서 사람이 정한다 (02 D-035, T-008)
             self._repo.audit(now, "LATE_FILL", "tracker", intent.intent_id, {"order": order.order_key})
             self.alert("EMERGENCY", f"종결 후 체결 통보 — 대조 필요 ({order.order_key})", intent.intent_id)
+            self.raise_halt(HaltType.K4, "tracker", f"종결 후 체결 ({order.order_key})", order.account)
             return None
 
         intent_filled = intent.filled_quantity + ev.quantity
