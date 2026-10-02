@@ -193,3 +193,75 @@ def status_main(argv: Sequence[str] | None = None) -> int:
     finally:
         repo.close()
     return 0
+
+
+# --- 저장소 운영 (T-011, 03 §9·D-089) ---------------------------------------------------------
+
+def backup_main(argv: Sequence[str] | None = None) -> int:
+    from trading_system.storage.maintenance import MaintenanceError, backup
+    p = _parser("backup")
+    p.add_argument("--keep", type=int, default=7)
+    ns = p.parse_args(argv)
+    try:
+        mode, db, _ = _resolve(ns)
+        target = backup(db, db.parent / "backup", ns.keep)
+    except (ConfigError, MaintenanceError) as exc:
+        print(f"실패: {exc}")
+        return 1
+    print(f"백업 완료: {target}")
+    return 0
+
+
+def restore_test_main(argv: Sequence[str] | None = None) -> int:
+    from trading_system.storage.maintenance import restore_test
+    p = _parser("restore-test")
+    p.add_argument("--backup", help="백업 파일 (기본: 가장 최근 백업)")
+    ns = p.parse_args(argv)
+    try:
+        mode, db, _ = _resolve(ns)
+    except ConfigError as exc:
+        print(f"거부: {exc}")
+        return 2
+    if ns.backup:
+        target = Path(ns.backup)
+    else:
+        backups = sorted((db.parent / "backup").glob("trading-*.db"))
+        if not backups:
+            print("백업 없음")
+            return 1
+        target = backups[-1]
+    rep = restore_test(target, mode.value)
+    print(f"복원 시험: {target.name} → {'통과' if rep.ok else '실패'}")
+    for k, v in rep.checks.items():
+        print(f"  {k}: {v}")
+    return 0 if rep.ok else 1
+
+
+def archive_logs_main(argv: Sequence[str] | None = None) -> int:
+    from datetime import UTC, datetime
+
+    from trading_system.storage.jsonlog import archive_logs
+    p = _parser("archive-logs")
+    p.add_argument("--days", type=int, default=90, help="보존 기간(일, 01 §2.12)")
+    ns = p.parse_args(argv)
+    try:
+        mode, db, _ = _resolve(ns)
+        done = archive_logs(db.parent / "logs", ns.days, datetime.now(UTC).date())
+    except (ConfigError, RuntimeError, OSError) as exc:
+        print(f"실패: {exc}")
+        return 1
+    print(f"보관 후 삭제한 로그: {len(done)}개 (감사·주문 기록은 삭제하지 않음)")
+    return 0
+
+
+def migrate_main(argv: Sequence[str] | None = None) -> int:
+    from trading_system.storage.maintenance import MaintenanceError, migrate
+    ns = _parser("migrate").parse_args(argv)
+    try:
+        mode, db, _ = _resolve(ns)
+        applied = migrate(db, db.parent / "backup")
+    except (ConfigError, MaintenanceError) as exc:
+        print(f"실패: {exc}")
+        return 1
+    print(f"적용한 버전: {applied or '없음(최신)'}")
+    return 0

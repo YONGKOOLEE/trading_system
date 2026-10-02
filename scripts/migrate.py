@@ -1,0 +1,14 @@
+"""로컬 운영 도구: migrate (03 §9·§13, D-089). 사람이 직접 실행한다. 본체는 trading_system.ops.cli.
+
+사용 예: .venv/Scripts/python scripts/migrate.py --mode PAPER --help
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from trading_system.ops.cli import migrate_main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(migrate_main())

@@ -210,14 +210,16 @@ class _Result:
 
 
 class Repository:
-    def __init__(self, path: Path, mode: Mode) -> None:
+    def __init__(self, path: Path, mode: Mode, busy_timeout: float = 5.0) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.mode = mode
         self._lock = threading.RLock()
         self._depth = 0
         self._tx_thread: int | None = None
         self.fail_next_transaction = False  # 테스트용 저장 실패 주입 (V-26)
-        self.connection = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False)
+        # busy_timeout: 다른 프로세스(scripts)가 쓰기 잠금을 쥐고 있을 때 기다리는 최대 초 (CP-018 L-3)
+        self.connection = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False,
+                                          timeout=busy_timeout)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA foreign_keys=ON")
@@ -237,7 +239,8 @@ class Repository:
             raise ModeMismatch(f"이 저장소는 {row[0]} 모드로 만들어졌다 (요청 모드 {self.mode.value})")
         if ver is None or ver[0] != SCHEMA_VERSION:
             self.connection.close()
-            raise SchemaMismatch(f"저장소 스키마 버전 {ver[0] if ver else '없음'} ≠ 코드 {SCHEMA_VERSION}")
+            raise SchemaMismatch(f"저장소 스키마 버전 {ver[0] if ver else '없음'} ≠ 코드 {SCHEMA_VERSION} "
+                                 f"(scripts/migrate.py로 백업 후 마이그레이션)")
 
     @property
     def in_transaction(self) -> bool:
