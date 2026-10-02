@@ -99,7 +99,6 @@ class MarketDataStore:
         prepared = preprocess_daily(raw, self._trading_days, data_version=data_version)
         if self.halts is None:
             return prepared
-            return
         if not prepared.report.ok:
             self.halts.activate(HaltType.K10, "marketdata", f"데이터 품질 실패 {instrument}: "
                                 f"{'; '.join(prepared.report.issues[:3])}", self.account, instrument=instrument)

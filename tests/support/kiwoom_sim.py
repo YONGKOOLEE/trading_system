@@ -338,3 +338,46 @@ class Sim:
     def _kt00005(self, body: dict, hdr: dict) -> tuple[int, dict, dict]:
         e = f"{int(self.entr):012d}"
         return 200, {"entr": e, "ord_alowa": e, "return_code": 0, "return_msg": "조회 완료"}, {}
+
+
+# --- 시장 데이터 (T-021) — Sim에 붙이는 처리기 ---------------------------------------------------------
+
+def _md_init(self: Sim) -> None:
+    if not hasattr(self, "daily"):
+        self.daily: dict[str, list[dict]] = {}       # 종목 → 일봉 행(최신 먼저)
+        self.info: dict[str, dict] = {}              # 종목 → ka10001 본문
+        self.master: dict[str, list[dict]] = {}      # mrkt_tp → 행
+        self.vi_rows: list[dict] = []
+
+
+def _ka10081(self: Sim, body: dict, hdr: dict) -> tuple[int, dict, dict]:
+    _md_init(self)
+    rows = self.daily.get(body["stk_cd"], [])
+    return self._paged(rows, "stk_dt_pole_chart_qry", hdr, {"stk_cd": body["stk_cd"]})
+
+
+def _ka10001(self: Sim, body: dict, hdr: dict) -> tuple[int, dict, dict]:
+    _md_init(self)
+    b = self.info.get(body["stk_cd"])
+    if b is None:
+        return 200, {"return_code": 1902, "return_msg": "종목 정보 없음"}, {}
+    return 200, {**b, "stk_cd": body["stk_cd"], "return_code": 0, "return_msg": "ok"}, {}
+
+
+def _ka10099(self: Sim, body: dict, hdr: dict) -> tuple[int, dict, dict]:
+    _md_init(self)
+    return self._paged(self.master.get(body["mrkt_tp"], []), "list", hdr)
+
+
+def _ka10054(self: Sim, body: dict, hdr: dict) -> tuple[int, dict, dict]:
+    _md_init(self)
+    return self._paged(self.vi_rows, "motn_stk", hdr)
+
+
+for _n, _f in (("_ka10081", _ka10081), ("_ka10001", _ka10001), ("_ka10099", _ka10099), ("_ka10054", _ka10054)):
+    setattr(Sim, _n, _f)
+
+
+def push_real(sim: Sim, rtype: str, item: str, values: dict) -> None:
+    sim.ws_out.put(json.dumps({"trnm": "REAL", "data": [{"type": rtype, "item": item, "values": values}]},
+                              ensure_ascii=False))

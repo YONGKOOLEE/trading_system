@@ -222,13 +222,19 @@ class KiwoomAdapter:
                 return out
 
     # --- 조회 ---------------------------------------------------------------------
-    def _query(self, api_id: str, body: dict, list_key: str | None) -> tuple[dict, list[dict]]:
-        """연속조회까지 모아 (첫 페이지 본문, 목록 행 전체)를 돌려준다."""
+    def query_raw(self, path: str, api_id: str, body: dict, list_key: str | None,
+                  enough: Callable[[list[dict]], bool] | None = None) -> tuple[dict, list[dict]]:
+        """시장 데이터 공급자용 조회 (T-021). 우선순위는 호출 문맥(시세는 MARKET)을 따른다."""
+        return self._query(api_id, body, list_key, path, enough)
+
+    def _query(self, api_id: str, body: dict, list_key: str | None, path: str = ACCOUNT_PATH,
+               enough: Callable[[list[dict]], bool] | None = None) -> tuple[dict, list[dict]]:
+        """연속조회까지 모아 (첫 페이지 본문, 목록 행 전체)를 돌려준다. enough가 참이면 거기서 멈춘다."""
         rows: list[dict] = []
         first: dict | None = None
         cont: tuple[str | None, str | None] = (None, None)
         for _page in range(MAX_PAGES):
-            page = self._query_page(api_id, body, cont)
+            page = self._query_page(api_id, body, cont, path)
             first = first or page.body
             assert page.body is not None
             if list_key is not None:
@@ -238,18 +244,19 @@ class KiwoomAdapter:
                 if not isinstance(items, list) or not all(isinstance(i, dict) for i in items):
                     raise BrokerQueryError(f"{api_id}: 목록 형식 아님")
                 rows.extend(items)
-            if (page.cont_yn or "").upper() != "Y" or not page.next_key:
+            if (page.cont_yn or "").upper() != "Y" or not page.next_key or (enough is not None and enough(rows)):
                 return first or {}, rows
             cont = ("Y", page.next_key)
         raise BrokerQueryError(f"{api_id}: 연속조회 {MAX_PAGES}쪽 초과 — 일부만 받은 결과는 쓰지 않음")
 
-    def _query_page(self, api_id: str, body: dict, cont: tuple[str | None, str | None]) -> HttpReply:
+    def _query_page(self, api_id: str, body: dict, cont: tuple[str | None, str | None],
+                    path: str = ACCOUNT_PATH) -> HttpReply:
         last = ""
         for _attempt in range(QUERY_ATTEMPTS):
             try:
                 token = self.tokens.token()
                 self.limiter.acquire(api_id, self.cfg.query_wait)
-                r = self.http.post(ACCOUNT_PATH, api_id, body, token, cont[0], cont[1])
+                r = self.http.post(path, api_id, body, token, cont[0], cont[1])
             except (TokenError, AcquireTimeout, PreSendError, AfterSendError) as exc:
                 raise BrokerQueryError(f"{api_id}: {exc}") from None
             if r.status >= 500 or r.body is None:
