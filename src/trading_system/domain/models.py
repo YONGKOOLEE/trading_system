@@ -33,19 +33,6 @@ class Account:
 
 
 @dataclass(frozen=True)
-class Limits:
-    """계좌 한도 (01 §2.3). T-001은 L2·L3만 사용."""
-
-    base_amount: Decimal
-    max_symbol_ratio: Decimal
-    max_total_ratio: Decimal
-
-    def __post_init__(self) -> None:
-        for n in ("base_amount", "max_symbol_ratio", "max_total_ratio"):
-            _require_decimal(n, getattr(self, n))
-
-
-@dataclass(frozen=True)
 class Signal:
     """전략 출력 (00 §2.5). 전략은 이 형식 밖의 출력을 할 수 없다."""
 

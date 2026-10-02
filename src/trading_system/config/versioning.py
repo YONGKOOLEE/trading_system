@@ -12,7 +12,6 @@ ENT-08의 변경 방향 열거(최초/강화/완화/혼합)에는 "위험 값 �
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -99,8 +98,7 @@ class SettingsManager:
 
     @staticmethod
     def hash_of(limits: AccountLimits) -> str:
-        text = json.dumps(limits.to_canonical(), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+        return limits.version_hash()
 
     def effective_limits(self, account: str, at: datetime | None = None) -> AccountLimits | None:
         row = self._repo.effective_settings_row(KIND, account, at or self._clock.now())

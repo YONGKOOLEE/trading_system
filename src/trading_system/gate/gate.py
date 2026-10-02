@@ -1,36 +1,34 @@
-"""중앙 주문 통제·리스크 게이트 (R-03, R-04, R-05, R-28, 01 §2.2, 03 §6.1).
+"""중앙 주문 통제·리스크 게이트 (R-03, R-04, R-05, R-14, R-21, R-27, R-28, 01 §2.2~§2.5·§2.8, 03 §6.1·§6.2).
 
 - 모든 요청을 하나씩 판정한다 (저장소 트랜잭션 + 잠금으로 직렬화, 01 D-022).
 - 검사·판정·의도·한도 예약·소유권 예약·멱등키를 한 저장 단위로 기록한다 (02 D-030, INV-03).
 - 요청을 바꾸지 않는다. 승인 또는 거부만 한다 (00 D-009, 01 D-016).
+- 검사는 G1~G15 번호 순서로 하고 처음 실패한 검사를 거부 사유로 기록한다. 이후 검사 결과도 진단용으로 기록한다.
+- 판정에 필요한 사실(시세·종목·달력·거래 상태·현금·손익·시계·전략 상태)을 모르면 위험 확대를 거부한다.
 
-T-001 범위 검사: G1·G2·G3·G4·G6·G7(L2·L3)·G9·G15. 나머지 G와 요청 유형별 세부 규칙은 T-003.
+G2의 정지 유형별 세부 동작(01 §2.6)은 T-005, 계좌 전체 대조 불일치(G5 계좌 범위)는 K4 정지(T-008)로 막는다.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 
-from trading_system.domain.clock import Clock, to_iso
-from trading_system.domain.enums import Check, GateResult, IntentState, Mode, RequestSource, RequestType, Side
-from trading_system.domain.models import ApprovedIntent, GateDecision, GateRequest, Limits
-from trading_system.storage.repository import Repository, new_id
+from trading_system.domain.clock import KST, Clock, last_kst_time_at_or_before, to_iso
+from trading_system.domain.enums import Check, GateResult, IntentState, Mode, OrderType, RequestSource, RequestType, Side
+from trading_system.domain.limits import AccountLimits
+from trading_system.domain.market import BLOCKS_RISK_REDUCTION, InstrumentInfo, Quote, estimate_cost
+from trading_system.domain.models import ApprovedIntent, GateDecision, GateRequest
+from trading_system.storage.repository import BrokerOrderRow, Repository, new_id
+
+from .ports import GateInputs, GatePolicy
 
 # 모드별 허용 브로커 환경 (R-01)
 _ALLOWED_ENV = {Mode.BACKTEST: {"fake"}, Mode.PAPER: {"mock"}, Mode.LIVE: {"real"}}
 _OPEN_ORDER_STATES = {"ACCEPTED", "PARTIAL"}
-
-
-@dataclass
-class _Snapshot:
-    symbol_after: Decimal | None = None
-    symbol_limit: Decimal | None = None
-    total_after: Decimal | None = None
-    total_limit: Decimal | None = None
+_ZERO = Decimal("0")
 
 
 class _Reject(Exception):
@@ -40,75 +38,105 @@ class _Reject(Exception):
         self.reason = reason
 
 
+@dataclass
+class _Ctx:
+    """한 판정 안에서만 쓰는 계산 결과."""
+
+    req: GateRequest
+    now: datetime
+    limits: AccountLimits | None = None
+    exposure_add: Decimal = _ZERO     # 이 요청이 새로 예약할 노출 (× |배수|)
+    cash_add: Decimal = _ZERO         # 이 요청이 새로 예약할 현금 (주문 금액 + 추정 비용)
+    notional: Decimal | None = None   # 예약 가격 기준 주문 금액
+    snapshot: dict[str, str] = field(default_factory=dict)
+
+
 class Gate:
-    def __init__(self, repo: Repository, clock: Clock, limits: Mapping[str, Limits],
-                 price_of: Callable[[str], Decimal]) -> None:
+    def __init__(self, repo: Repository, clock: Clock, inputs: GateInputs, policy: GatePolicy) -> None:
         self._repo = repo
         self._clock = clock
-        self._limits = dict(limits)
-        self._price_of = price_of
+        self._in = inputs
+        self._policy = policy
 
     # --- 공개 API ---------------------------------------------------------------
     def decide(self, req: GateRequest) -> GateDecision:
         """요청을 판정하고 기록한다. 저장 실패 시 StorageFailure를 그대로 올린다 (G15, 전송 없음)."""
         with self._repo.tx():
-            now = self._clock.now()
+            ctx = _Ctx(req, self._clock.now())
+            ctx.limits = self._in.limits.effective_limits(req.account, ctx.now)
+            results: list[tuple[Check, bool]] = []
+            first: _Reject | None = None
+            for check, fn in self._checks():
+                try:
+                    fn(ctx)
+                    results.append((check, True))
+                except _Reject as rej:
+                    results.append((check, False))
+                    first = first or rej
+                except Exception:
+                    if first is None:
+                        raise
+                    results.append((check, False))  # 이미 거부된 판정의 진단 검사 오류는 결과를 바꾸지 않는다
             decision_id = new_id("gd")
-            passed: list[tuple[Check, bool]] = []
-            snap = _Snapshot()
-            try:
-                self._run_checks(req, now, passed, snap)
-            except _Reject as rej:
-                passed.append((rej.check, False))
-                self._record_decision(decision_id, req, now, GateResult.REJECTED, rej.check, rej.reason, passed, snap)
-                return GateDecision(decision_id, GateResult.REJECTED, rej.check, rej.reason, None, tuple(passed))
-            self._record_decision(decision_id, req, now, GateResult.APPROVED, None, None, passed, snap)
-            approved = self._create_intent(decision_id, req, now, snap)
-            return GateDecision(decision_id, GateResult.APPROVED, None, None, approved, tuple(passed))
+            if first is not None:
+                self._record_decision(decision_id, ctx, GateResult.REJECTED, first, results)
+                return GateDecision(decision_id, GateResult.REJECTED, first.check, first.reason, None, tuple(results))
+            self._record_decision(decision_id, ctx, GateResult.APPROVED, None, results)
+            approved = self._create_intent(decision_id, ctx)
+            return GateDecision(decision_id, GateResult.APPROVED, None, None, approved, tuple(results))
 
-    # --- 검사 ---------------------------------------------------------------
-    def _run_checks(self, req: GateRequest, now: datetime, passed: list, snap: _Snapshot) -> None:
-        for check, fn in (
+    def _checks(self) -> tuple:
+        return (
             (Check.G1, self._g1_mode),
             (Check.G2, self._g2_halt),
             (Check.G3, self._g3_format_and_expiry),
             (Check.G4, self._g4_duplicate),
-            (Check.G6, self._g6_ownership),
+            (Check.G5, self._g5_unknown),
+            (Check.G6, self._g6_strategy_and_ownership),
             (Check.G7, self._g7_limits),
+            (Check.G8, self._g8_cash),
             (Check.G9, self._g9_sell_quantity),
             (Check.G10, self._g10_quantity_price),
-        ):
-            fn(req, now, snap)
-            passed.append((check, True))
+            (Check.G11, self._g11_freshness),
+            (Check.G12, self._g12_session),
+            (Check.G13, self._g13_trading_status),
+            (Check.G14, self._g14_clock),
+        )
 
-    def _g1_mode(self, req: GateRequest, now: datetime, snap: _Snapshot) -> None:
-        acct = self._repo.account(req.account)
+    # --- G1~G6 ----------------------------------------------------------------
+    def _g1_mode(self, ctx: _Ctx) -> None:
+        acct = self._repo.account(ctx.req.account)
         if acct is None:
             raise _Reject(Check.G1, "등록되지 않은 계좌")
         if acct.mode is not self._repo.mode or acct.broker_env not in _ALLOWED_ENV[self._repo.mode]:
             raise _Reject(Check.G1, "모드·브로커 환경 불일치")
 
-    def _g2_halt(self, req: GateRequest, now: datetime, snap: _Snapshot) -> None:
-        halts = self._repo.active_halts(req.account)
-        # T-001: 활성 정지가 하나라도 있으면 위험 확대 차단. 유형별 세부 동작(01 §2.6)은 T-005.
-        if halts and req.is_risk_increasing:
+    def _g2_halt(self, ctx: _Ctx) -> None:
+        halts = self._repo.active_halts(ctx.req.account)
+        # 활성 정지가 하나라도 있으면 위험 확대 차단. 유형별 세부 동작(01 §2.6)은 T-005.
+        if halts and ctx.req.is_risk_increasing:
             raise _Reject(Check.G2, f"정지 중 위험 확대 차단: {','.join(sorted(halts))}")
 
-    def _g3_format_and_expiry(self, req: GateRequest, now: datetime, snap: _Snapshot) -> None:
+    def _g3_format_and_expiry(self, ctx: _Ctx) -> None:
         """요청 형식·출처 권한·기한 (01 §2.1·§2.2 G3, R-21)."""
-        rt = req.request_type
+        req, rt = ctx.req, ctx.req.request_type
         if rt.is_new_order and req.side is not rt.default_side:
             raise _Reject(Check.G3, f"요청 유형 {rt.value}와 방향 {req.side.value}가 맞지 않음")
-        if req.is_risk_increasing and req.source is not RequestSource.SIGNAL:
+        if rt in (RequestType.ENTRY, RequestType.INCREASE) and req.source is not RequestSource.SIGNAL:
             raise _Reject(Check.G3, "신규 진입·증액은 전략 신호로만 가능 (운영 요청·정책 요청 불가, R-21)")
+        if rt is RequestType.MODIFY and req.source is not RequestSource.EXEC_POLICY:
+            raise _Reject(Check.G3, "정정은 실행 정책(미체결 정책)으로만 가능 (01 §2.1)")
+        if rt is RequestType.CANCEL and req.source is RequestSource.SIGNAL:
+            raise _Reject(Check.G3, "전략 신호는 취소를 낼 수 없음 (00 D-005)")
         if rt is RequestType.ENTRY and not req.owner:
             raise _Reject(Check.G3, "신규 진입에 소유 전략이 없음")
         if not rt.is_new_order and not req.target_order_key:
             raise _Reject(Check.G3, "취소·정정 대상 주문이 없음")
-        if req.valid_until is not None and now > req.valid_until:
+        if req.valid_until is not None and ctx.now > req.valid_until:
             raise _Reject(Check.G3, "신호 유효 기한 만료")
 
-    def _g4_duplicate(self, req: GateRequest, now: datetime, snap: _Snapshot) -> None:
+    def _g4_duplicate(self, ctx: _Ctx) -> None:
+        req = ctx.req
         # 같은 멱등키로 이미 판정했으면 승인·거부와 무관하게 중복 (01 D-016: 거부된 요청은 재판정하지 않음)
         if self._repo.decision_exists(req.idem_key) or self._repo.intent_by_idem(req.idem_key) is not None:
             raise _Reject(Check.G4, "중복 요청 (멱등키)")
@@ -116,108 +144,303 @@ class Gate:
             if self._repo.active_new_intents(req.account, req.instrument, req.side.value):
                 raise _Reject(Check.G4, "같은 종목·방향에 처리 중인 의도 있음 (INV-15)")
             return
-        target = self._repo.broker_order(req.target_order_key or "")
+        target = self._target(ctx)
         if target is None or target.state not in _OPEN_ORDER_STATES:
             raise _Reject(Check.G4, "취소·정정 대상 주문이 없거나 종결됨 (INV-17)")
+        if target.account != req.account or target.instrument != req.instrument or target.side != req.side.value:
+            raise _Reject(Check.G4, "취소·정정 요청의 계좌·종목·방향이 대상 주문과 다름")
         if self._repo.active_cancel_for(target.order_key):
             raise _Reject(Check.G4, "같은 주문에 처리 중인 취소·정정 있음 (INV-17)")
 
-    def _g6_ownership(self, req: GateRequest, now: datetime, snap: _Snapshot) -> None:
+    def _g5_unknown(self, ctx: _Ctx) -> None:
+        """결과 불명 (01 D-018, §2.5, INV-02). 취소는 허용한다."""
+        req = ctx.req
+        if req.request_type is RequestType.CANCEL:
+            return
+        unknown = self._repo.unknown_intents(req.account, req.instrument)
+        if not unknown:
+            return
+        if req.is_risk_increasing:
+            raise _Reject(Check.G5, "같은 종목에 결과 불명 의도가 있어 위험 확대 거부 (D-018)")
+        if any(u.side == Side.SELL.value and RequestType(u.request_type).is_new_order for u in unknown):
+            raise _Reject(Check.G5, "같은 종목에 결과 불명 매도가 있어 매도 거부 (이중 매도 방지)")
+
+    def _g6_strategy_and_ownership(self, ctx: _Ctx) -> None:
+        req = ctx.req
         if not req.request_type.is_new_order:
             return
+        if req.source is RequestSource.SIGNAL:
+            if not req.owner:
+                raise _Reject(Check.G6, "전략 신호에 소유 전략이 없음")
+            reason = self._in.strategies.signal_rejection(req.owner, req.request_type)
+            if reason:
+                raise _Reject(Check.G6, f"전략 상태: {reason}")
         own = self._repo.active_ownership(req.account, req.instrument)
         if req.request_type is RequestType.ENTRY:
             if own is not None and own.owner != req.owner:
-                raise _Reject(Check.G6, f"다른 전략 소유 종목 ({own.owner})")
+                raise _Reject(Check.G6, f"다른 소유자의 종목 ({own.owner})")
             return
-        if req.source is RequestSource.OPERATOR:
+        if req.source is RequestSource.OPERATOR and not req.is_risk_increasing:
             return  # 운영 요청의 감액·청산은 소유자와 무관 (01 §2.5)
         if own is None or own.owner != req.owner:
             raise _Reject(Check.G6, "소유하지 않은 종목")
 
-    def _g7_limits(self, req: GateRequest, now: datetime, snap: _Snapshot) -> None:
+    # --- G7 한도 ----------------------------------------------------------------
+    def _g7_limits(self, ctx: _Ctx) -> None:
+        """L1~L7·L10 (01 §2.3). L8은 G12. 위험 축소에는 적용하지 않는다 (01 D-019)."""
+        req = ctx.req
         if not req.is_risk_increasing:
-            return  # 위험 축소에는 한도 거부를 적용하지 않음 (01 D-019)
-        limits = self._limits.get(req.account)
-        if limits is None:
+            return
+        lim = ctx.limits
+        if lim is None:
             raise _Reject(Check.G7, "계좌 한도 설정 없음")
-        new_amount = req.quantity * req.price
-        symbol, total = Decimal("0"), Decimal("0")
-        self._price(req.instrument)  # 요청 종목 시세가 없으면 판정하지 않는다
+        daily = self._in.account.daily_risk(req.account)
+        if daily is None:
+            raise _Reject(Check.G7, "일일 리스크 상태 없음 (기준 금액 모름)")
+        if not daily.evaluable:
+            raise _Reject(Check.G7, "평가 불능 (시세 신선도 초과, 01 §2.4)")
+        base = daily.base_amount
+        notional = req.quantity * self._reserve_price(ctx)  # 시세가 없으면 여기서 G11로 거부
+        info = self._info(req.instrument, Check.G7)
+        exposure_new = notional * info.exposure_multiplier
+        cash_new = notional + estimate_cost(notional, False, self._policy.cost_rates)
+        target_rsv = None
+        if req.request_type is RequestType.MODIFY:
+            target = self._target(ctx)
+            target_rsv = self._repo.reservation_for(target.intent_id) if target and target.intent_id else None
+        old_exposure = target_rsv.remaining if target_rsv else _ZERO
+        old_cash = target_rsv.cash_remaining if target_rsv else _ZERO
+        # 정정은 원주문과 정정 후 주문 중 하나만 남으므로 최악 = 둘 중 큰 쪽. 더 커지는 만큼만 새로 예약한다.
+        ctx.exposure_add = max(_ZERO, exposure_new - old_exposure)
+        ctx.cash_add = max(_ZERO, cash_new - old_cash)
+        ctx.notional = notional
+
+        symbol = total = leveraged = _ZERO
+        held_symbols: set[str] = set()
         for inst, pos in self._repo.positions(req.account).items():
             if pos.quantity == 0:
                 continue
-            amount = pos.quantity * self._price(inst)
+            held_symbols.add(inst)
+            i = self._info(inst, Check.G7)
+            amount = pos.quantity * self._valuation_price(inst, ctx) * i.exposure_multiplier
             total += amount
-            if inst == req.instrument:
-                symbol += amount
+            leveraged += amount if i.is_leveraged else _ZERO
+            symbol += amount if inst == req.instrument else _ZERO
+        entry_symbols: set[str] = set()
         for r in self._repo.active_reservations(req.account):
             total += r.remaining
-            if r.instrument == req.instrument:
-                symbol += r.remaining
-        snap.symbol_after = symbol + new_amount
-        snap.total_after = total + new_amount
-        snap.symbol_limit = limits.base_amount * limits.max_symbol_ratio
-        snap.total_limit = limits.base_amount * limits.max_total_ratio
-        if snap.symbol_after > snap.symbol_limit:
-            raise _Reject(Check.G7, f"종목 비중 한도 초과 ({snap.symbol_after} > {snap.symbol_limit})")
-        if snap.total_after > snap.total_limit:
-            raise _Reject(Check.G7, f"총 노출 한도 초과 ({snap.total_after} > {snap.total_limit})")
+            symbol += r.remaining if r.instrument == req.instrument else _ZERO
+            if self._info(r.instrument, Check.G7).is_leveraged:
+                leveraged += r.remaining
+            if self._repo.intent(r.intent_id).request_type == RequestType.ENTRY.value:
+                entry_symbols.add(r.instrument)
 
-    def _price(self, instrument: str) -> Decimal:
-        """평가 가격. 없거나 이상하면 거부한다 (G11, 불확실하면 주문하지 않음). 신선도 검사는 T-003."""
-        try:
-            price = self._price_of(instrument)
-        except (KeyError, LookupError):
-            raise _Reject(Check.G11, f"시세 없음: {instrument}") from None
-        if not isinstance(price, Decimal) or not price.is_finite() or price <= 0:
-            raise _Reject(Check.G11, f"시세 이상: {instrument}")
-        return price
+        s = ctx.snapshot
+        s.update(base_amount=str(base), notional=str(notional), exposure_add=str(ctx.exposure_add),
+                 symbol_after=str(symbol + ctx.exposure_add), symbol_limit=str(base * lim.l2_max_symbol_ratio),
+                 total_after=str(total + ctx.exposure_add), total_limit=str(base * lim.l3_max_total_ratio),
+                 loss_ratio=str(daily.loss_ratio))
 
-    def _g10_quantity_price(self, req: GateRequest, now: datetime, snap: _Snapshot) -> None:
-        """수량·가격 유효성 (G10 일부). 호가 단위·수량 단위는 T-003·T-010."""
-        if not req.request_type.is_new_order:
+        # L1 1회 최대 손실: 손절 규칙이 없으면 주문 금액 전체 × |배수| (01 D-020)
+        if exposure_new > base * lim.l1_max_loss_ratio:
+            raise _Reject(Check.G7, f"L1 1회 최대 손실 초과 ({exposure_new} > {base * lim.l1_max_loss_ratio})")
+        if symbol + ctx.exposure_add > base * lim.l2_max_symbol_ratio:
+            raise _Reject(Check.G7, f"L2 종목 비중 한도 초과 ({s['symbol_after']} > {s['symbol_limit']})")
+        if total + ctx.exposure_add > base * lim.l3_max_total_ratio:
+            raise _Reject(Check.G7, f"L3 총 노출 한도 초과 ({s['total_after']} > {s['total_limit']})")
+        # L4 일일 손실: 도달하면 거부 (01 §2.3 "도달 시 정지 K2")
+        if daily.loss_ratio >= lim.l4_daily_loss_ratio:
+            raise _Reject(Check.G7, f"L4 일일 손실 한도 도달 ({daily.loss_ratio} ≥ {lim.l4_daily_loss_ratio})")
+        if req.request_type in (RequestType.ENTRY, RequestType.INCREASE):
+            day_start = last_kst_time_at_or_before(ctx.now, lim.daily_reference_time)
+            count = self._repo.risk_increasing_order_count(req.account, day_start)
+            s["orders_today"] = str(count)
+            if count + 1 > lim.l5_daily_new_orders:
+                raise _Reject(Check.G7, f"L5 일일 신규 주문 수 초과 ({count + 1} > {lim.l5_daily_new_orders})")
+        if req.request_type is RequestType.ENTRY:
+            slots = held_symbols | entry_symbols
+            if req.instrument not in slots and len(slots) + 1 > lim.l6_max_positions:
+                raise _Reject(Check.G7, f"L6 보유 종목 수 초과 ({len(slots) + 1} > {lim.l6_max_positions})")
+        if notional > lim.l7_max_order_amount:
+            raise _Reject(Check.G7, f"L7 1회 주문 최대 금액 초과 ({notional} > {lim.l7_max_order_amount})")
+        if info.is_leveraged and lim.l10_leverage_total_ratio is not None:
+            cap = base * lim.l10_leverage_total_ratio
+            if leveraged + ctx.exposure_add > cap:
+                raise _Reject(Check.G7, f"L10 레버리지 상품 총 노출 초과 ({leveraged + ctx.exposure_add} > {cap})")
+
+    def _g8_cash(self, ctx: _Ctx) -> None:
+        """주문 가능 현금 = min(브로커 주문가능현금, 예수금 − 활성 매수 예약 현금) (03 §6.2)."""
+        req = ctx.req
+        if not req.is_risk_increasing:
             return
-        if req.quantity <= 0:
-            raise _Reject(Check.G10, f"수량이 0 이하: {req.quantity}")
-        if req.quantity != req.quantity.to_integral_value():
-            raise _Reject(Check.G10, f"정수 주가 아님: {req.quantity}")
-        if req.price <= 0:
-            raise _Reject(Check.G10, f"가격이 0 이하: {req.price}")
+        cash = self._in.account.cash(req.account)
+        if cash is None:
+            raise _Reject(Check.G8, "주문 가능 현금 모름")
+        if ctx.notional is None:  # G7이 실패한 진단 경로
+            raise _Reject(Check.G8, "주문 금액 계산 불가")
+        reserved = sum((r.cash_remaining for r in self._repo.active_reservations(req.account)), _ZERO)
+        available = min(cash.broker_orderable, cash.deposit - reserved)
+        ctx.snapshot.update(cash_available=str(available), cash_need=str(ctx.cash_add))
+        if ctx.cash_add > available:
+            raise _Reject(Check.G8, f"주문 가능 현금 부족 (필요 {ctx.cash_add}, 가능 {available})")
 
-    def _g9_sell_quantity(self, req: GateRequest, now: datetime, snap: _Snapshot) -> None:
+    def _g9_sell_quantity(self, ctx: _Ctx) -> None:
+        req = ctx.req
         if not (req.request_type.is_new_order and req.side is Side.SELL):
             return
         held = self._repo.position(req.account, req.instrument).quantity
         pending = sum((i.quantity - i.filled_quantity
-                       for i in self._repo.active_new_intents(req.account, req.instrument, Side.SELL.value)),
-                      Decimal("0"))
+                       for i in self._repo.active_new_intents(req.account, req.instrument, Side.SELL.value)), _ZERO)
         if req.quantity > held - pending:
             raise _Reject(Check.G9, f"매도 수량 초과 (요청 {req.quantity}, 가능 {held - pending})")
 
-    # --- 기록 ---------------------------------------------------------------
-    def _record_decision(self, decision_id: str, req: GateRequest, now: datetime, result: GateResult,
-                         failed: Check | None, reason: str | None, passed: list, snap: _Snapshot) -> None:
-        def s(v: Decimal | None) -> str | None:
-            return None if v is None else str(v)
+    # --- G10~G14 ---------------------------------------------------------------
+    def _g10_quantity_price(self, ctx: _Ctx) -> None:
+        """수량·가격·호가 단위 (01 G10)."""
+        req = ctx.req
+        if req.request_type is RequestType.CANCEL:
+            return
+        if req.quantity <= 0:
+            raise _Reject(Check.G10, f"수량이 0 이하: {req.quantity}")
+        info = self._info(req.instrument, Check.G10)
+        if req.quantity % info.lot_size != 0:
+            raise _Reject(Check.G10, f"수량 단위({info.lot_size})의 배수가 아님: {req.quantity}")
+        if req.request_type is RequestType.MODIFY:
+            target = self._target(ctx)
+            if target is None:
+                raise _Reject(Check.G10, "정정 대상 주문 없음")
+            left = target.quantity - target.filled_quantity
+            if req.quantity > left:
+                raise _Reject(Check.G10, f"수량 증가 정정 불가 (요청 {req.quantity}, 미체결 {left})")
+        if req.price <= 0:
+            raise _Reject(Check.G10, f"가격이 0 이하: {req.price}")
+        if req.order_type is not OrderType.LIMIT:
+            return
+        tick = self._in.market.tick_valid(req.instrument, req.price)
+        if tick is None:
+            raise _Reject(Check.G10, "호가 단위 규칙 없음")
+        if not tick:
+            raise _Reject(Check.G10, f"호가 단위에 맞지 않는 가격: {req.price}")
+        q = self._in.market.quote(req.instrument)
+        if q is not None and ((q.upper_limit is not None and req.price > q.upper_limit)
+                              or (q.lower_limit is not None and req.price < q.lower_limit)):
+            raise _Reject(Check.G10, f"가격제한폭 밖의 가격: {req.price}")
 
+    def _g11_freshness(self, ctx: _Ctx) -> None:
+        """시세 신선도 (01 G11, Q-C): 위험 확대는 지연 시 거부, 위험 축소는 시장가만 거부."""
+        req = ctx.req
+        if req.request_type is RequestType.CANCEL:
+            return
+        if not req.is_risk_increasing and req.order_type is OrderType.LIMIT:
+            return
+        self._fresh_quote(req.instrument, ctx)
+
+    def _g12_session(self, ctx: _Ctx) -> None:
+        """거래 가능 시간·시장 달력 (01 G12, L8, R-14)."""
+        req = ctx.req
+        local = ctx.now.astimezone(KST)
+        session = self._in.market.session(local.date())
+        if session is None:
+            raise _Reject(Check.G12, "시장 달력 정보 없음")
+        if not session.is_open:
+            raise _Reject(Check.G12, "휴장일")
+        if not session.in_regular(ctx.now):
+            raise _Reject(Check.G12, "정규장 시간 밖")
+        if req.is_risk_increasing:
+            lim = ctx.limits
+            if lim is None:
+                raise _Reject(Check.G12, "주문 허용 시간대 설정 없음")
+            t = local.time()
+            if not (lim.order_window_start <= t < lim.order_window_end):
+                raise _Reject(Check.G12, f"L8 주문 허용 시간대 밖 ({t:%H:%M:%S})")
+
+    def _g13_trading_status(self, ctx: _Ctx) -> None:
+        """종목 거래 상태 (01 §2.8, R-27). 취소는 막지 않는다 (거래정지 중 취소 가능 여부는 브로커 사양 미확인)."""
+        req = ctx.req
+        if req.request_type is RequestType.CANCEL:
+            return
+        statuses = self._in.market.trading_status(req.instrument)
+        if req.is_risk_increasing:
+            if statuses is None:
+                raise _Reject(Check.G13, "종목 거래 상태 모름")
+            if statuses:
+                raise _Reject(Check.G13, f"거래 상태로 위험 확대 거부: {','.join(sorted(statuses))}")
+            return
+        if statuses and statuses & BLOCKS_RISK_REDUCTION:
+            raise _Reject(Check.G13, f"거래 상태로 매도 불가: {','.join(sorted(statuses & BLOCKS_RISK_REDUCTION))}")
+
+    def _g14_clock(self, ctx: _Ctx) -> None:
+        """시계 오차 (R-24, 01 K6 Q-H): 위험 확대 거부, 위험 축소는 운영 요청(사람)만 허용."""
+        req = ctx.req
+        if req.request_type is RequestType.CANCEL:
+            return
+        if self._in.clock_health.clock_ok() is True:
+            return
+        if not req.is_risk_increasing and req.source is RequestSource.OPERATOR:
+            return
+        raise _Reject(Check.G14, "시계 오차 초과 또는 판정 불가")
+
+    # --- 조회 도우미 ------------------------------------------------------------
+    def _target(self, ctx: _Ctx) -> BrokerOrderRow | None:
+        return self._repo.broker_order(ctx.req.target_order_key or "")
+
+    def _info(self, instrument: str, check: Check) -> InstrumentInfo:
+        info = self._in.market.instrument(instrument)
+        if info is None:
+            raise _Reject(check, f"종목 정보 없음: {instrument}")
+        return info
+
+    def _fresh_quote(self, instrument: str, ctx: _Ctx) -> Quote:
+        q = self._in.market.quote(instrument)
+        if q is None:
+            raise _Reject(Check.G11, f"시세 없음: {instrument}")
+        if q.price <= 0:
+            raise _Reject(Check.G11, f"시세 이상: {instrument}")
+        if ctx.now - q.at > self._policy.quote_max_age or q.at > ctx.now + self._policy.quote_max_age:
+            raise _Reject(Check.G11, f"시세 신선도 초과: {instrument} ({to_iso(q.at)})")
+        return q
+
+    def _valuation_price(self, instrument: str, ctx: _Ctx) -> Decimal:
+        """보유 평가 가격: 최근 체결가, 신선하지 않으면 평가 불능 → 거부 (01 §2.4)."""
+        return self._fresh_quote(instrument, ctx).price
+
+    def _reserve_price(self, ctx: _Ctx) -> Decimal:
+        """예약 가격: 지정가는 주문가, 시장가는 상한가(없으면 최근가 × (1 + 가격제한폭)) (03 §6.2)."""
+        req = ctx.req
+        if req.order_type is OrderType.LIMIT:
+            return req.price
+        q = self._fresh_quote(req.instrument, ctx)
+        if q.upper_limit is not None:
+            return q.upper_limit
+        return q.price * (1 + self._policy.price_limit_ratio)
+
+    # --- 기록 ---------------------------------------------------------------
+    def _record_decision(self, decision_id: str, ctx: _Ctx, result: GateResult, rej: _Reject | None,
+                         results: list[tuple[Check, bool]]) -> None:
+        req, s = ctx.req, ctx.snapshot
+        approved = result is GateResult.APPROVED
         self._repo.insert_decision({
-            "decision_id": decision_id, "created_at": to_iso(now), "source": req.source.value,
+            "decision_id": decision_id, "created_at": to_iso(ctx.now), "source": req.source.value,
             "request_type": req.request_type.value, "account": req.account, "instrument": req.instrument,
             "side": req.side.value, "quantity": str(req.quantity), "price": str(req.price),
             "idem_key": req.idem_key, "signal_id": req.signal_id, "owner": req.owner,
             "target_order_key": req.target_order_key, "result": result.value,
-            "failed_check": failed.value if failed else None, "reason": reason,
-            "checks": json.dumps([(c.value, ok) for c, ok in passed]),
-            "symbol_after": s(snap.symbol_after) if result is GateResult.APPROVED else None,
-            "symbol_limit": s(snap.symbol_limit), "total_after": s(snap.total_after), "total_limit": s(snap.total_limit),
+            "failed_check": rej.check.value if rej else None, "reason": rej.reason if rej else None,
+            "checks": json.dumps([(c.value, ok) for c, ok in results]),
+            "symbol_after": s.get("symbol_after") if approved else None,
+            "symbol_limit": s.get("symbol_limit"), "total_after": s.get("total_after"),
+            "total_limit": s.get("total_limit"),
+            "settings_hash": ctx.limits.version_hash() if ctx.limits else None,
+            "limit_snapshot": json.dumps(s, ensure_ascii=False, sort_keys=True) if s else None,
         })
-        self._repo.audit(now, "GATE_DECISION", "gate", decision_id, {
-            "result": result.value, "failed_check": failed.value if failed else None, "reason": reason,
-            "request_type": req.request_type.value, "instrument": req.instrument, "source": req.source.value,
+        self._repo.audit(ctx.now, "GATE_DECISION", "gate", decision_id, {
+            "result": result.value, "failed_check": rej.check.value if rej else None,
+            "reason": rej.reason if rej else None, "request_type": req.request_type.value,
+            "instrument": req.instrument, "source": req.source.value,
         })
 
-    def _create_intent(self, decision_id: str, req: GateRequest, now: datetime, snap: _Snapshot) -> ApprovedIntent:
+    def _create_intent(self, decision_id: str, ctx: _Ctx) -> ApprovedIntent:
+        req, now = ctx.req, ctx.now
         intent_id = new_id("int")
         self._repo.insert_intent({
             "intent_id": intent_id, "decision_id": decision_id, "idem_key": req.idem_key,
@@ -227,8 +450,8 @@ class Gate:
             "owner": req.owner, "target_order_key": req.target_order_key,
             "state": IntentState.PENDING_SEND.value, "filled_quantity": "0", "created_at": to_iso(now),
         })
-        if req.is_risk_increasing:
-            self._repo.insert_reservation(intent_id, req.account, req.instrument, req.quantity * req.price)
+        if req.is_risk_increasing and ctx.exposure_add > 0:
+            self._repo.insert_reservation(intent_id, req.account, req.instrument, ctx.exposure_add, ctx.cash_add)
         if req.request_type is RequestType.ENTRY and self._repo.active_ownership(req.account, req.instrument) is None:
             if not req.owner:  # G3에서 이미 거부된다. 최적화(-O)에도 남도록 assert 대신 예외
                 raise RuntimeError("소유 전략 없는 진입 의도")

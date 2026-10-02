@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS gate_decision (
   side TEXT NOT NULL, quantity TEXT NOT NULL, price TEXT NOT NULL, idem_key TEXT NOT NULL,
   signal_id TEXT, owner TEXT, target_order_key TEXT,
   result TEXT NOT NULL, failed_check TEXT, reason TEXT, checks TEXT NOT NULL,
-  symbol_after TEXT, symbol_limit TEXT, total_after TEXT, total_limit TEXT);
+  symbol_after TEXT, symbol_limit TEXT, total_after TEXT, total_limit TEXT,
+  settings_hash TEXT, limit_snapshot TEXT);
 CREATE TABLE IF NOT EXISTS intent (
   intent_id TEXT PRIMARY KEY, mode TEXT NOT NULL, decision_id TEXT NOT NULL REFERENCES gate_decision(decision_id),
   idem_key TEXT NOT NULL UNIQUE, signal_id TEXT, source TEXT NOT NULL, request_type TEXT NOT NULL,
@@ -64,7 +65,7 @@ CREATE TABLE IF NOT EXISTS ownership (
 CREATE TABLE IF NOT EXISTS reservation (
   reservation_id TEXT PRIMARY KEY, mode TEXT NOT NULL, intent_id TEXT NOT NULL REFERENCES intent(intent_id),
   account TEXT NOT NULL, instrument TEXT NOT NULL, amount TEXT NOT NULL, consumed TEXT NOT NULL,
-  state TEXT NOT NULL);
+  cash_amount TEXT NOT NULL, state TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS halt (
   halt_id TEXT PRIMARY KEY, mode TEXT NOT NULL, halt_type TEXT NOT NULL, account TEXT,
   state TEXT NOT NULL, actor TEXT NOT NULL, reason TEXT, created_at TEXT NOT NULL);
@@ -123,12 +124,21 @@ class ReservationRow:
     reservation_id: str
     intent_id: str
     instrument: str
-    amount: Decimal
-    consumed: Decimal
+    amount: Decimal       # 예약 노출 금액 (× |레버리지 배수|, 02 ENT-21)
+    consumed: Decimal     # 체결로 포지션에 옮겨 간 노출 금액
+    cash_amount: Decimal  # 예약 현금 (주문 금액 + 추정 비용, 03 §6.2)
+
+    @property
+    def fraction_left(self) -> Decimal:
+        return Decimal("0") if self.amount == 0 else (self.amount - self.consumed) / self.amount
 
     @property
     def remaining(self) -> Decimal:
         return self.amount - self.consumed
+
+    @property
+    def cash_remaining(self) -> Decimal:
+        return self.cash_amount * self.fraction_left
 
 
 @dataclass(frozen=True)
@@ -316,6 +326,21 @@ class Repository:
                "AND request_type IN ('CANCEL','MODIFY')")
         return [self._intent(r) for r in self._x(sql, (target_order_key,))]
 
+    def unknown_intents(self, account: str, instrument: str) -> list[IntentRow]:
+        """결과 불명 의도 (01 D-018, INV-02)."""
+        return [self._intent(r) for r in self._x(
+            "SELECT * FROM intent WHERE account=? AND instrument=? AND state='UNKNOWN'", (account, instrument))]
+
+    def risk_increasing_order_count(self, account: str, since: datetime) -> int:
+        """`since` 이후 만든 위험 확대 의도 중 브로커 주문이 되었거나 될 수 있는 것의 수 (01 L5).
+
+        브로커가 받지 않은 것(전송 전 실패·미전송·명시 거부·미접수 확정)은 세지 않는다. 결과 불명은 센다.
+        """
+        r = self._x("SELECT COUNT(*) FROM intent WHERE account=? AND request_type IN ('ENTRY','INCREASE') "
+                    "AND created_at >= ? AND state NOT IN ('NOT_SENT','REJECTED','NOT_ACCEPTED')",
+                    (account, to_iso(since))).fetchone()
+        return int(r[0])
+
     def set_intent_state(self, intent_id: str, state: IntentState, reason: str | None = None) -> None:
         current = self.intent(intent_id).state
         if current.is_terminal:
@@ -421,19 +446,25 @@ class Repository:
                 (state, reason, ownership_id))
 
     # --- 한도 예약 ----------------------------------------------------------
-    def insert_reservation(self, intent_id: str, account: str, instrument: str, amount: Decimal) -> None:
-        self._x("INSERT INTO reservation(reservation_id, mode, intent_id, account, instrument, amount, consumed, state) "
-                "VALUES(?,?,?,?,?,?,?,?)",
-                (new_id("rsv"), self.mode.value, intent_id, account, instrument, str(amount), "0", "ACTIVE"))
+    def insert_reservation(self, intent_id: str, account: str, instrument: str, amount: Decimal,
+                           cash_amount: Decimal) -> None:
+        self._x("INSERT INTO reservation(reservation_id, mode, intent_id, account, instrument, amount, consumed, "
+                "cash_amount, state) VALUES(?,?,?,?,?,?,?,?,?)",
+                (new_id("rsv"), self.mode.value, intent_id, account, instrument, str(amount), "0", str(cash_amount),
+                 "ACTIVE"))
+
+    @staticmethod
+    def _reservation(r: sqlite3.Row) -> ReservationRow:
+        return ReservationRow(r["reservation_id"], r["intent_id"], r["instrument"], Decimal(r["amount"]),
+                              Decimal(r["consumed"]), Decimal(r["cash_amount"]))
 
     def active_reservations(self, account: str) -> list[ReservationRow]:
-        return [ReservationRow(r["reservation_id"], r["intent_id"], r["instrument"], Decimal(r["amount"]), Decimal(r["consumed"]))
+        return [self._reservation(r)
                 for r in self._x("SELECT * FROM reservation WHERE account=? AND state='ACTIVE'", (account,))]
 
     def reservation_for(self, intent_id: str) -> ReservationRow | None:
         r = self._x("SELECT * FROM reservation WHERE intent_id=? AND state='ACTIVE'", (intent_id,)).fetchone()
-        return ReservationRow(r["reservation_id"], r["intent_id"], r["instrument"], Decimal(r["amount"]),
-                              Decimal(r["consumed"])) if r else None
+        return self._reservation(r) if r else None
 
     def consume_reservation(self, reservation_id: str, consumed: Decimal) -> None:
         self._x("UPDATE reservation SET consumed=? WHERE reservation_id=?", (str(consumed), reservation_id))

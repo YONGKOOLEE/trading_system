@@ -43,6 +43,15 @@ def next_kst_time_after(after: datetime, at: dtime) -> datetime:
     return candidate.astimezone(UTC)
 
 
+def last_kst_time_at_or_before(at: datetime, t: dtime) -> datetime:
+    """`at` 이전(같은 시각 포함) 마지막 KST `t` 시각을 UTC로 돌려준다. 일일 기준 시각으로 당일 범위를 정할 때 쓴다."""
+    local = require_aware(at).astimezone(KST)
+    candidate = datetime.combine(local.date(), t, tzinfo=KST)
+    if candidate > local:
+        candidate -= timedelta(days=1)
+    return candidate.astimezone(UTC)
+
+
 class SystemClock:
     def now(self) -> datetime:
         return datetime.now(UTC)

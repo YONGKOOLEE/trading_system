@@ -6,11 +6,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import time
 from decimal import Decimal
 
-from .models import Limits
 
 # M1 KRX 정규장 (docs/broker-specs/krx-market.md §1 확인). 시장 달력·시장별 값은 T-010·M2·M3에서 확장.
 KRX_REGULAR_OPEN = time(9, 0)
@@ -53,10 +54,10 @@ class AccountLimits:
             if isinstance(v, bool) or not isinstance(v, int):
                 raise TypeError(f"{name}은 정수여야 한다")
 
-    def to_gate_limits(self, base_amount: Decimal) -> Limits:
-        """T-001 게이트가 쓰는 값 객체. 기준 금액은 당일 시작 순자산(01 §2.4)이라 설정이 아니다."""
-        return Limits(base_amount=base_amount, max_symbol_ratio=self.l2_max_symbol_ratio,
-                      max_total_ratio=self.l3_max_total_ratio)
+    def version_hash(self) -> str:
+        """설정 버전 해시 (02 ENT-08). 게이트 판정에 적용 설정 버전으로 기록한다 (ENT-14)."""
+        text = json.dumps(self.to_canonical(), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     def to_canonical(self) -> dict[str, str | int | None]:
         """해시·저장·감사용 표준 형태. 표기 차이(0.20 / 0.2)는 같은 값으로 본다."""

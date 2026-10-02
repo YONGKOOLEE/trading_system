@@ -1,7 +1,8 @@
 """T-001 시나리오 공통 준비. 모든 값은 가상이다 (05-plan §3).
 
 가상 계좌 KR-BT-01 (기준 금액 10,000,000원), 가상 종목 TST-A 10,000원·TST-B 10,000원·TST-C 10,000원,
-가상 한도 L2 20%, L3 50%.
+가상 한도 L1 20%, L2 20%, L3 50% (나머지는 tests/support/gate_fakes.scenario_limits).
+T-001 시나리오의 금액 경계를 유지하려고 가상 상한가를 현재가와 같게 둔다(시장가 예약 가격 = 상한가, 03 §6.2).
 """
 
 from __future__ import annotations
@@ -14,11 +15,12 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.gate_fakes import TEST_POLICY, Facts, make_facts
 from tests.support.invariants import check_invariants
 from trading_system.broker.fake.broker import FakeBroker
 from trading_system.domain.clock import FixedClock
 from trading_system.domain.enums import Mode, OrderType, RequestType
-from trading_system.domain.models import Account, Limits, Signal
+from trading_system.domain.models import Account, Signal
 from trading_system.execution.executor import Executor
 from trading_system.gate.gate import Gate
 from trading_system.halt.manager import HaltManager
@@ -38,6 +40,7 @@ class Env:
     executor: Executor
     halts: HaltManager
     kill_file: Path
+    facts: Facts
 
 
 @pytest.fixture
@@ -46,12 +49,14 @@ def env(tmp_path: Path) -> Iterator[Env]:
     repo.register_account(Account(alias=ACCOUNT, mode=Mode.BACKTEST, broker_env="fake"))
     clock = FixedClock(T0)
     broker = FakeBroker()
-    limits = Limits(base_amount=Decimal("10000000"), max_symbol_ratio=Decimal("0.20"), max_total_ratio=Decimal("0.50"))
-    gate = Gate(repo, clock, {ACCOUNT: limits}, PRICES.__getitem__)
+    facts = make_facts(ACCOUNT, clock.now)
+    for inst, price in PRICES.items():
+        facts.market.add(inst, str(price), upper=str(price))
+    gate = Gate(repo, clock, facts.inputs(), TEST_POLICY)
     kill_file = tmp_path / "KILL"
     executor = Executor(repo, broker, clock, kill_file)
     halts = HaltManager(repo, gate, executor, clock)
-    e = Env(repo, clock, broker, gate, executor, halts, kill_file)
+    e = Env(repo, clock, broker, gate, executor, halts, kill_file, facts)
     yield e
     violations = check_invariants(repo.connection, Mode.BACKTEST.value)
     repo.close()

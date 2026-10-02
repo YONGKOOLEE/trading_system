@@ -46,6 +46,12 @@ class Executor:
         if intent.state is not IntentState.PENDING_SEND:
             raise ValueError(f"전송 대기 상태가 아닌 의도는 보내지 않는다 (재전송 금지): {intent.state}")
 
+        if req.request_type is RequestType.MODIFY:
+            # 정정 전송·응답 처리(새 주문번호, 원주문 참조)는 T-004. 그 전에는 신규 주문으로 잘못 보내지 않게 막는다.
+            with self._repo.tx():
+                self._close(intent, IntentState.NOT_SENT, "정정 전송 미구현 (T-004)")
+            return IntentState.NOT_SENT
+
         if req.is_risk_increasing and self._kill_file.exists():
             with self._repo.tx():
                 self._close(intent, IntentState.NOT_SENT, "KILL 파일 존재")
@@ -184,8 +190,8 @@ class Executor:
         self._repo.set_position(intent.account, intent.instrument, qty, avg)
 
         rsv = self._repo.reservation_for(intent.intent_id)
-        if rsv is not None:
-            self._repo.consume_reservation(rsv.reservation_id, rsv.consumed + ev.quantity * intent.price)
+        if rsv is not None:  # 체결 비율만큼 예약 노출을 포지션 노출로 옮긴다 (배수 반영된 예약 금액 기준)
+            self._repo.consume_reservation(rsv.reservation_id, rsv.amount * min(intent_filled / intent.quantity, 1))
 
         own = self._repo.active_ownership(intent.account, intent.instrument)
         if intent.side == Side.BUY.value and own is not None and own.state == "RESERVED":
