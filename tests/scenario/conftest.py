@@ -1,6 +1,6 @@
 """T-001 시나리오 공통 준비. 모든 값은 가상이다 (05-plan §3).
 
-가상 계좌 KR-BT-01 (기준 금액 10,000,000원), 가상 종목 TST-A 10,000원·TST-B 10,000원·TST-C 10,000원,
+가상 계좌 KR-BT-01 (기준 금액 10,000,000원), 가상 종목 TST-A~TST-E 각 10,000원,
 가상 한도 L1 20%, L2 20%, L3 50% (나머지는 tests/support/gate_fakes.scenario_limits).
 T-001 시나리오의 금액 경계를 유지하려고 가상 상한가를 현재가와 같게 둔다(시장가 예약 가격 = 상한가, 03 §6.2).
 """
@@ -27,7 +27,7 @@ from trading_system.halt.manager import HaltManager
 from trading_system.storage.repository import Repository
 
 ACCOUNT = "KR-BT-01"
-PRICES = {"TST-A": Decimal("10000"), "TST-B": Decimal("10000"), "TST-C": Decimal("10000")}
+PRICES = {inst: Decimal("10000") for inst in ("TST-A", "TST-B", "TST-C", "TST-D", "TST-E")}
 T0 = datetime(2026, 10, 1, 0, 5, tzinfo=UTC)  # 09:05 KST
 
 
@@ -55,7 +55,9 @@ def env(tmp_path: Path) -> Iterator[Env]:
     gate = Gate(repo, clock, facts.inputs(), TEST_POLICY)
     kill_file = tmp_path / "KILL"
     executor = Executor(repo, broker, clock, kill_file)
-    halts = HaltManager(repo, gate, executor, clock)
+    halts = HaltManager(repo, gate, executor, clock,
+                        reference_time_of=lambda a: (lim.daily_reference_time
+                                                     if (lim := facts.limits.by_account.get(a)) else None))
     e = Env(repo, clock, broker, gate, executor, halts, kill_file, facts)
     yield e
     violations = check_invariants(repo.connection, Mode.BACKTEST.value)

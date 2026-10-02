@@ -68,7 +68,13 @@ CREATE TABLE IF NOT EXISTS reservation (
   cash_amount TEXT NOT NULL, state TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS halt (
   halt_id TEXT PRIMARY KEY, mode TEXT NOT NULL, halt_type TEXT NOT NULL, account TEXT,
-  state TEXT NOT NULL, actor TEXT NOT NULL, reason TEXT, created_at TEXT NOT NULL);
+  state TEXT NOT NULL, actor TEXT NOT NULL, reason TEXT, created_at TEXT NOT NULL,
+  scope_instrument TEXT, scope_owner TEXT, variant TEXT, conditions TEXT NOT NULL DEFAULT '{}',
+  released_at TEXT, released_by TEXT);
+CREATE TABLE IF NOT EXISTS ops_command (
+  command_id TEXT PRIMARY KEY, mode TEXT NOT NULL, channel TEXT NOT NULL, actor TEXT NOT NULL,
+  command TEXT NOT NULL, args TEXT NOT NULL, status TEXT NOT NULL, result TEXT,
+  created_at TEXT NOT NULL, created_seq INTEGER NOT NULL, done_at TEXT);
 CREATE TABLE IF NOT EXISTS settings_version (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT NOT NULL, version_hash TEXT NOT NULL, kind TEXT NOT NULL,
   target TEXT NOT NULL, values_json TEXT NOT NULL, previous_hash TEXT, direction TEXT NOT NULL,
@@ -528,12 +534,60 @@ class Repository:
         return dict(r) if r else None
 
     # --- 정지 ---------------------------------------------------------------
-    def insert_halt(self, halt_type: str, account: str | None, actor: str, reason: str | None, at: datetime) -> str:
+    def insert_halt(self, halt_type: str, account: str | None, actor: str, reason: str | None, at: datetime,
+                    *, instrument: str | None = None, owner: str | None = None, variant: str | None = None) -> str:
         halt_id = new_id("halt")
-        self._x("INSERT INTO halt(halt_id, mode, halt_type, account, state, actor, reason, created_at) VALUES(?,?,?,?,?,?,?,?)",
-                (halt_id, self.mode.value, halt_type, account, "ACTIVE", actor, reason, to_iso(at)))
+        self._x("INSERT INTO halt(halt_id, mode, halt_type, account, state, actor, reason, created_at, "
+                "scope_instrument, scope_owner, variant) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (halt_id, self.mode.value, halt_type, account, "ACTIVE", actor, reason, to_iso(at),
+                 instrument, owner, variant))
         return halt_id
 
     def active_halts(self, account: str) -> list[str]:
-        return [r["halt_type"] for r in self._x(
-            "SELECT halt_type FROM halt WHERE state='ACTIVE' AND (account IS NULL OR account=?)", (account,))]
+        """해제되지 않은(활성·재개 대기) 정지 유형 목록."""
+        return [r["halt_type"] for r in self.halt_rows(account)]
+
+    def halt_rows(self, account: str | None = None) -> list[dict]:
+        """해제되지 않은 정지. account=None이면 전체."""
+        if account is None:
+            sql, params = "SELECT * FROM halt WHERE state<>'RELEASED' ORDER BY created_at", ()
+        else:
+            sql = "SELECT * FROM halt WHERE state<>'RELEASED' AND (account IS NULL OR account=?) ORDER BY created_at"
+            params = (account,)
+        return [dict(r) for r in self._x(sql, params)]
+
+    def halt(self, halt_id: str) -> dict | None:
+        r = self._x("SELECT * FROM halt WHERE halt_id=?", (halt_id,)).fetchone()
+        return dict(r) if r else None
+
+    def update_halt(self, halt_id: str, *, state: str | None = None, conditions: dict | None = None,
+                    released_at: datetime | None = None, released_by: str | None = None) -> None:
+        if state is not None:
+            self._x("UPDATE halt SET state=? WHERE halt_id=?", (state, halt_id))
+        if conditions is not None:
+            self._x("UPDATE halt SET conditions=? WHERE halt_id=?",
+                    (json.dumps(conditions, ensure_ascii=False, sort_keys=True), halt_id))
+        if released_at is not None:
+            self._x("UPDATE halt SET released_at=?, released_by=? WHERE halt_id=?",
+                    (to_iso(released_at), released_by, halt_id))
+
+    # --- 운영 명령 (03 §6.6) -------------------------------------------------------
+    def insert_command(self, command_id: str, channel: str, actor: str, command: str, args: dict,
+                       at: datetime) -> bool:
+        """명령 기록. 같은 명령 ID(멱등키)가 이미 있으면 False (02 §4, V-57)."""
+        cur = self._x("INSERT OR IGNORE INTO ops_command(command_id, mode, channel, actor, command, args, status, "
+                      "created_at, created_seq) VALUES(?,?,?,?,?,?,?,?,?)",
+                      (command_id, self.mode.value, channel, actor, command,
+                       json.dumps(args, ensure_ascii=False, sort_keys=True), "PENDING", to_iso(at), self.next_seq("cmd")))
+        return cur.rowcount == 1
+
+    def pending_commands(self) -> list[dict]:
+        return [dict(r) for r in self._x("SELECT * FROM ops_command WHERE status='PENDING' ORDER BY created_seq")]
+
+    def command(self, command_id: str) -> dict | None:
+        r = self._x("SELECT * FROM ops_command WHERE command_id=?", (command_id,)).fetchone()
+        return dict(r) if r else None
+
+    def finish_command(self, command_id: str, status: str, result: str, at: datetime) -> None:
+        self._x("UPDATE ops_command SET status=?, result=?, done_at=? WHERE command_id=?",
+                (status, result, to_iso(at), command_id))

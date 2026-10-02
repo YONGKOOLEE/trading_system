@@ -121,7 +121,8 @@ class UnknownResolver:
     def _ambiguous(self, intent: IntentRow, reason: str) -> ResolveOutcome:
         with self._repo.tx():
             now = self._clock.now()
-            halt_id = self._repo.insert_halt("K3", intent.account, "resolver", reason, now)
+            halt_id = self._repo.insert_halt("K3", intent.account, "resolver", reason, now,
+                                             instrument=intent.instrument)
             self._repo.audit(now, "HALT_ACTIVATED", "resolver", halt_id, {"type": "K3", "account": intent.account,
                                                                          "intent_id": intent.intent_id})
             self._executor.alert("EMERGENCY", f"결과 불명 미해소 → K3, 사람 확인 필요: {reason}", intent.intent_id)

@@ -104,7 +104,6 @@ def test_v01_l5_counts_unknown_but_not_broker_rejected(env: Env) -> None:
     run(env, sig(RequestType.ENTRY, "TST-B", "10", ev="u"))          # 결과 불명: 셈
     env.broker.behavior = FakeBehavior.FILL
     assert run(env, sig(RequestType.ENTRY, "TST-C", "10", ev="c")).result is GateResult.APPROVED  # 2번째
-    env.facts.market.add("TST-D", "10000", upper="10000")
     assert rejected(run(env, sig(RequestType.ENTRY, "TST-D", "10", ev="d")), Check.G7, "L5")
 
 

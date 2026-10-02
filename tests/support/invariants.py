@@ -89,7 +89,7 @@ def check_invariants(conn: sqlite3.Connection, mode: str) -> list[str]:
 
     # INV-12 모든 레코드의 모드 = 저장소 모드
     for table in ("account", "gate_decision", "intent", "attempt", "broker_order", "fill",
-                  "position", "ownership", "reservation", "halt", "audit_event", "settings_version"):
+                  "position", "ownership", "reservation", "halt", "audit_event", "settings_version", "ops_command"):
         for r in _rows(conn, f"SELECT COUNT(*) c FROM {table} WHERE mode <> ?", (mode,)):
             if r["c"]:
                 v.append(f"INV-12 모드 불일치 {table} {r['c']}건")

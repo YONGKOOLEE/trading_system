@@ -16,7 +16,7 @@ import pytest
 
 from tests.scenario.conftest import ACCOUNT, Env, make_signal
 from trading_system.broker.fake.broker import FakeBehavior
-from trading_system.domain.enums import Check, GateResult, HaltType, IntentState, RequestType
+from trading_system.domain.enums import Check, GateResult, HaltType, IntentState, OrderType, RequestSource, RequestType, Side
 from trading_system.domain.models import GateRequest
 from trading_system.storage.repository import StorageFailure
 
@@ -172,9 +172,13 @@ def test_v20_k1_blocks_entry_allows_exit_and_cancels_open_buys(env: Env) -> None
     # 보유분은 자동 청산하지 않음
     assert env.repo.position(ACCOUNT, "TST-A").quantity == Decimal("100")
     assert not any(r.kind == "NEW" and r.side == "SELL" for r in env.broker.sent)
-    # 청산은 허용
+    # 청산: 01 §2.6 K1은 운영 요청의 감액·청산·취소만 허용 (T-005에서 표대로 정밀화, CP-017 T5-1)
     env.broker.behavior = FakeBehavior.FILL
-    exit_d = env.gate.decide(GateRequest.from_signal(make_signal(RequestType.EXIT, instrument="TST-A", evaluation="e4")))
+    sig_exit = env.gate.decide(GateRequest.from_signal(make_signal(RequestType.EXIT, instrument="TST-A", evaluation="e4")))
+    assert sig_exit.result is GateResult.REJECTED and sig_exit.failed_check is Check.G2
+    exit_d = env.gate.decide(GateRequest(source=RequestSource.OPERATOR, request_type=RequestType.EXIT, account=ACCOUNT,
+                                         instrument="TST-A", side=Side.SELL, quantity=Decimal("100"),
+                                         order_type=OrderType.MARKET, price=Decimal("10000"), idem_key="op-exit"))
     assert exit_d.result is GateResult.APPROVED
     env.executor.submit(exit_d.approved)
     env.executor.process_events()

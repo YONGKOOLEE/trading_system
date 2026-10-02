@@ -102,6 +102,7 @@ class Executor:
             # 브로커에는 보냈지만 결과를 기록하지 못했다. 내부 상태를 믿을 수 없으므로 이후 전송을 모두 막는다.
             # 해제는 재시작 후 대조(K8, T-008)와 저장 정지(K7, T-005) 절차로만 한다.
             self._blocked = "전송 후 결과 기록 실패 (재시작·대조 전까지 전송 금지)"
+            self._record_storage_halt(intent.account)
             raise
         return self._repo.intent(intent.intent_id).state
 
@@ -161,6 +162,17 @@ class Executor:
         self._repo.audit(at, "BROKER_ORDER", "executor", key, {"intent_id": intent.intent_id, "kind": kind})
         self._set_state(intent.intent_id, IntentState.ACCEPTED)
         return key
+
+    def _record_storage_halt(self, account: str) -> None:
+        """K7 기록 시도 (01 K7). 저장소가 계속 실패하면 기록하지 못해도 실행기 차단은 유지된다."""
+        try:
+            with self._repo.tx():
+                now = self._clock.now()
+                halt_id = self._repo.insert_halt("K7", account, "executor", self._blocked, now)
+                self._repo.audit(now, "HALT_ACTIVATED", "executor", halt_id, {"type": "K7", "account": account})
+                self.alert("EMERGENCY", f"정지 K7: {self._blocked}", halt_id)
+        except StorageFailure:
+            pass
 
     def _alert_on_reject_streak(self, reason: str | None) -> None:
         recent = self._repo.recent_attempt_results(REJECT_ALERT_STREAK)

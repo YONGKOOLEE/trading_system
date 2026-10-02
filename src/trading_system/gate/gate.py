@@ -6,7 +6,7 @@
 - 검사는 G1~G15 번호 순서로 하고 처음 실패한 검사를 거부 사유로 기록한다. 이후 검사 결과도 진단용으로 기록한다.
 - 판정에 필요한 사실(시세·종목·달력·거래 상태·현금·손익·시계·전략 상태)을 모르면 위험 확대를 거부한다.
 
-G2의 정지 유형별 세부 동작(01 §2.6)은 T-005, 계좌 전체 대조 불일치(G5 계좌 범위)는 K4 정지(T-008)로 막는다.
+G2는 정지 유형별 허용표(01 §2.6, domain/halts.py)를 따른다. 계좌 전체 대조 불일치(G5 계좌 범위)는 K4 정지로 막는다.
 """
 
 from __future__ import annotations
@@ -17,7 +17,10 @@ from datetime import datetime
 from decimal import Decimal
 
 from trading_system.domain.clock import KST, Clock, last_kst_time_at_or_before, to_iso
-from trading_system.domain.enums import Check, GateResult, IntentState, Mode, OrderType, RequestSource, RequestType, Side
+from trading_system.domain.enums import (
+    Check, GateResult, HaltType, IntentState, Mode, OrderType, RequestSource, RequestType, Side,
+)
+from trading_system.domain.halts import HaltView, RequestView, halt_rejection
 from trading_system.domain.limits import AccountLimits
 from trading_system.domain.market import BLOCKS_RISK_REDUCTION, InstrumentInfo, Quote, estimate_cost
 from trading_system.domain.models import ApprovedIntent, GateDecision, GateRequest
@@ -112,10 +115,14 @@ class Gate:
             raise _Reject(Check.G1, "모드·브로커 환경 불일치")
 
     def _g2_halt(self, ctx: _Ctx) -> None:
-        halts = self._repo.active_halts(ctx.req.account)
-        # 활성 정지가 하나라도 있으면 위험 확대 차단. 유형별 세부 동작(01 §2.6)은 T-005.
-        if halts and ctx.req.is_risk_increasing:
-            raise _Reject(Check.G2, f"정지 중 위험 확대 차단: {','.join(sorted(halts))}")
+        """정지 유형별 허용 규칙 (01 §2.6). 해제되지 않은 모든 정지가 허용해야 통과 (D-021)."""
+        req = ctx.req
+        view = RequestView(req.source, req.request_type, req.side, req.instrument, req.owner)
+        for row in self._repo.halt_rows(req.account):
+            h = HaltView(HaltType(row["halt_type"]), row["scope_instrument"], row["scope_owner"], row["variant"])
+            reason = halt_rejection(h, view)
+            if reason:
+                raise _Reject(Check.G2, reason)
 
     def _g3_format_and_expiry(self, ctx: _Ctx) -> None:
         """요청 형식·출처 권한·기한 (01 §2.1·§2.2 G3, R-21)."""
