@@ -14,7 +14,9 @@ from typing import Protocol
 from trading_system.domain.enums import RequestType
 from trading_system.domain.limits import AccountLimits
 from trading_system.domain.strategy import StrategyLimits
-from trading_system.domain.market import CashView, CostRates, DailyRisk, InstrumentInfo, Quote, SessionInfo, TradingStatus
+from trading_system.domain.market import (
+    CashView, CostRates, DailyRisk, GateSettings, InstrumentInfo, Quote, SessionInfo, TradingStatus,
+)
 
 
 class MarketFacts(Protocol):
@@ -69,6 +71,11 @@ class GatePolicy:
     quote_max_age: timedelta
     price_limit_ratio: Decimal
     cost_rates: CostRates
+
+    @classmethod
+    def from_settings(cls, settings: GateSettings) -> GatePolicy:
+        """설정 파일 값(config/market.<mode>.toml)에서 만든다."""
+        return cls(timedelta(seconds=settings.quote_max_age_seconds), settings.price_limit_ratio, settings.cost_rates)
 
     def __post_init__(self) -> None:
         if self.quote_max_age <= timedelta(0):

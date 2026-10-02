@@ -1,0 +1,10 @@
+# 시장·게이트 동작 설정 형식 예제 (03 D-095·D-065·§6.2). 자리표시자만 — 그대로는 시작할 수 없다 (기본값 없음).
+# 사용: 복사해 config/market.<mode>.toml 로 만들고 값을 채운다. 비밀정보는 넣지 않는다. 소수는 문자열(float 금지).
+
+[gate]
+quote_max_age_seconds = "<정수 초. 승인값 60 (A-028), PAPER-0 PV-15 측정 후 재결정>"
+price_limit_ratio = "<비율. KRX 가격제한폭 0.30 확인 (krx-market §3)>"
+
+[costs]
+commission_rate = "<비율. 모의·실전 수수료율 사용자 확인 (K-U9)>"
+sell_tax_rate = "<비율. 매도 세금 요율 사용자 확인>"

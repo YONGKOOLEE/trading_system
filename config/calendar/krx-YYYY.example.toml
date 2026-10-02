@@ -1,0 +1,15 @@
+# KRX 연도별 달력 형식 예제 (03 D-055, krx-market X-U3). 자리표시자만 — 실제 휴장일은 사용자가 KRX 공지로 채운다.
+# 사용: 복사해 config/calendar/krx-<연도>.toml (예: krx-2027.toml) 로 만든다. 파일이 없는 연도는 모든 주문이 거부된다.
+# 주말(토·일)은 자동으로 휴장이다. 아래에는 평일 휴장일과 개장 시간 변경일만 적는다.
+
+market = "KRX"
+year = 0                                   # <연도, 정수>
+source = "<출처: KRX 휴장일 공지 URL>"
+source_version = "<확인일 YYYY-MM-DD>"
+holidays = []                              # [<YYYY-MM-DD>, ...] TOML 날짜 형식 (따옴표 없이)
+
+# 개장 시간 변경일 (예: 수능일). 없으면 비워 둔다.
+# [[special_sessions]]
+# date = <YYYY-MM-DD>
+# open = "HH:MM"
+# close = "HH:MM"

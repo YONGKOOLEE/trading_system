@@ -1,0 +1,12 @@
+# 호가 가격 단위 형식 예제 (03 D-056, krx-market X-U1). 자리표시자만.
+# 현행 표가 확인되기 전(X-U1)에는 실제 config/ticks/krx.toml을 두지 않는다 → 지정가 주문은 거부된다(시장가만).
+# 확인 후: 복사해 config/ticks/krx.toml 로 만들고 출처·버전과 구간을 채운다. 가격·단위는 문자열(float 금지).
+# 구간은 오름차순, 마지막 구간의 below는 "none".
+
+source = "<출처: KRX 업무규정 시행세칙 URL>"
+version = "<시행일 또는 확인일>"
+
+[bands]
+# STOCK = [ { below = "<가격>", tick = "<단위>" }, ..., { below = "none", tick = "<단위>" } ]
+# ETF = [ { below = "none", tick = "<단위>" } ]
+# ETN = [ { below = "none", tick = "<단위>" } ]

@@ -178,3 +178,18 @@ class CashView:
     def __post_init__(self) -> None:
         _dec("deposit", self.deposit)
         _dec("broker_orderable", self.broker_orderable)
+
+
+@dataclass(frozen=True)
+class GateSettings:
+    """게이트 동작 값의 설정 원본 (config/market.<mode>.toml, 03 D-095·D-065). 앱이 GatePolicy로 바꾼다."""
+
+    quote_max_age_seconds: int
+    price_limit_ratio: Decimal
+    cost_rates: CostRates
+
+    def __post_init__(self) -> None:
+        if isinstance(self.quote_max_age_seconds, bool) or not isinstance(self.quote_max_age_seconds, int)                 or self.quote_max_age_seconds <= 0:
+            raise ValueError("quote_max_age_seconds는 0보다 큰 정수")
+        if _dec("price_limit_ratio", self.price_limit_ratio) <= 0:
+            raise ValueError("price_limit_ratio는 0보다 커야 한다")
