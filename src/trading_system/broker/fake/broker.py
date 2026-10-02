@@ -3,11 +3,12 @@
 - 주문장(book)에 모든 주문(신규·취소·정정, 외부 주문 포함)을 남기고 조회로 돌려준다 (kt00009·ka10075 대응).
 - 응답 유실: 브로커는 받았지만(또는 받지 않았지만) 호출자는 응답을 못 받은 상황을 만든다 (E-1, V-40·V-41).
 - 조회 실패·조회 반영 지연을 주입한다 (V-42, PV-05).
-- 장애 주입 시나리오 언어(DSL)는 T-006.
+- 단절(연결 수립 전 실패·조회 실패), 전송 후 연결 끊김(어댑터 예외), 통보 중복·순서 뒤바뀜·유실 (T-006, D-062).
 """
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -45,6 +46,8 @@ class FakeBroker:
         self.query_failures = 0             # 다음 조회 N회 실패 (V-42)
         self.query_delay = 0                # 응답 유실 주문이 조회에 나타나기까지의 조회 횟수 (PV-05)
         self.queries = 0
+        self.disconnected = False           # 단절: 주문은 전송 전 실패, 조회는 실패
+        self.raise_after_send = False       # 브로커는 받았지만 응답 전에 연결이 끊김 → 어댑터 예외
         self._seq = 0
         self._fill_seq = 0
         self._book: dict[str, _Order] = {}
@@ -57,7 +60,7 @@ class FakeBroker:
         return f"{self._seq:07d}"
 
     def place_order(self, request: OrderRequest) -> SubmitResult:
-        if self.behavior is FakeBehavior.PRE_SEND_FAIL:
+        if self.disconnected or self.behavior is FakeBehavior.PRE_SEND_FAIL:
             return SubmitResult(SubmitOutcome.PRE_SEND_FAILURE, reason="fake: 연결 없음")
         self.sent.append(request)
         if self.behavior is FakeBehavior.REJECT:
@@ -71,6 +74,8 @@ class FakeBroker:
         if self.behavior in (FakeBehavior.LOST_ACCEPT, FakeBehavior.LOST_FILL):
             self._book[order_no].visible_after = self.queries + self.query_delay
             return SubmitResult(SubmitOutcome.UNKNOWN, reason="fake: 응답 유실")
+        if self.raise_after_send:
+            raise ConnectionResetError("fake: 전송 후 연결 끊김")
         return SubmitResult(SubmitOutcome.ACCEPTED, order_no=order_no)
 
     def cancel_order(self, request: OrderRequest) -> SubmitResult:
@@ -80,7 +85,7 @@ class FakeBroker:
         return self._change(request, "MODIFY")
 
     def _change(self, request: OrderRequest, kind: str) -> SubmitResult:
-        if self.behavior is FakeBehavior.PRE_SEND_FAIL:
+        if self.disconnected or self.behavior is FakeBehavior.PRE_SEND_FAIL:
             return SubmitResult(SubmitOutcome.PRE_SEND_FAILURE, reason="fake: 연결 없음")
         self.sent.append(request)
         if self.behavior is FakeBehavior.REJECT:
@@ -109,6 +114,8 @@ class FakeBroker:
         if self.behavior in (FakeBehavior.LOST_ACCEPT, FakeBehavior.LOST_FILL):
             self._book[no].visible_after = self.queries + self.query_delay
             return SubmitResult(SubmitOutcome.UNKNOWN, reason="fake: 응답 유실")
+        if self.raise_after_send:
+            raise ConnectionResetError("fake: 전송 후 연결 끊김")
         return SubmitResult(SubmitOutcome.ACCEPTED, order_no=no)
 
     def _new_order(self, account: str, kind: str, instrument: str, side: str, quantity: Decimal, price: Decimal,
@@ -154,6 +161,21 @@ class FakeBroker:
         """시스템 밖 주문 (증권사 앱 직접 거래, E-6). 통보는 내지 않고 조회에만 나타난다."""
         return self._new_order(account, "NEW", instrument, side, quantity, price, OrderType.LIMIT, None)
 
+    def query_orders_unchecked(self) -> list[BrokerOrderRecord]:
+        """테스트용: 장애 주입과 무관하게 주문장 전체를 본다 (조회 횟수에 세지 않음)."""
+        return [o.record for o in self._book.values()]
+
+    def open_order_nos(self) -> list[str]:
+        return [no for no, o in self._book.items() if o.record.state in _OPEN and o.record.kind != "CANCEL"]
+
+    def duplicate_events(self) -> None:
+        """대기 중인 통보를 모두 한 번 더 보낸다 (중복 통보)."""
+        self._events = self._events + list(self._events)
+
+    def shuffle_events(self, rng: random.Random) -> None:
+        """대기 중인 통보 순서를 섞는다 (순서 뒤바뀐 통보)."""
+        rng.shuffle(self._events)
+
     def drop_events(self) -> None:
         """실시간 통보 유실 (V-66 누락 체결 재현)."""
         self._events.clear()
@@ -169,6 +191,8 @@ class FakeBroker:
     # --- 조회 -------------------------------------------------------------------
     def _query(self) -> None:
         self.queries += 1
+        if self.disconnected:
+            raise BrokerQueryError("fake: 연결 끊김")
         if self.query_failures > 0:
             self.query_failures -= 1
             raise BrokerQueryError("fake: 조회 실패")

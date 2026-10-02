@@ -43,8 +43,8 @@ class Env:
     facts: Facts
 
 
-@pytest.fixture
-def env(tmp_path: Path) -> Iterator[Env]:
+def build_env(tmp_path: Path) -> Env:
+    """시나리오 환경 하나를 만든다 (fixture와 무작위 실행기가 함께 쓴다)."""
     repo = Repository(tmp_path / "trading.db", Mode.BACKTEST)
     repo.register_account(Account(alias=ACCOUNT, mode=Mode.BACKTEST, broker_env="fake"))
     clock = FixedClock(T0)
@@ -58,10 +58,15 @@ def env(tmp_path: Path) -> Iterator[Env]:
     halts = HaltManager(repo, gate, executor, clock,
                         reference_time_of=lambda a: (lim.daily_reference_time
                                                      if (lim := facts.limits.by_account.get(a)) else None))
-    e = Env(repo, clock, broker, gate, executor, halts, kill_file, facts)
+    return Env(repo, clock, broker, gate, executor, halts, kill_file, facts)
+
+
+@pytest.fixture
+def env(tmp_path: Path) -> Iterator[Env]:
+    e = build_env(tmp_path)
     yield e
-    violations = check_invariants(repo.connection, Mode.BACKTEST.value)
-    repo.close()
+    violations = check_invariants(e.repo.connection, Mode.BACKTEST.value)
+    e.repo.close()
     assert violations == [], violations
 
 

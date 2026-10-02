@@ -273,10 +273,15 @@ class Executor:
                 return self._anomaly(ev, f"내부 보유({held})보다 큰 매도 체결 — 외부 거래 의심")
         if not self._repo.insert_fill(order.order_key, ev.fill_id, ev.quantity, ev.price, ev.at or now):
             return None  # 중복 통보
-        self._repo.update_broker_order(order.order_key, filled, "FILLED" if filled >= order.quantity else "PARTIAL")
+        order_open = order.state in ("ACCEPTED", "PARTIAL")
+        # 종결된 주문(취소·만료·정정됨)에 늦게 온 체결은 수량만 기록하고 주문을 다시 열지 않는다
+        new_state = ("FILLED" if filled >= order.quantity else "PARTIAL") if order_open else order.state
+        self._repo.update_broker_order(order.order_key, filled, new_state)
         self._repo.audit(now, "FILL", "tracker", order.order_key, {"quantity": str(ev.quantity), "price": str(ev.price)})
-        if intent.state.is_terminal:
-            self._repo.audit(now, "LATE_FILL", "tracker", intent.intent_id, {})  # INV-11: 대조로 처리 (T-008)
+        if intent.state.is_terminal or not order_open:
+            # INV-11: 종결된 의도는 다시 열지 않는다. 포지션 반영은 대조에서 사람이 정한다 (02 D-035, T-008)
+            self._repo.audit(now, "LATE_FILL", "tracker", intent.intent_id, {"order": order.order_key})
+            self.alert("EMERGENCY", f"종결 후 체결 통보 — 대조 필요 ({order.order_key})", intent.intent_id)
             return None
 
         intent_filled = intent.filled_quantity + ev.quantity
