@@ -10,9 +10,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from trading_system.domain.clock import KST
@@ -22,7 +22,7 @@ from trading_system.domain.sinks import AlertSink, HaltControl
 from trading_system.domain.strategy import Bar, EvaluationSnapshot, InstrumentView, PositionView
 
 from .calendar import KrxCalendar
-from .quality import Prepared
+from .quality import Prepared, RawDaily, preprocess_daily
 from .ticks import TickTable
 
 
@@ -43,7 +43,8 @@ class _Instrument:
     info: InstrumentInfo
     quote: Quote | None = None
     statuses: frozenset[TradingStatus] | None = None
-    daily: Prepared | None = None
+    raw: tuple[RawDaily, ...] | None = None
+    data_version: str = ""
 
 
 @dataclass
@@ -73,10 +74,17 @@ class MarketDataStore:
                                                        TradingStatus.ETN_REDEMPTION} else "WARNING",
                               f"보유 종목 거래 상태 변경: {instrument} {','.join(sorted(added))}", instrument)
 
-    def update_daily(self, instrument: str, prepared: Prepared) -> None:
-        """전처리된 일봉을 넣는다. 품질 실패면 그 종목을 K10으로 막고, 정상화되면 K10 조건을 보고한다."""
-        self._get(instrument).daily = prepared
+    def update_daily(self, instrument: str, raw: Sequence[RawDaily], data_version: str = "") -> Prepared:
+        """원시 일봉을 넣는다. 지금까지의 데이터로 품질을 판정해, 실패면 그 종목을 K10으로 막고 정상화되면 해제를 보고한다.
+
+        판정 스냅샷은 저장된 원시 봉 중 판정 기준 시각에 확정된 것만으로 **다시** 전처리·품질 판정한다.
+        미래 봉의 품질이 과거 판정에 영향을 주면 룩어헤드이기 때문이다 (V-91, D-073).
+        """
+        inst = self._get(instrument)
+        inst.raw, inst.data_version = tuple(raw), data_version
+        prepared = preprocess_daily(raw, self._trading_days, data_version=data_version)
         if self.halts is None:
+            return prepared
             return
         if not prepared.report.ok:
             self.halts.activate(HaltType.K10, "marketdata", f"데이터 품질 실패 {instrument}: "
@@ -84,6 +92,15 @@ class MarketDataStore:
         else:
             self.halts.report_condition(HaltType.K10, self.account, "data_ok", True, prepared.data_version,
                                         instrument=instrument)
+        return prepared
+
+    def _trading_days(self, a: date, b: date) -> list[date]:
+        out, d = [], a
+        while d <= b:
+            if self.calendar.is_trading_day(d):
+                out.append(d)
+            d = d + timedelta(days=1)
+        return out
 
     def _get(self, instrument: str) -> _Instrument:
         if instrument not in self._data:
@@ -119,17 +136,18 @@ class MarketDataStore:
         views = []
         for i in instruments:
             inst = self._data.get(i)
-            if inst is None or inst.daily is None:
+            if inst is None or inst.raw is None:
                 views.append(InstrumentView(instrument=i, data_ok=False, position=positions(i),
                                             has_pending_order=pending(i)))
                 continue
-            bars = tuple(b for b in inst.daily.bars
-                         if isinstance(b.at, date) and daily_bar_available(b.at, as_of, self.calendar))
+            known = [r for r in inst.raw if daily_bar_available(r.day, as_of, self.calendar)]
+            prepared = preprocess_daily(known, self._trading_days, data_version=inst.data_version)
+            bars = prepared.bars
             q = inst.quote
             views.append(InstrumentView(
                 instrument=i, daily_bars=bars,
                 last_price=q.price if q is not None and q.at <= as_of else None,
                 statuses=inst.statuses or frozenset(), position=positions(i), has_pending_order=pending(i),
-                data_ok=inst.daily.report.ok))
+                data_ok=prepared.report.ok and bool(bars)))
         return EvaluationSnapshot(evaluation_id, market, account, as_of, base_amount, tuple(views),
                                   next_evaluation_at)

@@ -22,7 +22,7 @@ PARAM_TYPES = frozenset({"decimal", "int", "str", "bool"})
 
 def _parse_one(p: ParamSpec, raw: object) -> tuple[object | None, str | None]:
     if p.type == "decimal":
-        if isinstance(raw, bool) or not isinstance(raw, (str, int)):
+        if isinstance(raw, bool) or not isinstance(raw, (str, int, Decimal)):
             return None, f"{p.name}: 소수는 문자열로 적어야 함 (부동소수 금지)"
         try:
             v: object = Decimal(str(raw))

@@ -197,12 +197,12 @@ def test_v76_ohlc_contradiction() -> None:
 def test_quality_failure_raises_k10_for_instrument_and_recovers(env: Env) -> None:
     s = store(env)
     wire(env, s)
-    s.update_daily("TST-A", preprocess_daily(raw_days(DAYS, ["100", "101", "140", "141"]), trading_days))
+    s.update_daily("TST-A", raw_days(DAYS, ["100", "101", "140", "141"]))
     assert "K10" in env.repo.active_halts(ACCOUNT)
     assert env.gate.decide(GateRequest.from_signal(make_signal(RequestType.ENTRY))).failed_check is Check.G2
     assert env.gate.decide(GateRequest.from_signal(make_signal(RequestType.ENTRY, instrument="TST-B",
                                                                evaluation="b"))).result is GateResult.APPROVED
-    s.update_daily("TST-A", preprocess_daily(raw_days(DAYS, ["100", "101", "102", "103"]), trading_days))
+    s.update_daily("TST-A", raw_days(DAYS, ["100", "101", "102", "103"]))
     assert "K10" not in env.repo.active_halts(ACCOUNT)
 
 
@@ -223,7 +223,7 @@ def test_v112_backtest_and_live_paths_share_preprocessing() -> None:
 
 def test_v90_snapshot_excludes_bars_not_yet_closed() -> None:
     s = store()
-    s.update_daily("TST-A", preprocess_daily(raw_days(DAYS, ["100", "101", "102", "103"]), trading_days))
+    s.update_daily("TST-A", raw_days(DAYS, ["100", "101", "102", "103"]))
     no_pos = lambda i: None  # noqa: E731
     morning = datetime(2026, 10, 1, 9, 5, tzinfo=KST)
     snap = s.snapshot("ev", "M1", ACCOUNT, morning, Decimal("1"), ["TST-A"], no_pos, lambda i: False)
@@ -232,7 +232,7 @@ def test_v90_snapshot_excludes_bars_not_yet_closed() -> None:
     snap2 = s.snapshot("ev", "M1", ACCOUNT, after_close, Decimal("1"), ["TST-A"], no_pos, lambda i: False)
     assert [b.at for b in snap2.view("TST-A").daily_bars] == DAYS
     # 미래 데이터를 바꿔도 아침 스냅샷은 같다 (V-91 성격)
-    s.update_daily("TST-A", preprocess_daily(raw_days(DAYS, ["100", "101", "102", "999"]), None))
+    s.update_daily("TST-A", raw_days(DAYS, ["100", "101", "102", "999"]))
     snap3 = s.snapshot("ev", "M1", ACCOUNT, morning, Decimal("1"), ["TST-A"], no_pos, lambda i: False)
     assert snap3.view("TST-A").daily_bars == snap.view("TST-A").daily_bars
 
@@ -283,8 +283,8 @@ def test_market_settings_file() -> None:
 
 def test_snapshot_marks_quality_failed_instrument_not_ok() -> None:
     s = store()
-    s.update_daily("TST-A", preprocess_daily(raw_days(DAYS, ["100", "101", "140", "141"]), trading_days))
-    s.update_daily("TST-B", preprocess_daily(raw_days(DAYS, ["100", "101", "102", "103"]), trading_days))
+    s.update_daily("TST-A", raw_days(DAYS, ["100", "101", "140", "141"]))
+    s.update_daily("TST-B", raw_days(DAYS, ["100", "101", "102", "103"]))
     snap = s.snapshot("ev", "M1", ACCOUNT, datetime(2026, 10, 2, 9, 0, tzinfo=KST), Decimal("1"), ["TST-A", "TST-B"],
                       lambda i: None, lambda i: False)
     assert not snap.view("TST-A").data_ok and snap.view("TST-B").data_ok
