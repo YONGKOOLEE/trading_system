@@ -25,6 +25,7 @@ from trading_system.domain.enums import ACTIVE_INTENT_STATES, IntentState, Mode
 from trading_system.domain.models import Account
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS counter (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS account (
   alias TEXT PRIMARY KEY, mode TEXT NOT NULL, broker_env TEXT NOT NULL);
@@ -153,6 +154,19 @@ def new_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex}"
 
 
+class _Result:
+    def __init__(self, rows: list[sqlite3.Row], rowcount: int, lastrowid: int | None) -> None:
+        self._rows = rows
+        self.rowcount = rowcount
+        self.lastrowid = lastrowid
+
+    def fetchone(self) -> sqlite3.Row | None:
+        return self._rows[0] if self._rows else None
+
+    def __iter__(self) -> Iterator[sqlite3.Row]:
+        return iter(self._rows)
+
+
 class Repository:
     def __init__(self, path: Path, mode: Mode) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -165,6 +179,16 @@ class Repository:
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.executescript(SCHEMA)
+        self._bind_mode()
+
+    def _bind_mode(self) -> None:
+        """DB 파일을 처음 만든 모드에 묶는다. 다른 모드로 다시 열면 거부한다 (R-01, INV-12)."""
+        row = self.connection.execute("SELECT value FROM meta WHERE key = 'mode'").fetchone()
+        if row is None:
+            self.connection.execute("INSERT INTO meta(key, value) VALUES('mode', ?)", (self.mode.value,))
+        elif row[0] != self.mode.value:
+            self.connection.close()
+            raise ModeMismatch(f"이 저장소는 {row[0]} 모드로 만들어졌다 (요청 모드 {self.mode.value})")
 
     def close(self) -> None:
         self.connection.close()
@@ -201,8 +225,15 @@ class Repository:
             finally:
                 self._depth = 0
 
-    def _x(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
-        return self.connection.execute(sql, params)
+    def _x(self, sql: str, params: tuple = ()) -> _Result:
+        """모든 읽기·쓰기를 같은 잠금 아래에서 끝낸다.
+
+        연결 하나를 여러 스레드가 공유하므로, 잠금 없이 읽으면 다른 스레드의 커밋 전(롤백될 수 있는) 행을 본다.
+        결과는 잠금 안에서 모두 가져온다.
+        """
+        with self._lock:
+            cur = self.connection.execute(sql, params)
+            return _Result(cur.fetchall(), cur.rowcount, cur.lastrowid)
 
     def _check_mode(self, mode: Mode) -> None:
         if mode is not self.mode:
@@ -218,6 +249,9 @@ class Repository:
         with self.tx():
             self._x("INSERT INTO account(alias, mode, broker_env) VALUES(?,?,?)",
                     (account.alias, account.mode.value, account.broker_env))
+
+    def accounts(self) -> list[str]:
+        return [r["alias"] for r in self._x("SELECT alias FROM account ORDER BY alias")]
 
     def account(self, alias: str) -> Account | None:
         r = self._x("SELECT * FROM account WHERE alias = ?", (alias,)).fetchone()

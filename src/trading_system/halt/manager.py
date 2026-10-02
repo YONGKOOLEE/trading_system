@@ -32,7 +32,7 @@ class HaltManager:
         return halt_id
 
     def _cancel_open_buys(self, halt_id: str, account: str | None) -> None:
-        accounts = [account] if account else [r["alias"] for r in self._repo.connection.execute("SELECT alias FROM account")]
+        accounts = [account] if account else self._repo.accounts()
         for acct in accounts:
             for order in self._repo.open_orders(acct, Side.BUY.value):
                 owner = self._repo.intent(order.intent_id).owner if order.intent_id else None

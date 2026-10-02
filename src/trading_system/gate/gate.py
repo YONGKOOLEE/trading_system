@@ -71,11 +71,12 @@ class Gate:
         for check, fn in (
             (Check.G1, self._g1_mode),
             (Check.G2, self._g2_halt),
-            (Check.G3, self._g3_expiry),
+            (Check.G3, self._g3_format_and_expiry),
             (Check.G4, self._g4_duplicate),
             (Check.G6, self._g6_ownership),
             (Check.G7, self._g7_limits),
             (Check.G9, self._g9_sell_quantity),
+            (Check.G10, self._g10_quantity_price),
         ):
             fn(req, now, snap)
             passed.append((check, True))
@@ -93,7 +94,17 @@ class Gate:
         if halts and req.is_risk_increasing:
             raise _Reject(Check.G2, f"정지 중 위험 확대 차단: {','.join(sorted(halts))}")
 
-    def _g3_expiry(self, req: GateRequest, now: datetime, snap: _Snapshot) -> None:
+    def _g3_format_and_expiry(self, req: GateRequest, now: datetime, snap: _Snapshot) -> None:
+        """요청 형식·출처 권한·기한 (01 §2.1·§2.2 G3, R-21)."""
+        rt = req.request_type
+        if rt.is_new_order and req.side is not rt.default_side:
+            raise _Reject(Check.G3, f"요청 유형 {rt.value}와 방향 {req.side.value}가 맞지 않음")
+        if req.is_risk_increasing and req.source is not RequestSource.SIGNAL:
+            raise _Reject(Check.G3, "신규 진입·증액은 전략 신호로만 가능 (운영 요청·정책 요청 불가, R-21)")
+        if rt is RequestType.ENTRY and not req.owner:
+            raise _Reject(Check.G3, "신규 진입에 소유 전략이 없음")
+        if not rt.is_new_order and not req.target_order_key:
+            raise _Reject(Check.G3, "취소·정정 대상 주문이 없음")
         if req.valid_until is not None and now > req.valid_until:
             raise _Reject(Check.G3, "신호 유효 기한 만료")
 
@@ -132,8 +143,11 @@ class Gate:
             raise _Reject(Check.G7, "계좌 한도 설정 없음")
         new_amount = req.quantity * req.price
         symbol, total = Decimal("0"), Decimal("0")
+        self._price(req.instrument)  # 요청 종목 시세가 없으면 판정하지 않는다
         for inst, pos in self._repo.positions(req.account).items():
-            amount = pos.quantity * self._price_of(inst)
+            if pos.quantity == 0:
+                continue
+            amount = pos.quantity * self._price(inst)
             total += amount
             if inst == req.instrument:
                 symbol += amount
@@ -149,6 +163,27 @@ class Gate:
             raise _Reject(Check.G7, f"종목 비중 한도 초과 ({snap.symbol_after} > {snap.symbol_limit})")
         if snap.total_after > snap.total_limit:
             raise _Reject(Check.G7, f"총 노출 한도 초과 ({snap.total_after} > {snap.total_limit})")
+
+    def _price(self, instrument: str) -> Decimal:
+        """평가 가격. 없거나 이상하면 거부한다 (G11, 불확실하면 주문하지 않음). 신선도 검사는 T-003."""
+        try:
+            price = self._price_of(instrument)
+        except (KeyError, LookupError):
+            raise _Reject(Check.G11, f"시세 없음: {instrument}") from None
+        if not isinstance(price, Decimal) or not price.is_finite() or price <= 0:
+            raise _Reject(Check.G11, f"시세 이상: {instrument}")
+        return price
+
+    def _g10_quantity_price(self, req: GateRequest, now: datetime, snap: _Snapshot) -> None:
+        """수량·가격 유효성 (G10 일부). 호가 단위·수량 단위는 T-003·T-010."""
+        if not req.request_type.is_new_order:
+            return
+        if req.quantity <= 0:
+            raise _Reject(Check.G10, f"수량이 0 이하: {req.quantity}")
+        if req.quantity != req.quantity.to_integral_value():
+            raise _Reject(Check.G10, f"정수 주가 아님: {req.quantity}")
+        if req.price <= 0:
+            raise _Reject(Check.G10, f"가격이 0 이하: {req.price}")
 
     def _g9_sell_quantity(self, req: GateRequest, now: datetime, snap: _Snapshot) -> None:
         if not (req.request_type.is_new_order and req.side is Side.SELL):
@@ -195,7 +230,8 @@ class Gate:
         if req.is_risk_increasing:
             self._repo.insert_reservation(intent_id, req.account, req.instrument, req.quantity * req.price)
         if req.request_type is RequestType.ENTRY and self._repo.active_ownership(req.account, req.instrument) is None:
-            assert req.owner is not None
+            if not req.owner:  # G3에서 이미 거부된다. 최적화(-O)에도 남도록 assert 대신 예외
+                raise RuntimeError("소유 전략 없는 진입 의도")
             self._repo.insert_ownership(req.account, req.instrument, req.owner, intent_id, now)
         self._repo.audit(now, "INTENT_STATE", "gate", intent_id, {"state": IntentState.PENDING_SEND.value})
         return ApprovedIntent(intent_id=intent_id, decision_id=decision_id, request=req)

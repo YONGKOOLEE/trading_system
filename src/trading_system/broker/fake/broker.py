@@ -74,6 +74,10 @@ class FakeBroker:
             quantity=o.remaining, price=o.request.price,
         ))
 
+    def inject(self, event: OrderEvent) -> None:
+        """테스트용: 임의의 통보를 넣는다 (비정상·중복·순서 바뀐 통보 재현)."""
+        self._events.append(event)
+
     def poll_events(self) -> list[OrderEvent]:
         events, self._events = self._events, []
         return events
