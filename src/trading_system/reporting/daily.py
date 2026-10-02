@@ -1,0 +1,119 @@
+"""일일 보고 (R-26, 업무정의서 R-26, 02 ENT-27, 04 V-110·V-114, 01 §2.3.1-7).
+
+일일 기준 시각 이후 생성한다. 내용: 주문·체결·거부(사유별), 실현 손익(전략·버전별, 비용 추정 반영)·보유·미실현,
+한도 사용률 최대치, 결과 불명·대조 불일치·운영 개입, 정지 이력(K별), 적용 설정 버전.
+생성에 실패하면 실패를 기록하고 긴급 알림한다. 같은 날 다시 만들면 보고 버전이 올라간다.
+"""
+
+from __future__ import annotations
+
+from collections import Counter, defaultdict
+from collections.abc import Callable
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
+
+from trading_system.domain.clock import KST, last_kst_time_at_or_before, to_iso
+from trading_system.domain.enums import IntentState
+from trading_system.domain.market import CostRates, estimate_cost
+from trading_system.domain.sinks import AlertSink
+from trading_system.storage.repository import Repository
+
+
+def build_report(repo: Repository, account: str, trade_day: date, reference_time: time, cost_rates: CostRates,
+                 price_of: Callable[[str], Decimal | None], settings_hash: str | None) -> dict:
+    start = datetime.combine(trade_day, reference_time, tzinfo=KST)
+    end = start + timedelta(days=1)
+    s, e = to_iso(start), to_iso(end)
+    rows = repo.select
+
+    decisions = rows("SELECT * FROM gate_decision WHERE account=? AND created_at>=? AND created_at<?", (account, s, e))
+    rejects = Counter(d["failed_check"] for d in decisions if d["result"] == "REJECTED")
+    fills = rows("""SELECT f.quantity, f.price, f.at, o.instrument, o.side, i.owner FROM fill f
+                    JOIN broker_order o ON o.order_key=f.order_key LEFT JOIN intent i ON i.intent_id=o.intent_id
+                    WHERE o.account=? ORDER BY f.at, f.rowid""", (account,))
+    # 전략·버전별 실현 손익: 평균단가 방식, 비용 추정 반영 (V-114). 전체 이력으로 평균단가를 만들고 당일분만 집계
+    book: dict[tuple[str, str], tuple[Decimal, Decimal]] = defaultdict(lambda: (Decimal("0"), Decimal("0")))
+    per: dict[str, dict[str, Decimal | int]] = defaultdict(lambda: {"fills": 0, "realized": Decimal("0"),
+                                                                     "costs": Decimal("0")})
+    for f in fills:
+        owner = f["owner"] or "(외부)"
+        qty, price = Decimal(f["quantity"]), Decimal(f["price"])
+        key = (owner, f["instrument"])
+        held, avg = book[key]
+        amount = qty * price
+        cost = estimate_cost(amount, f["side"] == "SELL", cost_rates)
+        today = s <= f["at"] < e
+        if f["side"] == "BUY":
+            new_held = held + qty
+            book[key] = (new_held, (held * avg + amount) / new_held if new_held else Decimal("0"))
+            realized = -cost
+        else:
+            realized = (price - avg) * qty - cost
+            book[key] = (held - qty, avg if held - qty > 0 else Decimal("0"))
+        if today:
+            per[owner]["fills"] += 1  # type: ignore[operator]
+            per[owner]["realized"] += realized  # type: ignore[operator]
+            per[owner]["costs"] += cost  # type: ignore[operator]
+    orders = Counter((d["owner"] or "(운영)") for d in decisions if d["result"] == "APPROVED")
+    positions = []
+    unrealized = Decimal("0")
+    evaluable = True
+    for inst, p in repo.positions(account).items():
+        if p.quantity <= 0:
+            continue
+        px = price_of(inst)
+        if px is None:
+            evaluable = False
+        else:
+            unrealized += (px - p.avg_price) * p.quantity
+        positions.append({"instrument": inst, "quantity": str(p.quantity), "avg_price": str(p.avg_price),
+                          "price": None if px is None else str(px)})
+    usage = {"L2_max": "0", "L3_max": "0"}
+    for d in decisions:
+        if d["result"] == "APPROVED" and d["symbol_after"] and d["symbol_limit"]:
+            usage["L2_max"] = str(max(Decimal(usage["L2_max"]), Decimal(d["symbol_after"]) / Decimal(d["symbol_limit"])))
+            usage["L3_max"] = str(max(Decimal(usage["L3_max"]), Decimal(d["total_after"]) / Decimal(d["total_limit"])))
+    halts = rows("SELECT halt_type, state, created_at, reason FROM halt WHERE created_at>=? AND created_at<?", (s, e))
+    events = Counter(r["kind"] for r in rows("SELECT kind FROM audit_event WHERE at>=? AND at<?", (s, e)))
+    ops = rows("SELECT command, channel, status FROM ops_command WHERE created_at>=? AND created_at<?", (s, e))
+    recon = rows("SELECT kind, state FROM recon_item WHERE account=?", (account,))
+    return {
+        "account": account, "trade_day": trade_day.isoformat(), "settings_hash": settings_hash,
+        "orders_approved": sum(orders.values()), "orders_by_owner": dict(orders),
+        "rejects_by_check": dict(rejects), "fills_today": sum(int(v["fills"]) for v in per.values()),
+        "by_strategy": {k: {kk: str(vv) for kk, vv in v.items()} for k, v in per.items()},
+        "realized_total": str(sum((v["realized"] for v in per.values()), Decimal("0"))),
+        "unrealized": str(unrealized) if evaluable else "평가 불능", "positions": positions,
+        "limit_usage": usage, "halts": halts, "unknown_results": events.get("UNKNOWN_RESOLVED", 0),
+        "unknown_open": len([i for i in repo.intents_in_state(IntentState.UNKNOWN) if i.account == account]),
+        "recon_open": len([r for r in recon if r["state"] == "OPEN"]),
+        "ops_commands": ops, "alerts": events.get("ALERT", 0),
+    }
+
+
+class DailyReporter:
+    def __init__(self, repo: Repository, alerts: AlertSink, cost_rates: CostRates,
+                 price_of: Callable[[str], Decimal | None]) -> None:
+        self._repo = repo
+        self._alerts = alerts
+        self._rates = cost_rates
+        self._price_of = price_of
+
+    def generate(self, account: str, now: datetime, reference_time: time, settings_hash: str | None) -> dict | None:
+        """방금 끝난 거래일(직전 일일 기준 시각부터 24시간)의 보고서. 기준 시각 전이면 전날."""
+        current_start = last_kst_time_at_or_before(now, reference_time)
+        trade_day = (current_start.astimezone(KST) - timedelta(days=1)).date()
+        try:
+            content = build_report(self._repo, account, trade_day, reference_time, self._rates, self._price_of,
+                                   settings_hash)
+        except Exception as exc:  # noqa: BLE001 — 보고 실패는 기록·알림 (V-110)
+            with self._repo.tx():
+                self._repo.insert_daily_report(account, trade_day, "FAILED", {"error": type(exc).__name__}, now,
+                                               settings_hash)
+            self._alerts.alert("EMERGENCY", f"일일 보고 생성 실패 ({trade_day}): {type(exc).__name__}", None)
+            return None
+        with self._repo.tx():
+            self._repo.insert_daily_report(account, trade_day, "OK", content, now, settings_hash)
+        self._alerts.alert("INFO", f"일일 보고 {trade_day}: 체결 {content['fills_today']}건, "
+                                   f"실현 {content['realized_total']}원", None)
+        return content

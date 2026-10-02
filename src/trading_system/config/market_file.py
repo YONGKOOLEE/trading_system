@@ -34,7 +34,7 @@ def _ratio(raw: object, name: str, problems: list[str], allow_zero: bool) -> Dec
 def parse_market_settings(raw: dict) -> GateSettings:
     problems: list[str] = []
     for k in raw:
-        if k not in ("gate", "costs"):
+        if k not in ("gate", "costs", "alerts"):
             problems.append(f"{k}: 알 수 없는 키")
     gate, costs = raw.get("gate"), raw.get("costs")
     if not isinstance(gate, dict):
@@ -58,6 +58,26 @@ def parse_market_settings(raw: dict) -> GateSettings:
     if problems:
         raise ConfigError(problems)
     return GateSettings(age, plr, CostRates(com, tax))  # type: ignore[arg-type]
+
+
+def parse_alert_settings(raw: dict) -> tuple[int, int]:
+    """[alerts] reject_surge_count(건), reject_surge_minutes(분) — 거부 급증 경고 기준 (01 §2.10, V-117). 기본값 없음."""
+    a = raw.get("alerts")
+    problems: list[str] = []
+    if not isinstance(a, dict):
+        raise ConfigError("[alerts] 표가 없다")
+    for k in a:
+        if k not in ("reject_surge_count", "reject_surge_minutes"):
+            problems.append(f"alerts.{k}: 알 수 없는 키")
+    values = []
+    for k in ("reject_surge_count", "reject_surge_minutes"):
+        v = a.get(k)
+        if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+            problems.append(f"alerts.{k}: 1 이상 정수")
+        values.append(v)
+    if problems:
+        raise ConfigError(problems)
+    return values[0], values[1]  # type: ignore[return-value]
 
 
 def load_market_settings(path: Path) -> GateSettings:

@@ -8,3 +8,7 @@ price_limit_ratio = "<비율. KRX 가격제한폭 0.30 확인 (krx-market §3)>"
 [costs]
 commission_rate = "<비율. 모의·실전 수수료율 사용자 확인 (K-U9)>"
 sell_tax_rate = "<비율. 매도 세금 요율 사용자 확인>"
+
+[alerts]
+reject_surge_count = "<건수, 1 이상 정수. 이 시간 안에 게이트 거부가 이만큼 이상이면 경고 (01 §2.10)>"
+reject_surge_minutes = "<분, 1 이상 정수>"

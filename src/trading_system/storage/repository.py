@@ -99,6 +99,12 @@ CREATE TABLE IF NOT EXISTS recon_item (
   item_id TEXT PRIMARY KEY, mode TEXT NOT NULL, recon_id TEXT NOT NULL REFERENCES reconciliation(recon_id),
   account TEXT NOT NULL, kind TEXT NOT NULL, instrument TEXT, ref TEXT, internal_value TEXT, broker_value TEXT,
   detail TEXT, state TEXT NOT NULL, method TEXT, resolver TEXT, resolved_at TEXT);
+CREATE TABLE IF NOT EXISTS clock_check (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT NOT NULL, at TEXT NOT NULL, source TEXT NOT NULL,
+  offset_seconds TEXT, result TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS daily_report (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT NOT NULL, account TEXT NOT NULL, trade_day TEXT NOT NULL,
+  version INTEGER NOT NULL, status TEXT NOT NULL, content TEXT NOT NULL, settings_hash TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS audit_event (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT NOT NULL, at TEXT NOT NULL, kind TEXT NOT NULL,
   actor TEXT NOT NULL, ref TEXT, summary TEXT NOT NULL);
@@ -709,6 +715,36 @@ class Repository:
         with self._lock:
             r = self.connection.execute("PRAGMA quick_check").fetchone()
         return r is not None and r[0] == "ok"
+
+    # --- 감시·보고 (02 ENT-27·28) -------------------------------------------------------
+    def insert_clock_check(self, at: datetime, source: str, offset: Decimal | None, result: str) -> None:
+        self._x("INSERT INTO clock_check(mode, at, source, offset_seconds, result) VALUES(?,?,?,?,?)",
+                (self.mode.value, to_iso(at), source, None if offset is None else str(offset), result))
+
+    def insert_daily_report(self, account: str, trade_day: object, status: str, content: dict, at: datetime,
+                            settings_hash: str | None) -> int:
+        day = str(trade_day)
+        r = self._x("SELECT COALESCE(MAX(version), 0) FROM daily_report WHERE account=? AND trade_day=?",
+                    (account, day)).fetchone()
+        version = int(r[0]) + 1
+        self._x("INSERT INTO daily_report(mode, account, trade_day, version, status, content, settings_hash, "
+                "created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (self.mode.value, account, day, version, status, json.dumps(content, ensure_ascii=False, default=str),
+                 settings_hash, to_iso(at)))
+        return version
+
+    def daily_reports(self, account: str) -> list[dict]:
+        return [dict(r) for r in self._x("SELECT * FROM daily_report WHERE account=? ORDER BY seq", (account,))]
+
+    def decisions_since(self, account: str, since: datetime) -> list[dict]:
+        return [dict(r) for r in self._x("SELECT * FROM gate_decision WHERE account=? AND created_at>=? ORDER BY seq",
+                                         (account, to_iso(since)))]
+
+    def select(self, sql: str, params: tuple = ()) -> list[dict]:
+        """읽기 전용 질의 (보고서용). SELECT만 허용한다."""
+        if not sql.lstrip().upper().startswith("SELECT"):
+            raise ValueError("select()는 SELECT만")
+        return [dict(r) for r in self._x(sql, params)]
 
     # --- 운영 명령 (03 §6.6) -------------------------------------------------------
     def insert_command(self, command_id: str, channel: str, actor: str, command: str, args: dict,

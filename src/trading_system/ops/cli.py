@@ -265,3 +265,4 @@ def migrate_main(argv: Sequence[str] | None = None) -> int:
         return 1
     print(f"적용한 버전: {applied or '없음(최신)'}")
     return 0
+
