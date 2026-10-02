@@ -92,7 +92,7 @@ def check_invariants(conn: sqlite3.Connection, mode: str) -> list[str]:
     for table in ("account", "gate_decision", "intent", "attempt", "broker_order", "fill",
                   "position", "ownership", "reservation", "halt", "audit_event", "settings_version", "ops_command",
                   "strategy_registration", "strategy_state", "strategy_transition", "reconciliation", "recon_item",
-                  "clock_check", "daily_report"):
+                  "clock_check", "daily_report", "notification"):
         for r in _rows(conn, f"SELECT COUNT(*) c FROM {table} WHERE mode <> ?", (mode,)):
             if r["c"]:
                 v.append(f"INV-12 모드 불일치 {table} {r['c']}건")

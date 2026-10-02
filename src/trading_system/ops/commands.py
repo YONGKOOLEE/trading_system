@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 from decimal import Decimal, InvalidOperation
 
@@ -46,7 +47,9 @@ class CommandOutcome:
 
 class OpsProcessor:
     def __init__(self, repo: Repository, gate: Gate, executor: Executor, halts: HaltManager, clock: Clock, *,
-                 reconciler: _Reconciles | None = None, resolver: _Resolves | None = None) -> None:
+                 reconciler: _Reconciles | None = None, resolver: _Resolves | None = None,
+                 kill_file: Path | None = None) -> None:
+        self._kill_file = kill_file
         self._reconciler = reconciler
         self._resolver = resolver
         self._repo = repo
@@ -78,6 +81,8 @@ class OpsProcessor:
         except Exception as exc:  # noqa: BLE001 — 형식이 잘못된 인자·저장 오류 등. 큐를 막지 않고 실패로 기록
             status, result = "FAILED", f"{type(exc).__name__}: {exc}"
             self._executor.alert("EMERGENCY", f"운영 명령 처리 실패 ({name}): {type(exc).__name__}", cid)
+        if channel == Channel.REMOTE:  # 원격 명령 결과는 같은 채널로 회신 (03 §6.6)
+            self._executor.alert("INFO" if status == "DONE" else "WARNING", f"원격 명령 {name} {status}: {result}", cid)
         with self._repo.tx():
             now = self._clock.now()
             self._repo.finish_command(cid, status, result, now)
@@ -93,7 +98,10 @@ class OpsProcessor:
             return "DONE", f"K1 발동 {halt_id}"
         if name == "RESUME":
             r = self._halts.resume(HaltType(args["halt_type"]), account, channel, actor)
-            return ("DONE" if r.ok else "REJECTED"), r.reason
+            note = r.reason
+            if self._kill_file is not None and self._kill_file.exists():
+                note += " / KILL 파일 있음: 위험 확대 전송은 계속 차단 (로컬에서만 삭제, V-119)"
+            return ("DONE" if r.ok else "REJECTED"), note
         if name == "CONFIRM_UNKNOWN":
             accepted = args["accepted"]
             if not isinstance(accepted, bool):  # 문자열 "false"가 참이 되는 것을 막음

@@ -105,6 +105,9 @@ CREATE TABLE IF NOT EXISTS clock_check (
 CREATE TABLE IF NOT EXISTS daily_report (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT NOT NULL, account TEXT NOT NULL, trade_day TEXT NOT NULL,
   version INTEGER NOT NULL, status TEXT NOT NULL, content TEXT NOT NULL, settings_hash TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS notification (
+  alert_seq INTEGER PRIMARY KEY, mode TEXT NOT NULL, level TEXT NOT NULL, message TEXT NOT NULL,
+  channel TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL, last_attempt_at TEXT, last_error TEXT);
 CREATE TABLE IF NOT EXISTS audit_event (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT NOT NULL, at TEXT NOT NULL, kind TEXT NOT NULL,
   actor TEXT NOT NULL, ref TEXT, summary TEXT NOT NULL);
@@ -745,6 +748,40 @@ class Repository:
         if not sql.lstrip().upper().startswith("SELECT"):
             raise ValueError("select()는 SELECT만")
         return [dict(r) for r in self._x(sql, params)]
+
+    # --- 알림 전송 상태 (02 ENT-26) ---------------------------------------------------
+    def enqueue_new_alerts(self, channel: str = "telegram") -> int:
+        """아직 대기열에 없는 감사 ALERT를 넣는다. 넣은 수."""
+        r = self._x("SELECT COALESCE(MAX(alert_seq), 0) FROM notification").fetchone()
+        rows = list(self._x("SELECT seq, summary FROM audit_event WHERE kind='ALERT' AND seq>? ORDER BY seq",
+                            (int(r[0]),)))
+        for row in rows:
+            summary = json.loads(row["summary"])
+            self._x("INSERT INTO notification(alert_seq, mode, level, message, channel, status, attempts) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (row["seq"], self.mode.value, summary.get("level", "INFO"), summary.get("message", ""), channel,
+                     "PENDING", 0))
+        return len(rows)
+
+    def pending_notifications(self) -> list[dict]:
+        return [dict(r) for r in self._x("SELECT * FROM notification WHERE status='PENDING' ORDER BY alert_seq")]
+
+    def mark_notification(self, alert_seq: int, ok: bool, at: datetime, error: str | None = None) -> None:
+        """성공이면 SENT, 실패면 시도 횟수를 늘린다. 밀린 알림은 버리지 않는다(복구 시 전송, V-30)."""
+        if ok:
+            self._x("UPDATE notification SET status='SENT', attempts=attempts+1, last_attempt_at=?, last_error=NULL "
+                    "WHERE alert_seq=?", (to_iso(at), alert_seq))
+            self._x("INSERT INTO meta(key, value) VALUES('notify_fail_streak', '0') "
+                    "ON CONFLICT(key) DO UPDATE SET value='0'")
+            return
+        self._x("UPDATE notification SET attempts=attempts+1, last_attempt_at=?, last_error=? WHERE alert_seq=?",
+                (to_iso(at), (error or "")[:200], alert_seq))
+        self._x("INSERT INTO meta(key, value) VALUES('notify_fail_streak', '1') "
+                "ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER) + 1 AS TEXT)")
+
+    def notification_fail_streak(self) -> int:
+        r = self._x("SELECT value FROM meta WHERE key='notify_fail_streak'").fetchone()
+        return int(r[0]) if r else 0
 
     # --- 운영 명령 (03 §6.6) -------------------------------------------------------
     def insert_command(self, command_id: str, channel: str, actor: str, command: str, args: dict,
