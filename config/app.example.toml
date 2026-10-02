@@ -1,0 +1,23 @@
+# 배포 설정 형식 예제 (T-020). 자리표시자 — 복사해 config/app.<mode>.toml 로 만들고 값을 채운다. 비밀정보는 넣지 않는다.
+# 로더: trading_system.config.app_file. 기본값 없음(누락·형식 오류면 시작 거부).
+
+[app]
+account = "<계좌 별칭, 예: KR-PAPER-01 — 한도 파일의 account와 같게>"
+loop_seconds = "<판정·실행 루프 주기 초, 문자열 소수, 예: 0.5 (운영 명령 1초 처리를 위해 1 이하 권장)>"
+reconcile_minutes = "<장중 주기 대조 분, 정수 1 이상 (설계 제안 1분)>"
+sntp_servers = ["<host:123>", "<host:123>"]   # 2곳 권장 (03 §5.3)
+
+# PAPER 모드에서만. 키움 모의 접속은 사용자 승인(T-015) 후 사용자가 직접 true로 바꾼다. 에이전트는 바꾸지 않는다.
+# [paper]
+# connection_approved = false
+
+[[instruments]]
+code = "<6자리 종목코드>"
+kind = "<STOCK|ETF|ETN>"
+leverage = "<부호 포함 배수 문자열, 일반 주식 1>"
+lot_size = "<수량 단위, 국내 주식 1>"
+
+[[strategies]]
+module = "<패키지.모듈:클래스>"
+params = "<config/strategies/<전략>.toml>"
+eval_times = ["<HH:MM KST>"]

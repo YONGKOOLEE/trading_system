@@ -193,7 +193,7 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
     gate = Gate(repo, clock, GateInputs(_Limits(cfg.account_limits), store, acct, registry, _ClockOk()), policy)
     halts = HaltManager(repo, gate, executor, clock,
                         reference_time_of=lambda a: cfg.account_limits.daily_reference_time)
-    registry._halts = halts  # noqa: SLF001 — 조립 지점 (T-020에서 app/wiring으로 이동)
+    registry.attach_halts(halts)
     # 백테스트에서는 저장소에 정지를 연결하지 않는다: 전체 기간 품질로 K10을 걸면 미래 데이터가 과거를 막는다.
     # 품질은 판정마다 그 시점까지의 봉으로 다시 판정한다 (store.snapshot).
     reg = registry.register(spec, dict(cfg.params), cfg.caps, cfg.account_limits, Mode.BACKTEST)

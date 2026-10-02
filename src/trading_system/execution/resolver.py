@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from enum import StrEnum
 
 from trading_system.broker.base import BrokerAdapter, BrokerQueryError
@@ -24,6 +26,19 @@ from trading_system.storage.repository import IntentRow, Repository
 from .executor import Executor
 
 QUERY_WAITS_SECONDS = (2, 4, 8, 16, 32)  # 01 §2.7
+
+
+@dataclass
+class ResolveProgress:
+    """의도 하나의 해소 진행 (03 D-092). 메모리에만 둔다 — 재시작하면 1회차부터 다시(더 오래 기다리는 쪽)."""
+
+    intent_id: str
+    since: str
+    trade_date: str
+    next_at: datetime
+    round: int = 0
+    clean: bool = True
+    notes: list[str] = field(default_factory=list)
 
 
 class ResolveOutcome(StrEnum):
@@ -46,43 +61,59 @@ class UnknownResolver:
         self._waits = waits
 
     def resolve(self, intent_id: str) -> ResolveOutcome:
+        """동기 해소: 회차마다 대기 함수를 부른다 (시험·백테스트·운영 명령). 운영 루프는 단계형(begin/step)."""
+        p = self.begin(intent_id)
+        while True:
+            self._wait(self._waits[p.round])
+            out = self.step(p)
+            if out is not None:
+                return out
+
+    def begin(self, intent_id: str) -> ResolveProgress:
         intent = self._repo.intent(intent_id)
         if intent.state is not IntentState.UNKNOWN:
             raise ValueError(f"결과 불명 의도만 해소한다: {intent.state}")
-        if self._repo.in_transaction:
-            raise RuntimeError("결과 불명 조회는 저장 단위(tx) 밖에서만 한다")
         attempt = self._repo.attempt_for(intent_id)
         since = attempt["created_at"] if attempt else to_iso(self._clock.now())
-        self._trade_date = self._repo.trade_date_of(from_iso(since))
-        clean = True
-        notes: list[str] = []
-        for n, w in enumerate(self._waits, start=1):
-            self._wait(w)
-            self._executor.process_events()  # 대기 중 도착한 실시간 통보를 반영해야 "통보 없음"을 판단할 수 있다 (D-047)
-            if self._repo.intent(intent_id).state is not IntentState.UNKNOWN:
-                return ResolveOutcome.FOUND  # 보류 통보 반영 등으로 이미 해소됨
-            try:
-                with call_priority(Priority.RESOLVE):  # 호출 제한기 최우선 (03 D-048)
-                    orders = self._broker.query_orders(intent.account)
-                    fills = self._broker.query_fills(intent.account)
-            except BrokerQueryError as exc:
-                clean = False
-                notes.append(f"{n}회 조회 실패: {exc}")
-                self._audit(intent, "QUERY_FAILED", {"round": n})
-                continue
+        return ResolveProgress(intent_id, since, self._repo.trade_date_of(from_iso(since)),
+                               self._clock.now() + timedelta(seconds=self._waits[0]))
+
+    def step(self, p: ResolveProgress) -> ResolveOutcome | None:
+        """조회 한 회차 (03 D-092). 결론이 나면 결과, 아니면 None(다음 회차 시각은 p.next_at)."""
+        if self._repo.in_transaction:
+            raise RuntimeError("결과 불명 조회는 저장 단위(tx) 밖에서만 한다")
+        intent = self._repo.intent(p.intent_id)
+        self._trade_date = p.trade_date
+        n = p.round + 1
+        self._executor.process_events()  # 대기 중 도착한 실시간 통보를 반영해야 "통보 없음"을 판단할 수 있다 (D-047)
+        if self._repo.intent(p.intent_id).state is not IntentState.UNKNOWN:
+            return ResolveOutcome.FOUND  # 보류 통보 반영 등으로 이미 해소됨
+        try:
+            with call_priority(Priority.RESOLVE):  # 호출 제한기 최우선 (03 D-048)
+                orders = self._broker.query_orders(intent.account)
+                fills = self._broker.query_fills(intent.account)
+        except BrokerQueryError as exc:
+            p.clean = False
+            p.notes.append(f"{n}회 조회 실패: {exc}")
+            self._audit(intent, "QUERY_FAILED", {"round": n})
+        else:
             exact, partial = self._match(intent, orders)
             if len(exact) == 1 and not partial:
                 self._adopt(intent, exact[0], fills)
                 return ResolveOutcome.FOUND
             if exact or partial:
                 return self._ambiguous(intent, f"{n}회 조회: 일치 {len(exact)}건, 부분 일치 {len(partial)}건")
-        if self._repo.audit_count_since("UNMATCHED_EVENT", since):
-            clean = False
-            notes.append("짝 없는 실시간 통보 있음")
-        if not clean:
-            return self._ambiguous(intent, "; ".join(notes))
+        p.round = n
+        if p.round < len(self._waits):
+            p.next_at = self._clock.now() + timedelta(seconds=self._waits[p.round])
+            return None
+        if self._repo.audit_count_since("UNMATCHED_EVENT", p.since):
+            p.clean = False
+            p.notes.append("짝 없는 실시간 통보 있음")
+        if not p.clean:
+            return self._ambiguous(intent, "; ".join(p.notes))
         with self._repo.tx():
-            self._executor.close(self._repo.intent(intent_id), IntentState.NOT_ACCEPTED,
+            self._executor.close(self._repo.intent(p.intent_id), IntentState.NOT_ACCEPTED,
                                  f"조회 {len(self._waits)}회 모두 주문 없음 (D-047)")
         return ResolveOutcome.NOT_ACCEPTED
 

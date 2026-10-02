@@ -150,6 +150,10 @@ class StrategyRegistry:
         self._market = market
 
     # --- 등록 -------------------------------------------------------------------------
+    def attach_halts(self, halts: HaltControl) -> None:
+        """조립 지점에서 정지 관리자를 연결한다 (정지 관리자가 게이트를, 게이트가 이 등록부를 쓰므로 나중에 연결)."""
+        self._halts = halts
+
     def register(self, spec: StrategySpec, params: dict[str, object], caps: CapabilityTable,
                  account_limits: AccountLimits | None, target_mode: Mode | None = None) -> RegistrationResult:
         target = target_mode or self._repo.mode
