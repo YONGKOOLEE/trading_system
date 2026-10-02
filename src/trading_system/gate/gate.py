@@ -324,6 +324,9 @@ class Gate:
             left = target.quantity - target.filled_quantity
             if req.quantity > left:
                 raise _Reject(Check.G10, f"수량 증가 정정 불가 (요청 {req.quantity}, 미체결 {left})")
+            if req.quantity != left:
+                # 일부 수량 정정 시 원주문 잔량 처리가 미확인(K-U11, PV-14)이라 잔량 전부만 허용 (01 §2.1 v0.5)
+                raise _Reject(Check.G10, f"정정 수량은 미체결 잔량 전부만 허용 (요청 {req.quantity}, 미체결 {left})")
         if req.price <= 0:
             raise _Reject(Check.G10, f"가격이 0 이하: {req.price}")
         if req.order_type is not OrderType.LIMIT:

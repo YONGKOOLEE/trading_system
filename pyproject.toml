@@ -11,4 +11,5 @@ testpaths = ["tests"]
 addopts = "-ra --strict-markers -m \"not paper\""
 markers = [
     "paper: 키움 모의(PAPER) 연동 테스트. 실제 네트워크 사용 — 사용자 승인 후 -m paper로만 실행",
+    "slow: 오래 걸리는 시험(V-95 무작위 사건열 등). 기본 실행에 포함. 빠른 확인은 -m 'not paper and not slow'",
 ]

@@ -22,6 +22,8 @@ from trading_system.domain.market import DailyRisk
 from trading_system.domain.models import GateRequest
 from trading_system.execution.executor import ExecutionBlocked, Executor
 from trading_system.gate.gate import Gate
+from trading_system.domain.sinks import AlertSink
+from trading_system.storage.alerts import AuditAlertSink
 from trading_system.storage.repository import Repository, StorageFailure, new_id
 
 # 재개 조건 (01 §2.6 "재개 조건" 열). 외부에서 report_condition으로 알려 주는 항목.
@@ -54,12 +56,15 @@ class ResumeResult:
 
 class HaltManager:
     def __init__(self, repo: Repository, gate: Gate, executor: Executor, clock: Clock,
-                 reference_time_of: Callable[[str], dtime | None] | None = None) -> None:
+                 reference_time_of: Callable[[str], dtime | None] | None = None,
+                 alerts: AlertSink | None = None) -> None:
         self._repo = repo
         self._gate = gate
         self._executor = executor
         self._clock = clock
         self._reference_time_of = reference_time_of or (lambda account: None)
+        self._alerts: AlertSink = alerts or AuditAlertSink(repo, clock, actor="halt")
+        executor.attach_halts(self)  # 실행기·해소기의 정지 발동도 이 관리자를 거친다 (03 D-093)
 
     # --- 발동 ---------------------------------------------------------------------
     def activate(self, halt_type: HaltType, actor: str, reason: str, account: str | None = None, *,
@@ -246,4 +251,4 @@ class HaltManager:
         return None
 
     def _alert(self, level: str, message: str, ref: str | None) -> None:
-        self._repo.audit(self._clock.now(), "ALERT", "halt", ref, {"level": level, "message": message})
+        self._alerts.alert(level, message, ref)

@@ -19,8 +19,10 @@ from trading_system.broker.base import BrokerAdapter
 from trading_system.domain.clock import Clock, from_iso
 from trading_system.domain.enums import HaltType
 from trading_system.domain.halts import HaltView, RequestView, halt_rejection
+from trading_system.domain.sinks import AlertSink, HaltSink
 from trading_system.domain.enums import IntentState, OrderType, RequestType, Side, SubmitOutcome
 from trading_system.domain.models import ApprovedIntent, OrderEvent, OrderRequest, SubmitResult
+from trading_system.storage.alerts import AuditAlertSink
 from trading_system.storage.repository import BrokerOrderRow, IntentRow, Repository, StorageFailure
 
 PARKED_LIMIT = 1000     # 보류 통보 최대 보관 수 (넘으면 오래된 것부터 버림, 감사 기록은 남음)
@@ -33,8 +35,11 @@ class ExecutionBlocked(RuntimeError):
 
 
 class Executor:
-    def __init__(self, repo: Repository, broker: BrokerAdapter, clock: Clock, kill_file: Path) -> None:
+    def __init__(self, repo: Repository, broker: BrokerAdapter, clock: Clock, kill_file: Path, *,
+                 alerts: AlertSink | None = None) -> None:
         self._repo = repo
+        self._alerts: AlertSink = alerts or AuditAlertSink(repo, clock, actor="executor")
+        self._halts: HaltSink | None = None
         self._broker = broker
         self._clock = clock
         self._kill_file = kill_file
@@ -45,6 +50,22 @@ class Executor:
     @property
     def blocked_reason(self) -> str | None:
         return self._blocked
+
+    def attach_halts(self, halts: HaltSink) -> None:
+        """정지 발동 경로를 연결한다 (정지 관리자가 생성될 때 스스로 연결, 03 D-093)."""
+        self._halts = halts
+
+    def raise_halt(self, halt_type: HaltType, actor: str, reason: str, account: str | None, *,
+                   instrument: str | None = None) -> str | None:
+        """정지 발동. 트랜잭션 밖에서 호출한다. 정지 관리자가 없으면(단위 시험) 저장소에 직접 기록한다."""
+        if self._halts is not None:
+            return self._halts.activate(halt_type, actor, reason, account, instrument=instrument)
+        with self._repo.tx():
+            now = self._clock.now()
+            halt_id = self._repo.insert_halt(halt_type.value, account, actor, reason, now, instrument=instrument)
+            self._repo.audit(now, "HALT_ACTIVATED", actor, halt_id, {"type": halt_type.value, "account": account})
+        self.alert("EMERGENCY", f"정지 {halt_type.value}: {reason}", halt_id)
+        return halt_id
 
     # --- 재시작 복구 -------------------------------------------------------------
     def recover_on_start(self) -> list[str]:
@@ -199,15 +220,11 @@ class Executor:
             self.apply_event(ev)
 
     def _record_storage_halt(self, account: str) -> None:
-        """K7 기록 시도 (01 K7). 저장소가 계속 실패하면 기록하지 못해도 실행기 차단은 유지된다."""
+        """K7 기록 시도 (01 K7). 저장소가 계속 실패하면 기록하지 못해도 실행기 차단은 유지되고 알림은 대체 경로로."""
         try:
-            with self._repo.tx():
-                now = self._clock.now()
-                halt_id = self._repo.insert_halt("K7", account, "executor", self._blocked, now)
-                self._repo.audit(now, "HALT_ACTIVATED", "executor", halt_id, {"type": "K7", "account": account})
-                self.alert("EMERGENCY", f"정지 K7: {self._blocked}", halt_id)
+            self.raise_halt(HaltType.K7, "executor", self._blocked or "저장 실패", account)
         except StorageFailure:
-            pass
+            self.alert("EMERGENCY", f"정지 K7 기록 실패 (실행기는 전송 차단 중): {self._blocked}", None)
 
     def _alert_on_reject_streak(self, reason: str | None) -> None:
         recent = self._repo.recent_attempt_results(REJECT_ALERT_STREAK)
@@ -216,8 +233,8 @@ class Executor:
             self.alert("WARNING", f"같은 사유 연속 거부 {REJECT_ALERT_STREAK}회: {reason}", None)
 
     def alert(self, level: str, message: str, ref: str | None) -> None:
-        """알림 기록. 전송(텔레그램)은 T-013 Notifier가 이 기록을 읽어 보낸다 (01 §2.10)."""
-        self._repo.audit(self._clock.now(), "ALERT", "executor", ref, {"level": level, "message": message})
+        """알림 기록. 전송(텔레그램)은 T-013 Notifier가 이 기록을 읽어 보낸다 (01 §2.10, 03 D-093)."""
+        self._alerts.alert(level, message, ref)
 
     # --- 통보 반영 (OrderTracker) ------------------------------------------------
     def process_events(self) -> None:

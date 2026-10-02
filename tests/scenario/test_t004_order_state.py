@@ -227,7 +227,7 @@ def _modify(key: str, qty: str, price: str, idem: str = "m-1") -> GateRequest:
 
 def test_v48_modify_gets_new_order_number_and_references_original(env: Env) -> None:
     entry, key = _open_limit_buy(env)
-    m = env.gate.decide(_modify(key, "80", "9950"))
+    m = env.gate.decide(_modify(key, "100", "9950"))
     assert m.result is GateResult.APPROVED
     assert env.executor.submit(m.approved) is IntentState.ACCEPTED
     sent = env.broker.sent[-1]
@@ -239,11 +239,11 @@ def test_v48_modify_gets_new_order_number_and_references_original(env: Env) -> N
     assert env.repo.broker_order(key).state == "MODIFIED"
     assert state(env, m) is IntentState.DONE
     i = env.repo.intent(entry.approved.intent_id)
-    assert i.quantity == Decimal("80") and i.price == Decimal("9950") and not i.state.is_terminal
+    assert i.quantity == Decimal("100") and i.price == Decimal("9950") and not i.state.is_terminal
     env.broker.fill(new.order_no)  # 새 주문 체결은 원 의도에 반영
     env.executor.process_events()
     assert env.repo.intent(entry.approved.intent_id).state is IntentState.FILLED
-    assert env.repo.position(ACCOUNT, "TST-A").quantity == Decimal("80")
+    assert env.repo.position(ACCOUNT, "TST-A").quantity == Decimal("100")
     assert env.repo.active_reservations(ACCOUNT) == []
 
 
@@ -277,20 +277,20 @@ def test_cancel_with_lost_response_resolved_by_query(env: Env) -> None:
 def test_modify_with_lost_response_resolved_by_query(env: Env) -> None:
     entry, key = _open_limit_buy(env)
     env.broker.behavior = FakeBehavior.LOST_ACCEPT
-    m = env.gate.decide(_modify(key, "80", "9950"))
+    m = env.gate.decide(_modify(key, "100", "9950"))
     env.executor.submit(m.approved)
     env.executor.process_events()  # 정정 확인 통보가 오지만 새 주문을 아직 몰라 보류 기록
     assert state(env, m) is IntentState.UNKNOWN
     assert resolver(env, []).resolve(m.approved.intent_id) is ResolveOutcome.FOUND
     assert state(env, m) is IntentState.DONE
     assert env.repo.broker_order(key).state == "MODIFIED"
-    assert env.repo.intent(entry.approved.intent_id).quantity == Decimal("80")
+    assert env.repo.intent(entry.approved.intent_id).quantity == Decimal("100")
 
 
 def test_modify_rejected_keeps_original(env: Env) -> None:
     entry, key = _open_limit_buy(env)
     env.broker.behavior = FakeBehavior.REJECT
-    m = env.gate.decide(_modify(key, "80", "9995"))
+    m = env.gate.decide(_modify(key, "100", "9995"))
     env.executor.submit(m.approved)
     assert state(env, m) is IntentState.REJECTED
     assert env.repo.broker_order(key).state == "ACCEPTED"

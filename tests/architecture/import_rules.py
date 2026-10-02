@@ -22,15 +22,16 @@ INTERNAL_RULES: dict[str, frozenset[str] | None] = {
     "execution": frozenset({"domain", "broker", "storage"}),
     # 03 §7은 broker.kiwoom만 명시. fake도 같은 인터페이스(D-062)이므로 broker 전체에 적용한다.
     "broker": frozenset({"domain", "broker"}),
-    "evaluation": None,
-    "marketdata": None,
-    "reconciliation": None,
-    "halt": None,
-    "ops": None,
-    "monitoring": None,
-    "reporting": None,
-    "storage": None,
-    "config": None,
+    # 03 §7 v0.5 (CP-018 D-5)
+    "evaluation": frozenset({"domain", "strategy", "marketdata"}),
+    "marketdata": frozenset({"domain", "broker"}),
+    "reconciliation": frozenset({"domain", "storage", "broker"}),
+    "halt": frozenset({"domain", "gate", "execution", "storage"}),
+    "ops": frozenset({"domain", "gate", "execution", "halt", "storage", "config"}),
+    "monitoring": frozenset({"domain", "storage"}),
+    "reporting": frozenset({"domain", "storage"}),
+    "storage": frozenset({"domain"}),
+    "config": frozenset({"domain", "storage"}),
 }
 
 # 표준 라이브러리만 허용하는 패키지

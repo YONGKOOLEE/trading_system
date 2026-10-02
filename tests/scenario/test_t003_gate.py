@@ -479,6 +479,13 @@ def test_modify_quantity_increase_rejected(env: Env) -> None:
     assert rejected(env.gate.decide(_modify(key, "101", "10000")), Check.G10, "수량 증가")
 
 
+def test_v120_partial_quantity_modify_rejected(env: Env) -> None:
+    """V-120: 일부 수량 정정은 PV-14 확인 전까지 거부 (01 §2.1 v0.5, K-U11)."""
+    key = _open_buy(env)
+    assert rejected(env.gate.decide(_modify(key, "60", "9995")), Check.G10, "잔량 전부")
+    assert env.gate.decide(_modify(key, "100", "9995", key="m-full")).result is GateResult.APPROVED
+
+
 def test_modify_only_from_exec_policy(env: Env) -> None:
     key = _open_buy(env)
     assert rejected(env.gate.decide(_modify(key, "100", "9995", source=RequestSource.OPERATOR)), Check.G3)

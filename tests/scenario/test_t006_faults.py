@@ -136,6 +136,7 @@ def _run_seed(seed: int, base: Path) -> list[str]:
     return []
 
 
+@pytest.mark.slow
 def test_v95_random_event_sequences_keep_invariants(tmp_path: Path) -> None:
     failures: list[str] = []
     for seed in range(SEEDS):
