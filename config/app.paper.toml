@@ -4,7 +4,8 @@
 account = "KR-PAPER-01"
 loop_seconds = "0.5"
 reconcile_minutes = 1
-# SNTP 서버: 주소 미확인. SNTP 외부 연결 승인 전에는 사용하지 않는다(시작 점검은 시계 미점검으로 보고).
+# SNTP 서버: 외부 연결 승인 A-042 (UDP 123, 시계 조회만 — 시스템 시계 변경 없음). run은 시작·10분마다, preflight는 1회 점검.
+# 1회 점검 결과(2026-10-03): time.bora.net 오차 -0.076초, time.kriss.re.kr 1차 2초 무응답 후 재시도 -0.077초.
 sntp_servers = ["time.kriss.re.kr:123", "time.bora.net:123"]
 
 # 키움 모의 접속 스위치. 승인 A-035. **사용자가 직접 true로 바꾼다** (에이전트는 바꾸지 않는다).

@@ -3,7 +3,8 @@
 - kill: KILL 파일을 **먼저** 만들고(저장소 장애에도 동작) 명령 테이블에 K1 발동을 기록한다.
 - resume: 명령 테이블에 재개 요청을 기록한다. 실제 재개 판정은 본 프로세스가 한다 (재개 조건·원격 여부).
   KILL 파일은 `--clear-kill-file`을 줄 때만 지운다 (로컬에서만, 03 §6.5).
-- status: 해제되지 않은 정지·KILL 파일·대기 명령·결과 불명 의도 수를 보여 준다 (비밀 없음).
+- status: 해제되지 않은 정지·KILL 파일·대기 명령·결과 불명 의도, 포지션·미체결·당일 의도/체결 수, 최근 운영 명령·ALERT
+  10건, 하트비트 나이(본 프로세스 생존), 마지막 시계(SNTP) 점검, 전략 상태를 보여 준다 (읽기 전용, 비밀 없음, RV-16).
 로컬 인증은 Windows 로그인 사용자 = 운영자 (단일 사용자 가정, 03 §6.6).
 """
 
@@ -11,14 +12,17 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import json
 import uuid
 from collections.abc import Sequence
+from datetime import datetime, time
 from pathlib import Path
 
 from trading_system.config.errors import ConfigError
 from trading_system.config.modes import parse_trade_mode
-from trading_system.domain.clock import SystemClock
+from trading_system.domain.clock import KST, Clock, SystemClock, to_iso
 from trading_system.domain.enums import HaltType, IntentState, Mode
+from trading_system.storage.jsonlog import Masker
 from trading_system.storage.repository import ModeMismatch, Repository, StorageFailure
 
 
@@ -156,8 +160,9 @@ def _k1_released(db: Path, mode: Mode) -> bool:
         repo.close()
 
 
-def status_main(argv: Sequence[str] | None = None) -> int:
+def status_main(argv: Sequence[str] | None = None, *, clock: Clock | None = None) -> int:
     ns = _parser("status").parse_args(argv)
+    now = (clock or SystemClock()).now()
     try:
         mode, db, kill = _resolve(ns)
     except ConfigError as exc:
@@ -190,9 +195,101 @@ def status_main(argv: Sequence[str] | None = None) -> int:
         print(f"결과 불명 의도: {len(unknown)}건")
         for i in unknown:
             print(f"  {i.intent_id} {i.instrument} {i.side} {i.quantity}")
+        _print_operations(repo, ns.account, now)
     finally:
         repo.close()
+    _print_heartbeat(db.parent / "heartbeat", now)
     return 0
+
+
+RECENT = 10
+_MASK = Masker()  # 화면 출력 전 가림 (계좌번호 형태 등, R-11)
+HEARTBEAT_STALE_SECONDS = 30  # monitoring.liveness.HEARTBEAT_STALE와 같은 값 (ops는 monitoring을 import하지 않는다)
+
+
+def _acct(sql: str, account: str | None, params: tuple = ()) -> tuple[str, tuple]:
+    return (sql + " AND account=?", params + (account,)) if account else (sql, params)
+
+
+def _print_operations(repo: Repository, account: str | None, now: datetime) -> None:
+    """RV-16: 운영 중 판단에 필요한 상태 (읽기 전용 SELECT만)."""
+    q = repo.select
+    sql, prm = _acct("SELECT account, instrument, quantity, avg_price FROM position WHERE CAST(quantity AS REAL) > 0",
+                     account)
+    pos = q(sql + " ORDER BY account, instrument", prm)
+    print(f"보유 포지션: {len(pos)}건")
+    for p in pos:
+        print(f"  {p['account']} {p['instrument']} 수량 {p['quantity']} 평균가 {p['avg_price']}")
+    sql, prm = _acct("SELECT * FROM broker_order WHERE state IN ('ACCEPTED','PARTIAL')", account)
+    orders = q(sql + " ORDER BY created_at", prm)
+    print(f"미체결 주문: {len(orders)}건")
+    for o in orders:
+        print(f"  주문번호 {o['order_no']} {o['instrument']} {o['side']} {o['filled_quantity']}/{o['quantity']} "
+              f"{o['state']} {o['origin']} 접수 {_kst(o['created_at'])}")
+    day_start = to_iso(datetime.combine(now.astimezone(KST).date(), time(0), tzinfo=KST))
+    sql, prm = _acct("SELECT COUNT(*) AS n FROM intent WHERE created_at>=?", account, (day_start,))
+    n_intent = q(sql, prm)[0]["n"]
+    sql = ("SELECT COUNT(*) AS n FROM fill f JOIN broker_order o ON o.order_key=f.order_key WHERE f.at>=?"
+           + (" AND o.account=?" if account else ""))
+    n_fill = q(sql, (day_start, account) if account else (day_start,))[0]["n"]
+    print(f"당일 의도 {n_intent}건, 체결 {n_fill}건 (KST 0시부터)")
+    cmds = q("SELECT * FROM ops_command ORDER BY created_seq DESC LIMIT ?", (RECENT,))
+    print(f"최근 운영 명령 {len(cmds)}건 (최신 먼저):")
+    for c in cmds:
+        print(_MASK.text(f"  {_kst(c['created_at'])} {c['channel']} {c['command']} {_short(c['args'])} → "
+                         f"{c['status']} 결과={c['result'] or '-'}"))
+    alerts = q("SELECT at, actor, ref, summary FROM audit_event WHERE kind='ALERT' ORDER BY seq DESC LIMIT ?",
+               (RECENT,))
+    print(f"최근 알림 {len(alerts)}건 (최신 먼저):")
+    for a in alerts:
+        try:
+            body = json.loads(a["summary"])
+        except ValueError:
+            body = {}
+        print(_MASK.text(f"  {_kst(a['at'])} {body.get('level', '?')} {body.get('message', '')}"
+                         f"{' (' + a['ref'] + ')' if a['ref'] else ''}"))
+    cc = q("SELECT at, source, offset_seconds, result FROM clock_check ORDER BY seq DESC LIMIT 1")
+    if cc:
+        c = cc[0]
+        print(f"마지막 시계 점검: {_kst(c['at'])} {c['result']} 오차 {c['offset_seconds'] or '-'}초 ({c['source']})")
+    else:
+        print("마지막 시계 점검: 기록 없음")
+    states = repo.strategy_states()
+    print(f"전략 상태: {len(states)}건")
+    for st in states:
+        print(f"  {st['strategy_id']} v{st['version']} {st['market']} {st['state']}"
+              f"{' 정지사유=' + st['stop_reason'] if st['stop_reason'] else ''} 갱신 {_kst(st['updated_at'])}")
+
+
+def _print_heartbeat(path: Path, now: datetime) -> None:
+    try:
+        beat = datetime.fromisoformat(path.read_text(encoding="utf-8").strip())
+    except FileNotFoundError:
+        print("하트비트: 없음 — 본 프로세스가 시작되지 않았거나 멈춤")
+        return
+    except (OSError, ValueError):
+        print("하트비트: 읽을 수 없음")
+        return
+    if beat.tzinfo is None:
+        print("하트비트: 시간대 없는 시각 — 판정 불가")
+        return
+    age = (now - beat).total_seconds()
+    state = "살아 있음" if age <= HEARTBEAT_STALE_SECONDS else "멈춤 의심"
+    print(f"하트비트: {age:.0f}초 전 ({_kst(beat.isoformat())}) — 본 프로세스 {state}")
+
+
+def _kst(text: str | None) -> str:
+    if not text:
+        return "-"
+    try:
+        return datetime.fromisoformat(text).astimezone(KST).strftime("%m-%d %H:%M:%S")
+    except ValueError:
+        return text
+
+
+def _short(args: str | None, limit: int = 80) -> str:
+    s = args or ""
+    return s if len(s) <= limit else s[:limit] + "…"
 
 
 # --- 저장소 운영 (T-011, 03 §9·D-089) ---------------------------------------------------------

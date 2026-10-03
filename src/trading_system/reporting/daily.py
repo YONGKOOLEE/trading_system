@@ -91,6 +91,11 @@ def build_report(repo: Repository, account: str, trade_day: date, reference_time
     }
 
 
+def current_trade_day(now: datetime, reference_time: time) -> date:
+    """`now`가 속한 거래일 = 직전(같은 시각 포함) 일일 기준 시각의 KST 날짜. report_time(예: 16:00) 보고에 쓴다."""
+    return last_kst_time_at_or_before(now, reference_time).astimezone(KST).date()
+
+
 class DailyReporter:
     def __init__(self, repo: Repository, alerts: AlertSink, cost_rates: CostRates,
                  price_of: Callable[[str], Decimal | None]) -> None:
@@ -99,10 +104,16 @@ class DailyReporter:
         self._rates = cost_rates
         self._price_of = price_of
 
-    def generate(self, account: str, now: datetime, reference_time: time, settings_hash: str | None) -> dict | None:
-        """방금 끝난 거래일(직전 일일 기준 시각부터 24시간)의 보고서. 기준 시각 전이면 전날."""
-        current_start = last_kst_time_at_or_before(now, reference_time)
-        trade_day = (current_start.astimezone(KST) - timedelta(days=1)).date()
+    def generate(self, account: str, now: datetime, reference_time: time, settings_hash: str | None, *,
+                 current_day: bool = False) -> dict | None:
+        """기본: 방금 끝난 거래일(직전 일일 기준 시각부터 24시간)의 보고서.
+
+        current_day=True: 지금 진행 중인 거래일(직전 기준 시각부터 지금까지)의 보고서 — report_time(예: 16:00)에
+        부른다 (검토 RV-21). 같은 거래일을 기준 시각 경계에서 다시 만들면 보고 버전이 올라간다(최종본).
+        """
+        trade_day = current_trade_day(now, reference_time)
+        if not current_day:
+            trade_day -= timedelta(days=1)
         try:
             content = build_report(self._repo, account, trade_day, reference_time, self._rates, self._price_of,
                                    settings_hash)

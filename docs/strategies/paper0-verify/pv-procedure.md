@@ -1,6 +1,6 @@
 # PAPER-0 실행 절차서 (T-016, 04 §4.1 PV-01~16, D-086)
 
-- 버전 v0.1 (2026-10-03, draft) — 사용자가 따라 실행하고, 결과는 에이전트가 `docs/broker-specs/kiwoom-kr.md`에 "② 모의 실측, 일자"로 기록한다.
+- 버전 v0.2 (2026-10-03, draft — 검토 RV-17 반영: 실행 폴더·`.venv` 경로, 2절 완료, SNTP 승인, 운영 안내 3.1절) — 사용자가 따라 실행하고, 결과는 에이전트가 `docs/broker-specs/kiwoom-kr.md`에 "② 모의 실측, 일자"로 기록한다.
 - **모의 주문 실행은 사용자가 한다(D-086).** 에이전트는 실행 명령을 돌리지 않는다. 실전 계좌·LIVE는 범위 밖.
 - 목적: 인프라 검증(주문·체결·통보·대조·정지). 수익 목적 아님.
 
@@ -10,11 +10,17 @@
 | 1 | 시작 점검 통과 (`scripts/preflight.py`) | 통과 (kiwoom-kr §7b) |
 | 2 | 달력 2024~2026, 종목 005930, 한도·비용 설정 | 완료 (A-034·A-037·A-038) |
 | 3 | 복원 시험 1회 (R-25) | 통과 (2026-10-03) |
-| 4 | 전략 `paper0-verify` 초안 → 백테스트 통과 → PAPER 전환 | **사용자 승인 A-ID 2개 필요** (아래 2절) |
-| 5 | SNTP 외부 연결 승인 (`run`은 시작·10분마다 시계 점검, 실패하면 K6로 주문 차단) | **사용자 승인 필요** |
+| 4 | 전략 `paper0-verify` 초안 → 백테스트 통과 → PAPER 전환 | **완료** (A-040 BACKTEST_PASSED, A-041 PAPER, 2026-10-03) |
+| 5 | SNTP 외부 연결 승인 (`run`은 시작·10분마다 시계 점검, 실패하면 K6로 주문 차단) | **승인 A-042** (2026-10-03 1회 점검: time.bora.net -0.076초, time.kriss.re.kr 재시도 -0.077초) |
 | 6 | 키움 차트 API 이용약관 확인 (U-06) | 사용자 확인 필요 |
 
-## 2. 전략 상태 전환 (사용자 승인 후, 명령은 사용자 또는 에이전트)
+모든 명령은 **저장소 폴더에서** PowerShell로 실행한다. 창을 새로 열 때마다 먼저:
+```
+cd C:\AI\trading_system\trading_system
+```
+
+## 2. 전략 상태 전환 — **완료** (A-040·A-041, 2026-10-03). 다시 할 필요 없음, 기록용
+확인만: `.venv\Scripts\python scripts\strategy.py show --mode PAPER` (paper0-verify v1 PAPER)
 ```
 .venv\Scripts\python scripts\strategy.py transition --mode PAPER paper0-verify 1 BACKTEST_PASSED --approval A-<번호> --evidence docs/strategies/paper0-verify/backtest-v1.md
 .venv\Scripts\python scripts\strategy.py transition --mode PAPER paper0-verify 1 PAPER --approval A-<번호>
@@ -22,18 +28,37 @@
 ```
 
 ## 3. 실행 (사용자)
-1. 장 시작 전(08:50 전후)에 실행한다. 창을 닫지 않는다.
+0. (장 시작 전, **run을 켜기 전에만**) 시작 점검. run이 켜져 있으면 점검이 거부된다(하트비트 30초 이내) — 점검 끝의 토큰 폐기가 엔진 토큰을 무효화하기 때문:
+   ```
+   $env:TRADE_MODE='PAPER'; .venv\Scripts\python scripts\preflight.py
+   ```
+   결과에 `시계(SNTP): 오차 …초`가 나온다. 오차 1초 초과면 실패 → Windows 시간 동기화 후 재점검.
+1. 장 시작 전(08:50 전후)에 실행한다. **실행 창 하나만** 쓰고 창을 닫지 않는다(두 번 실행 금지).
    ```
    $env:TRADE_MODE='PAPER'; $env:PYTHONPATH='src'; .venv\Scripts\python -m trading_system.app run
    ```
-2. 시작하면 재시작 안전 정지 **K8**이 걸린다(설계, CLAUDE.md §8-9). 대조 결과를 확인한 뒤 다른 창에서 재개:
+   WARNING·EMERGENCY 알림과 정지는 이 창에 `[시각 KST] 등급 Kx 문구`로 바로 보이고, `var\paper\logs\ops-YYYYMMDD.jsonl`에도 남는다.
+2. 시작하면 재시작 안전 정지 **K8**이 걸린다(설계, CLAUDE.md §8-9). 다른 창(먼저 `cd`)에서 대조 결과를 확인한 뒤 재개:
    ```
    .venv\Scripts\python scripts\status.py --mode PAPER
    .venv\Scripts\python scripts\resume.py --mode PAPER K8
+   .venv\Scripts\python scripts\status.py --mode PAPER
    ```
-3. 09:30 매수 1주, 14:30 매도 1주가 나간다(게이트 통과 시). 진행 중 확인: `scripts\status.py --mode PAPER`
-4. 멈추기: 긴급하면 `scripts\kill.py --mode PAPER`(신규 진입 차단, 청산 아님), 끝낼 때는 실행 창에서 Ctrl+C.
+   **09:25까지** 재개하고, 마지막 `status`에서 "해제되지 않은 정지: 0건"과 최근 운영 명령의 RESUME 결과(DONE)를 확인한다. 09:30 판정 때 K8이 남아 있으면 매수가 나가지 않는다.
+3. 09:30 매수 1주, 14:30 매도 1주가 나간다(게이트 통과 시). 진행 중 확인: `.venv\Scripts\python scripts\status.py --mode PAPER`
+   (포지션·미체결 주문·당일 의도/체결 수·최근 명령/알림·하트비트·시계 점검·전략 상태가 나온다)
+4. 멈추기: 긴급하면 `.venv\Scripts\python scripts\kill.py --mode PAPER`(신규 진입 차단, 청산 아님). 끝낼 때는 3.1절 종료 순서.
 5. 매일 장 마감 후 **키움 앱(모의투자) 주문체결내역·잔고를 시스템 상태와 비교**해 다르면 알린다.
+6. 장 마감 후 백업: `.venv\Scripts\python scripts\backup.py --mode PAPER`
+
+### 3.1 운영 주의 (검토 RV-17)
+- **14:30 전 확인(14:20 전후)**: `status`에서 해제되지 않은 정지를 본다. 매도(청산)를 막는 정지(K5 등)가 있으면 재개 조건을 확인하고 알린다. 매수 보유 상태로 장이 끝나지 않게 한다.
+- **종료 순서**: 14:30 매도 체결을 `status`로 확인(보유 포지션 0건, 미체결 0건) → 실행 창에서 **Ctrl+C**. 창의 X로 닫지 않는다.
+- **PC 설정**: 실행 중 절전·화면 잠금 후 절전·최대 절전을 끈다. Windows Update 자동 재시작을 실행 기간 밖으로 미룬다(사용 시간 설정 또는 업데이트 일시 중지). 절전 복귀는 시계 점프로 K8을 건다.
+- **동시 실행 금지**: run 실행 중에 `preflight.py`를 실행하지 않는다. run은 창 하나만.
+- **첫 체결 직후(1일차 09:30 매수 체결 뒤)**: 바로 `status`로 열린 대조 불일치·K4가 없는지 확인한다(K-U16 시뮬레이터 가정 확인). 있으면 실행을 멈추지 말고 `status` 출력과 함께 알린다.
+- **RV-23 실측 (첫 왕복)**: 첫 매수 전, 매수 체결 후, 매도 체결 후 세 시점에 키움 앱(모의) 예수금 화면의 **예수금(entr)**과 **D+2 추정예수금(d2_entra)** 값을 적어 둔다. 당일 체결이 entr에 반영되는지 판정에 쓴다(값은 계좌번호 없이 금액만 기록).
+- **선택: watchdog** — 별도 창(먼저 `cd`)에서 `.venv\Scripts\python scripts\watchdog.py --mode PAPER`. 하트비트가 30초 넘게 멈추면 알림만 한다(자동 재시작 없음).
 
 권장 기간: **3~5거래일**(PV-02 여러 거래일 주문번호, PV-11 토큰 갱신 관찰 포함).
 
@@ -43,7 +68,7 @@
 | PV-01 | 정상 주문 응답만 관찰. "잘못된 주문"은 중앙 게이트가 브로커 전송 전에 막아 보낼 수 없음 | 자동 | 오류 주문 응답 형태는 **미실행**(주문 경로 하나 원칙) |
 | PV-02 | 여러 거래일 주문번호 비교 | 자동 → 에이전트 분석 | |
 | PV-03 | 장 마감 미체결 소멸 | — | **미실행**: 지정가 미사용(호가 표 X-U1 없음) |
-| PV-04 | 보유 중(09:30~14:30) 인터넷을 30초 끊었다 연결 → 통보·조회 비교 | 사용자 1회 | K5 발동 → 재접속 대조 일치 시 자동 해제 기대 |
+| PV-04 | 보유 중(09:30~14:30) 인터넷을 30초 끊었다 연결 → 통보·조회 비교 | 사용자 1회 | K5 발동 → 재접속 대조 일치 시 자동 해제 기대. 루프 지연·시계 점검으로 **K8이 함께 걸릴 수 있다** → `status`로 확인 후 `resume.py --mode PAPER K8`. 14:30 전에 정지가 모두 풀렸는지 확인 |
 | PV-05 | 주문 직후 조회 반영 지연 | 자동 → 에이전트 분석 | 감사 기록 |
 | PV-06 | 시작 점검 | 완료 | §7b |
 | PV-07 | 체결 후 수수료·세금 필드 | 자동 → 에이전트 분석 | 키움 앱 체결 내역과 비교 |
@@ -52,7 +77,7 @@
 | PV-10 | 체결가 vs 같은 시각 시세 | 자동 → 에이전트 분석 | |
 | PV-11 | 토큰 만료(약 24시간) 전 갱신 | 실행을 24시간 넘게 유지(밤새 켜 두기) 1회 | 어렵다면 미실행 기록 |
 | PV-12 | 짧은 간격 연속 조회로 1700 유도 | 에이전트(조회만, 별도 실행) | 장외 시간 가능 |
-| PV-13 | 키움 앱에서 NXT 또는 SOR로 1주 주문 1건 → 다음 대조 | 사용자 1회 | 외부 거래로 발견되는지. 발견되면 K4 → `reconcile-resolve`로 정리 |
+| PV-13 | 키움 앱에서 NXT 또는 SOR로 **유니버스 밖 종목**(005930 아님) 1주 주문 1건, 장 마감 무렵(14:30 매도 체결 확인 뒤) → 다음 대조 | 사용자 1회 | 외부 거래로 발견되는지. 발견되면 K4 → `.venv\Scripts\python scripts\reconcile-resolve.py --mode PAPER <항목ID> EXTERNAL`로 정리. 005930으로 하면 전략 보유와 섞여 검증 매매를 망친다 |
 | PV-14 | 일부 수량 정정 | — | **미실행**: 정정 미구현(CAP-ORD-03) |
 | PV-15 | 시세 조회 주기·지연 | 자동 → 에이전트 분석 | 주기 × 3 ≤ 60초 |
 | PV-16 | 매도 체결 후 주문가능금액 반영 시각 | 자동 → 에이전트 분석 | 정지 종목 취소는 미실행 |

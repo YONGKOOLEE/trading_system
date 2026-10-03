@@ -5,7 +5,10 @@
 - 토큰 발급(au10001) → 사용할 조회 API 1회씩(8104 = 모의 미지원 확인) → 시작 대조 → 토큰 폐기(au10002).
 - HTTP 경계(GuardedHttp)에서 주문 API(kt10000~kt10003, 주문 경로)를 **전송 전에** 막는다. 이 경로로는 주문이 나갈 수 없다.
 - 기록은 API별 호출 결과(HTTP 상태·코드·분류)와 건수만 남긴다. 응답 본문·금액·앱키·토큰·계좌번호는 남기지 않는다.
-- 시계(SNTP)는 외부 연결 승인 전이라 점검하지 않고 보고서에 미점검으로 적는다.
+- 시계(SNTP): 외부 연결 승인 A-042에 따라 설정의 sntp_servers에 1회 질의한다(조회만). 오차 1초 초과는 실패,
+  모든 서버 무응답은 경고(판정 불가 — 본 프로세스의 ClockMonitor가 K6로 막는다). 결과는 clock_check에 남는다.
+- 본 프로세스(run)가 살아 있으면(하트비트 30초 이내) 연결 전에 거부한다. 점검 끝의 토큰 폐기가 실행 중인
+  엔진의 토큰을 무효화할 수 있기 때문이다 (검토 RV-15·RV-17).
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ from trading_system.marketdata.calendar import KrxCalendar
 from trading_system.marketdata.errors import MarketDataError
 from trading_system.marketdata.kiwoom_feed import KiwoomMarketFeed
 from trading_system.marketdata.store import MarketDataStore
+from trading_system.monitoring.sntp import TOLERANCE_SECONDS, ClockMonitor, SntpError, query_offset
 from trading_system.reconciliation.reconciler import Reconciler
 from trading_system.storage.jsonlog import Masker
 from trading_system.storage.repository import Repository
@@ -125,6 +129,8 @@ class PreflightReport:
     reconcile: str | None = None
     reconcile_id: str | None = None
     order_api_blocked: list[str] = field(default_factory=list)
+    clock_offset: str | None = None      # SNTP 오차(초). 판정 불가면 None
+    clock_source: str | None = None
     warnings: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
 
@@ -297,10 +303,63 @@ def connect_paper(root: Path, environ: Mapping[str, str] | None, clock: Clock, *
                            startup.storage_path)
 
 
+HEARTBEAT_FRESH_SECONDS = 30  # monitoring.liveness.HEARTBEAT_STALE과 같은 값
+
+
+def engine_alive(heartbeat: Path, now: datetime) -> str | None:
+    """본 프로세스 하트비트가 30초 이내면 거부 사유. 없거나 오래되었으면 None."""
+    try:
+        beat = datetime.fromisoformat(heartbeat.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    if beat.tzinfo is None:
+        return None
+    age = (now - beat).total_seconds()
+    if age < HEARTBEAT_FRESH_SECONDS:
+        return (f"본 프로세스 하트비트가 {age:.0f}초 전 — 실행 중인 엔진과 동시에 점검하지 않는다"
+                f"(점검 끝의 토큰 폐기가 엔진 토큰을 무효화할 수 있음). 엔진을 멈추고 30초 뒤 다시 실행")
+    return None
+
+
+def _sntp_query(query: Callable[[str, int], Decimal] | None) -> Callable[[str, int], Decimal]:
+    if query is not None:
+        return query
+
+    def ask(host: str, port: int) -> Decimal:
+        if host.lower().rstrip(".").endswith(".invalid"):  # RFC 6761 예약 이름: 소켓을 열지 않는다
+            raise SntpError(f"{host}:{port} 예약된 이름(.invalid) — 조회하지 않음")
+        return query_offset(host, port)
+    return ask
+
+
+def check_clock(rep: PreflightReport, repo: Repository, clock: Clock, servers: list[tuple[str, int]],
+                query: Callable[[str, int], Decimal] | None = None) -> None:
+    """SNTP 1회 점검 (승인 A-042, 조회만). 오차 1초 초과 → 실패, 모든 서버 무응답 → 경고."""
+    if not servers:
+        rep.warnings.append("시계(SNTP) 미점검 — 설정에 sntp_servers 없음")
+        return
+    try:
+        res = ClockMonitor(repo, clock, servers, None, None, query=_sntp_query(query)).check()
+    except Exception as exc:  # noqa: BLE001 — 기록 실패도 점검 결과로 보고
+        rep.warnings.append(f"시계(SNTP) 점검 오류: {type(exc).__name__}")
+        return
+    rep.clock_source = res.source if res.ok is not None else None
+    if res.ok is None:
+        rep.warnings.append(f"시계(SNTP) 판정 불가 — 모든 서버 무응답: {_masked(Exception(res.source))}")
+        return
+    rep.clock_offset = str(res.offset)
+    if not res.ok:
+        rep.failures.append(f"시계 오차 {res.offset}초 > 허용 {TOLERANCE_SECONDS}초 ({res.source}) — PC 시간 동기화 후 재점검")
+
+
 def preflight_main(root: Path, environ: Mapping[str, str] | None = None, *, rest_url: str = MOCK_REST,
                    ws_url: str = MOCK_WS, clock: Clock | None = None, probe_code: str | None = None,
-                   per_tr_interval: float = 1.1) -> int:
+                   per_tr_interval: float = 1.1,
+                   sntp_query: Callable[[str, int], Decimal] | None = None) -> int:
     clock = clock or SystemClock()
+    alive = engine_alive(root / "var" / "paper" / "heartbeat", clock.now())
+    if alive:
+        return _refuse(alive)
     conn = connect_paper(root, environ, clock, rest_url=rest_url, ws_url=ws_url, per_tr_interval=per_tr_interval)
     if isinstance(conn, str):
         return _refuse(conn)
@@ -316,11 +375,11 @@ def preflight_main(root: Path, environ: Mapping[str, str] | None = None, *, rest
     try:
         rep = run_preflight(adapter, guard, MarketDataStore(calendar, None), repo, clock, app.account, code,
                             app.instruments)
+        check_clock(rep, repo, clock, list(app.sntp_servers), sntp_query)
     finally:
         repo.close()
     if calendar.session(clock.now().astimezone(KST).date()) is None:
         rep.warnings.append("올해 시장 달력 없음(config/calendar) — 운영 시 모든 주문 거부. X-U3 작성 필요")
-    rep.warnings.append("시계(SNTP) 미점검 — SNTP 외부 연결 승인 전")
     _write(base, rep, clock.now())
     _print(rep)
     return 0 if rep.ok else 1
@@ -343,6 +402,7 @@ def _print(rep: PreflightReport) -> None:
         detail = f", {a.error_class} 코드 {a.code} {a.message}" if a.error_class else ""
         print(f"  {a.api_id}: {'정상' if a.ok else '실패'} (호출 {a.calls}회{detail})")
     print(f"  시작 대조: {rep.reconcile or '안 함'}")
+    print(f"  시계(SNTP): {'오차 ' + rep.clock_offset + '초 (' + (rep.clock_source or '') + ')' if rep.clock_offset else '판정 불가'}")
     print(f"  주문 API 전송: 0건{' (차단 ' + str(len(rep.order_api_blocked)) + '회)' if rep.order_api_blocked else ''}")
     for w in rep.warnings:
         print(f"  경고: {w}")
