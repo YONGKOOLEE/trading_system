@@ -138,6 +138,16 @@ def test_master_statuses_and_unknown(sim: Sim, clock: FixedClock) -> None:
     assert master_statuses({"orderWarning": "2"}) == {TradingStatus.DELISTING}
     assert master_statuses({"orderWarning": "4", "state": "거래정지"}) == {TradingStatus.CAUTION, TradingStatus.HALTED}
     assert master_statuses({"orderWarning": "0", "state": "증거금100%"}) == frozenset()
+    # K-U6 실측(2026-10-03): 거래정지는 state보다 auditInfo에 더 많이 표시됨(26 vs 112) → 둘 중 하나라도 표시면 정지
+    assert master_statuses({"orderWarning": "0", "state": "증거금100%", "auditInfo": "거래정지"}) == {TradingStatus.HALTED}
+    assert master_statuses({"orderWarning": "0", "state": "증거금100%|거래정지", "auditInfo": "정상"}) == \
+        {TradingStatus.HALTED}
+    for audit in ("관리종목", "투자경고", "투자주의", "단기과열", "투자주의환기종목"):
+        assert master_statuses({"orderWarning": "0", "state": "증거금40%", "auditInfo": audit}) == \
+            {TradingStatus.CAUTION}, audit
+    assert master_statuses({"orderWarning": "0", "state": "증거금40%", "auditInfo": "정상"}) == frozenset()
+    assert master_statuses({"orderWarning": "0", "state": "증거금40%", "auditInfo": "처음 보는 값"}) == \
+        {TradingStatus.CAUTION}                              # 모르는 값은 주의로 (위험 확대 거부)
     sim.master["0"] = [{"code": A, "state": "거래정지", "orderWarning": "0"}]
     f.refresh_master()
     assert any(lv == "EMERGENCY" and A in m for lv, m in alerts.items)       # 보유 종목 거래정지 → 긴급

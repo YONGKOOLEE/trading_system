@@ -1,0 +1,22 @@
+# BACKTEST 한도 (DP-30: PAPER와 같은 값)·시간 설정 (01 D-026). 값: 사용자 결정 A-034 (2026-10-03, "권장대로").
+# 기준 금액 = 일일 기준 시각의 순자산(예수금 + 보유 평가액). 비율은 소수(0.005 = 0.5%).
+# 변경: 더 엄격해지면 즉시, 완화·혼합·기준 시각 변경은 다음 일일 기준 시각부터.
+
+account = "KR-BT-01"
+
+[limits]
+l1_max_loss_ratio = "0.005"        # 1회 최대 손실 0.5%
+l2_max_symbol_ratio = "0.10"       # 종목 비중 10%
+l3_max_total_ratio = "0.50"        # 총 노출 50%
+l4_daily_loss_ratio = "0.01"       # 일일 손실 1% → K2
+l5_daily_new_orders = 5            # 일일 신규 주문 5건
+l6_max_positions = 3               # 보유 종목 3개
+l7_max_order_amount = "1000000"    # 1회 주문 최대 100만 원
+l10_leverage_total_ratio = "none"  # 레버리지·인버스 상품 미사용
+warn_usage_ratio = "0.80"          # 한도 80% 사용 시 경고
+
+[time]
+order_window_start = "09:10"
+order_window_end = "15:10"
+daily_reference_time = "08:00"
+report_time = "16:00"

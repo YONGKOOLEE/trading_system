@@ -59,6 +59,7 @@ class StrategyInput:
     strategy: Strategy
     params: dict[str, object]
     eval_times: tuple[time, ...]
+    verification_approval: str | None = None   # PAPER-0 검증 전략 승인 A-ID (DP-24 a)
 
 
 def build_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: BrokerAdapter, store: MarketDataStore,
@@ -101,7 +102,8 @@ def build_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: BrokerAd
 
     loaded: list[LoadedStrategy] = []
     for si in strategies:
-        reg = registry.register(si.strategy.spec, dict(si.params), caps, account_limits, mode)
+        reg = registry.register(si.strategy.spec, dict(si.params), caps, account_limits, mode,
+                                verification_approval=si.verification_approval)
         if not reg.ok:
             raise ConfigError([f"전략 등록 거부 {si.strategy.spec.owner}: {p}" for p in reg.problems])
         parsed = validate_params(si.strategy.spec, si.params)   # 전략에는 검증·형 변환된 값만 준다 (R-19)

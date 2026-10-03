@@ -11,9 +11,17 @@ sntp_servers = ["time.kriss.re.kr:123", "time.bora.net:123"]
 [paper]
 connection_approved = true
 
-# PAPER-0 종목: 사용자 결정 A-037 (삼성전자 1종목). 전략은 T-016에서 등록·승인 후 추가한다.
+# PAPER-0 종목: 사용자 결정 A-037 (삼성전자 1종목).
 [[instruments]]
 code = "005930"
 kind = "STOCK"
 leverage = "1"
 lot_size = "1"
+
+# PAPER-0 검증 전략 (T-016, 04 §4.1). verification_approval = DP-24 해법 (a) 승인 A-037.
+# 신호가 나가려면 상태가 PAPER여야 한다: scripts/strategy.py transition (사용자 승인 A-ID 필요, INV-13)
+[[strategies]]
+module = "trading_system.strategy.paper0_verify:Paper0Verify"
+params = "config/strategies/paper0-verify-v1.toml"
+eval_times = ["09:30", "14:30"]
+verification_approval = "A-037"

@@ -191,3 +191,14 @@
   실행 결과: 2024 18일, 2025 19일, 2026 13일(~10-02), 한 종목만 빠진 날 0일. 2026 남은 휴장(10-05·10-09·12-25·12-31)은 토스증권 공지(웹 검색), 개장 시간 변경 2025-11-13·2026-01-02(보도), 2026-11-19(예상값).
   `config/calendar/krx-2024~2026.toml` 작성 → 시작 점검 재실행 통과, 달력·일봉 품질 경고 사라짐.
 - 시험 변경(요구 변경 A-037): test_t010 `test_calendar_dir_ignores_examples`를 임시 디렉터리로. `.venv\Scripts\python -m pytest -q` → 743 passed.
+
+## 2026-10-03 (16) — T-016 준비 진행 (A-038 비용, A-039 지시)
+- 비용 확정 A-038: 수수료 0.015%, 매도 세금 0.20%. 백업 PC 안만, K-U6 권장안(A-039).
+- K-U6 실측(ka10099 5,834행 집계, 조회만): 거래정지 state 26 vs auditInfo 112 → `master_statuses`가 auditInfo도 사용(DP-29). 시험 보강.
+- 복원 시험: `scripts\backup.py --mode PAPER` → `scripts\restore-test.py --mode PAPER` 통과(무결성·모드·스키마 2·감사 연속·추가 전용).
+- 구현: `strategy/paper0_verify.py`(09:30 1주 시장가 진입, 14:30 청산), `config/strategies/paper0-verify-v1.toml`, 배포 설정 `verification_approval`(PAPER만), `app/strategy_tool.py`+`scripts/strategy.py`(show/register/transition), `repository.strategy_states`. 시험 16건.
+- 백테스트: 모의 일봉 005930 CSV(조회만) → 1천만 원 실행은 L1으로 전부 거부(설계대로) → 1억 원(모의 예수금) 재실행 통과: 212 거래, 재현성·룩어헤드 통과, G12 2건(개장 10:00일). DP-30.
+- PAPER 저장소 등록: `scripts\strategy.py register --mode PAPER` → paper0-verify:1 초안.
+- 문서: docs/strategies/paper0-verify/{strategy,backtest-v1,status,pv-procedure}.md, kiwoom-kr K-U6.
+- 시험: `.venv\Scripts\python -m pytest -q` → 759 passed.
+- 남은 사용자 항목: 전략 전환 승인 A-ID 2개(BACKTEST_PASSED·PAPER), SNTP 연결 승인, U-06 약관. 그 뒤 PAPER-0 실행(사용자).

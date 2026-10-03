@@ -705,6 +705,9 @@ class Repository:
                 (self.mode.value, strategy_id, version, market, from_state, to_state, approval_id, evidence,
                  stop_reason, to_iso(at)))
 
+    def strategy_states(self) -> list[dict]:
+        return [dict(r) for r in self._x("SELECT * FROM strategy_state ORDER BY strategy_id, version, market")]
+
     def strategy_transitions(self, strategy_id: str, version: int) -> list[dict]:
         return [dict(r) for r in self._x("SELECT * FROM strategy_transition WHERE strategy_id=? AND version=? "
                                          "ORDER BY seq", (strategy_id, version))]

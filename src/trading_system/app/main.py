@@ -78,7 +78,7 @@ def _strategies(app: AppSettings) -> list[StrategyInput]:
     out = []
     for dep in app.strategies:
         strat, params = load_strategy(dep)
-        out.append(StrategyInput(strat, params, dep.eval_times))
+        out.append(StrategyInput(strat, params, dep.eval_times, dep.verification_approval))
     return out
 
 

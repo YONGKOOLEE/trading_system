@@ -9,6 +9,7 @@
   connection_approved           키움 모의 접속 사용자 승인 여부. 기본 없음 = false. **사용자만 true로 바꾼다** (T-015, D-083)
 [[instruments]]  code, kind(STOCK|ETF|ETN), leverage(문자열, 부호), lot_size(문자열)
 [[strategies]]   module("패키지.모듈:클래스"), params(파라미터 파일 경로, 저장소 기준), eval_times(["HH:MM"] KST)
+                 verification_approval (선택, PAPER만): PAPER-0 검증 전략 승인 A-ID (DP-24 a, A-037)
 
 기본값을 두지 않는다(PAPER 접속 승인 제외). 누락·형식 오류·알 수 없는 키면 시작을 거부한다.
 """
@@ -36,6 +37,7 @@ class StrategyDeploy:
     module: str
     params: Path
     eval_times: tuple[time, ...]
+    verification_approval: str | None = None   # PAPER-0 검증 전략 승인 A-ID (등록 검증 예외, DP-24 a)
 
 
 @dataclass(frozen=True)
@@ -135,8 +137,15 @@ def parse_app_settings(raw: dict, mode: Mode, repo_root: Path) -> AppSettings:
 
     strategies: list[StrategyDeploy] = []
     for i, st in enumerate(raw.get("strategies") or []):
-        if not isinstance(st, dict) or set(st) != {"module", "params", "eval_times"}:
-            problems.append(f"strategies[{i}]: module·params·eval_times 세 키가 필요")
+        optional = {"verification_approval"} if mode is Mode.PAPER else set()
+        if not isinstance(st, dict) or not {"module", "params", "eval_times"} <= set(st) or \
+                set(st) - {"module", "params", "eval_times"} - optional:
+            problems.append(f"strategies[{i}]: module·params·eval_times 세 키가 필요"
+                            f"{' (PAPER는 verification_approval 선택)' if optional else ''}")
+            continue
+        va = st.get("verification_approval")
+        if va is not None and (not isinstance(va, str) or not re.fullmatch(r"A-\d{3,}", va)):
+            problems.append(f"strategies[{i}].verification_approval: 승인 A-ID(A-숫자)")
             continue
         if not isinstance(st["module"], str) or not _MODULE.fullmatch(st["module"]):
             problems.append(f"strategies[{i}].module: '패키지.모듈:클래스'")
@@ -151,7 +160,7 @@ def parse_app_settings(raw: dict, mode: Mode, repo_root: Path) -> AppSettings:
             problems.append(f"strategies[{i}].eval_times: ['HH:MM', ...] (KST)")
             continue
         strategies.append(StrategyDeploy(st["module"], p,
-                                         tuple(sorted(time(int(t[:2]), int(t[3:])) for t in set(times)))))
+                                         tuple(sorted(time(int(t[:2]), int(t[3:])) for t in set(times))), va))
     if problems:
         raise ConfigError(problems)
     return AppSettings(account, loop, rec, tuple(servers), infos, tuple(strategies), approved)  # type: ignore[arg-type]

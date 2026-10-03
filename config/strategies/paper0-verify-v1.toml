@@ -1,0 +1,7 @@
+# paper0-verify v1 파라미터 (R-19). PAPER-0 인프라 검증용 — 값을 바꾸면 전략 버전을 올린다(D-011).
+strategy = "paper0-verify"
+version = 1
+
+[params]
+qty = 1         # 1주 (04 §4.1)
+hold_days = 0   # 같은 날 다음 판정(14:30)에서 청산

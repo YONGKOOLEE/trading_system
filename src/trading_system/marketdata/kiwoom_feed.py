@@ -46,16 +46,24 @@ class Querier(Protocol):  # KiwoomAdapter.query_raw 모양
                   enough: Callable[[list[dict]], bool] | None = None) -> tuple[dict, list[dict]]: ...
 
 
+AUDIT_NORMAL = "정상"   # ka10099 auditInfo 실측 값(2026-10-03, K-U6): 정상·거래정지·관리종목·투자경고·투자주의·단기과열·투자주의환기종목
+
+
 def master_statuses(row: dict) -> frozenset[TradingStatus]:
+    """종목 정보 행 → 거래 상태. state·auditInfo 둘 중 하나라도 표시하면 그 상태로 본다(K-U6 실측: 거래정지 표시가
+    state에 26종목, auditInfo에 112종목 — 한쪽만 보면 놓친다). auditInfo의 모르는 값은 주의(CAUTION)로 본다."""
     out: set[TradingStatus] = set()
     warn = str(row.get("orderWarning") or "0").strip()
     state = str(row.get("state") or "")
+    audit = None if row.get("auditInfo") is None else str(row.get("auditInfo")).strip()
     if warn == "2" or "정리매매" in state:
         out.add(TradingStatus.DELISTING)
     if warn in ("3", "4", "5") or "관리" in state:
         out.add(TradingStatus.CAUTION)
-    if "정지" in state:
+    if "정지" in state or (audit is not None and "정지" in audit):
         out.add(TradingStatus.HALTED)
+    elif audit not in (None, AUDIT_NORMAL):
+        out.add(TradingStatus.CAUTION)   # 관리종목·투자경고·투자주의·단기과열·투자주의환기종목·처음 보는 값
     return frozenset(out)
 
 
