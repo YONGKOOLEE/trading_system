@@ -1,13 +1,14 @@
 # 세션 인계 (짧게 유지 — 60줄 이내, 작업이 끝날 때마다 덮어쓴다)
 
-- 갱신: 2026-10-03 / DP-1~26 확정(A-031, DP-5는 변경: 일봉 확정 20:00) / 다음: **사용자 T-015 준비 → T-015 승인 여부**
+- 갱신: 2026-10-03 / DP-1~26 확정(A-031), CP-019 반영(A-033: 03 v0.6·04 v0.6·05 v0.5), PAPER 한도·시장 설정(A-034), `.env.paper` 키 4개 확인 / 다음: **K-U1 확인 → T-015 승인 여부**
 
 ## 현재 상태
 - 6단계 구현. 완료: T-000~T-014, T-020, T-021 (T-014·T-021은 네트워크 없이 합성 응답, T-020은 fake 브로커 종단).
 - 테스트 `.venv\Scripts\python -m pytest -q` → 700 passed (약 2분).
 - 브랜치(로컬만, push·main 병합 없음): … → feat/T-013-telegram → fix/review-bundle-b → feat/T-014-kiwoom-adapter
   → feat/T-021-kiwoom-feed → feat/T-020-app → **fix/dp-5-daily-bar-cutoff (최신)**. 다음 작업은 최신 브랜치에서 분기.
-- 승인본: 업무정의서 v0.6, 00 v0.4, 01 v0.5, 02 v0.7, 03 v0.5, 04 v0.5, 05 v0.4 (A-029). 무인 진행 권한 A-030.
+- 승인본: 업무정의서 v0.6, 00 v0.4, 01 v0.5, 02 v0.7 (A-029), 03 v0.6, 04 v0.6, 05 v0.5 (A-033). 무인 진행 권한 A-030.
+- PAPER 준비: `.env.paper` 있음(키 4개 형식 정상, 값 미열람), `config/limits.paper.toml`·`market.paper.toml` 있음(A-034, 비용은 DP-27 임시값). 없음: `.env`(TRADE_MODE), `app.paper.toml`, 달력, 호가 표.
 - 실전 주문 코드·LIVE: 승인 없음. PAPER 접속: 사용자가 `config/app.paper.toml [paper] connection_approved = true`로 직접 켜야 함.
 
 ## 세션 시작 시 읽을 것 (이것만)
@@ -30,7 +31,7 @@
 - K-U19 ka10081 일봉 KRX/통합 범위 — PAPER-0에서 KRX 종가와 비교.
 
 ## 사용자에게 남은 결정·확인
-- DP-2·DP-25 승인 문서 정정 방식(CP 여부)
+- DP-27 수수료·매도 세율 실제 값, 텔레그램 연결 보완(사용자 "나중에")
 - T-015 키움 모의 접속 승인(외부 연결, D-083), `.env.paper` 작성(에이전트는 읽지 않음), K-U1 IP·단말기 요건
 - 실제 설정값: limits·market·app·calendar(휴장일 X-U3)·ticks(X-U1) — 저장소에 기본값 없음
 

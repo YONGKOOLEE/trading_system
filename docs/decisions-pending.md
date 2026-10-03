@@ -31,4 +31,5 @@
 | DP-23 | 2026-10-03 | T-020 | 진입점 `python -m trading_system.app run|backtest`. 05-plan은 `python -m trading_system`이나 03 §7 의존 규칙 표에 최상위 `__main__`이 없어(규칙 변경은 CP) app 안에 둠 | 승인된 의존 규칙을 바꾸지 않음 | `app/__main__.py` | 비차단 | 확정 (A-031) |
 | DP-24 | 2026-10-03 | T-020 | capabilities.md M1의 CAP-TRG-01·DAT-01·ORD-01·ORD-02·INS-01을 "검증 중"으로 갱신(구현·오프라인 시험 근거). "지원"은 PAPER 검증 후. CAP-ORD-03은 정정 미구현이라 미지원 유지 | "검증 중"은 BACKTEST 등록만 허용(DP-1) — PAPER 주문은 여전히 막힘 | `docs/capabilities.md` | 비차단 | 확정 (A-031) |
 | DP-25 | 2026-10-03 | T-020 | 단계형 결과 불명 해소의 회차·다음 조회 시각은 메모리에만 둠. 재시작하면 1회차부터 다시(조회 더 많이, 더 오래 기다리는 쪽). 재시작 시 K8·복구 판정에서 결과 불명이면 K3 | 03 D-092 "저장"과 다름 — 저장하려면 스키마 추가 필요 | `execution/resolver.ResolveProgress` | 비차단 | 확정 (A-031) |
+| DP-27 | 2026-10-03 | 설정(A-034) | PAPER 비용 요율 임시값: 수수료 0.05%, 매도 세금 0.25% (`config/market.paper.toml`) | 실제 요율보다 높게 잡아 비용·손실 추정(L1·L4)을 크게 함. 세율 적용 판단은 사용자 | `config/market.paper.toml [costs]` | 비차단 (T-016 전 사용자 확인 권장, K-U9) | 대기 |
 | DP-26 | 2026-10-03 | T-020 | `run`의 BACKTEST 모드 = fake 브로커 연습 실행(시세 없음 → 위험 확대 거부, 운영 명령·정지 훈련용). 전략 성과 검증은 `backtest` 명령(일봉 CSV) | BACKTEST에서 외부 연결 없음 | `app/main.run_main` | 비차단 | 확정 (A-031) |

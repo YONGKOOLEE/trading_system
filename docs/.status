@@ -7,9 +7,9 @@ gates:
   strategy: approved         # 00-strategy.md v0.4, A-029
   requirements: approved     # 01-requirements.md v0.5, A-029
   data-model: approved       # 02-data-model.md v0.7, A-029
-  design: approved           # 03-design.md v0.5, A-029
-  validation: approved       # 04-validation.md v0.5, A-029
-  plan: approved             # 05-plan.md v0.4, A-029
+  design: approved           # 03-design.md v0.6, A-033 (CP-019)
+  validation: approved       # 04-validation.md v0.6, A-033 (CP-019)
+  plan: approved             # 05-plan.md v0.5, A-033 (CP-019)
 implementation_start: authorized   # A-022 (2026-10-01)
 live_order_code: not-authorized
 live_run: not-authorized    # 시장별: M1/M2/M3 모두 없음
