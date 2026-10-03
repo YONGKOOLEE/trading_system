@@ -183,3 +183,11 @@
 - 시험: `.venv\Scripts\python -m pytest -q` → 721 passed.
 - 문서: kiwoom-kr §7b 실측·K-U1·K-U8 해소, CP-020 draft(01·03의 kt00005 문구), DP-28(qry_tp 3).
 - 미결: CP-020 승인, PV-11 만료 전 갱신 관찰(장시간 실행 필요, PAPER-0), 달력 2024~2026(X-U3).
+
+## 2026-10-03 (15) — CP-020 반영, T-016 준비(A-037: 종목·DP-24 a·달력)
+- CP-020 승인(A-036) → 01 v0.6, 03 v0.7. A-037: PAPER-0 종목 005930, DP-24 해법 (a), 달력 자동 추출(LIVE 전 재확인 조건).
+- DP-24 (a): `strategy_registry` verification_approval — PAPER-0 검증 전략만 "검증 중" 허용, 범위 강제(M1·S-4·U-A·시장가 능력·L7 필수). 시험 16건.
+- 달력: `marketdata/calendar_derive.py`, `app/calendar_tool.py`, `scripts/derive-calendar.py`(키움 일봉 2종목 교차, 조회만). preflight 연결 검사를 `connect_paper`로 분리. 시험 5건.
+  실행 결과: 2024 18일, 2025 19일, 2026 13일(~10-02), 한 종목만 빠진 날 0일. 2026 남은 휴장(10-05·10-09·12-25·12-31)은 토스증권 공지(웹 검색), 개장 시간 변경 2025-11-13·2026-01-02(보도), 2026-11-19(예상값).
+  `config/calendar/krx-2024~2026.toml` 작성 → 시작 점검 재실행 통과, 달력·일봉 품질 경고 사라짐.
+- 시험 변경(요구 변경 A-037): test_t010 `test_calendar_dir_ignores_examples`를 임시 디렉터리로. `.venv\Scripts\python -m pytest -q` → 743 passed.

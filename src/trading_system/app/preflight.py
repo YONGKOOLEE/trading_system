@@ -24,13 +24,14 @@ from trading_system.broker.kiwoom.adapter import (
 from trading_system.broker.kiwoom.errors import ErrorClass, classify, normalize_code, specific_code
 from trading_system.broker.kiwoom.http import AfterSendError, HttpReply, KiwoomHttp, PreSendError
 from trading_system.broker.kiwoom.token import TokenError
-from trading_system.config.app_file import load_app_settings
+from trading_system.config.app_file import AppSettings, load_app_settings
 from trading_system.config.errors import ConfigError
 from trading_system.config.modes import read_trade_mode
 from trading_system.domain.clock import KST, Clock, SystemClock
 from trading_system.domain.enums import Mode
 from trading_system.domain.market import InstrumentInfo, InstrumentKind
 from trading_system.marketdata.calendar import KrxCalendar
+from trading_system.marketdata.errors import MarketDataError
 from trading_system.marketdata.kiwoom_feed import KiwoomMarketFeed
 from trading_system.marketdata.store import MarketDataStore
 from trading_system.reconciliation.reconciler import Reconciler
@@ -246,16 +247,26 @@ def _refuse(msg: str) -> int:
     return 2
 
 
-def preflight_main(root: Path, environ: Mapping[str, str] | None = None, *, rest_url: str = MOCK_REST,
-                   ws_url: str = MOCK_WS, clock: Clock | None = None, probe_code: str | None = None,
-                   per_tr_interval: float = 1.1) -> int:
+@dataclass
+class PaperConnection:
+    """연결 전 검사를 통과한 키움 모의 조회 연결 (주문 API는 GuardedHttp가 막는다)."""
+    adapter: KiwoomAdapter
+    guard: GuardedHttp
+    app: AppSettings
+    storage_path: Path
+
+
+def connect_paper(root: Path, environ: Mapping[str, str] | None, clock: Clock, *, rest_url: str = MOCK_REST,
+                  ws_url: str = MOCK_WS, per_tr_interval: float = 1.1) -> PaperConnection | str:
+    """PAPER 모드·자격정보·설정·사용자 접속 스위치를 확인한다. 하나라도 어긋나면 거부 사유(문자열)를 돌려주고
+    네트워크 객체를 만들지 않는다."""
     env = os.environ if environ is None else environ
     try:
         mode = read_trade_mode(env, root / ".env")
     except ConfigError as exc:
-        return _refuse(str(exc))
+        return str(exc)
     if mode is not Mode.PAPER:
-        return _refuse(f"TRADE_MODE={mode.value} — 시작 점검은 PAPER에서만 한다 (LIVE·BACKTEST는 연결하지 않는다)")
+        return f"TRADE_MODE={mode.value} — 키움 모의 조회는 PAPER에서만 한다 (LIVE·BACKTEST는 연결하지 않는다)"
     base = root / "var" / "paper"
     try:
         startup = check_startup(Mode.PAPER, root, base / "trading.db", root / ".env.paper")
@@ -274,20 +285,34 @@ def preflight_main(root: Path, environ: Mapping[str, str] | None = None, *, rest
             raise ConfigError(".env.paper의 계좌 별칭이 배포 설정과 다르다")
         endpoint = check_endpoint(rest_url, MOCK_REST)
     except ConfigError as exc:
-        return _refuse(str(exc))
+        return str(exc)
     except ValueError as exc:
-        return _refuse(str(exc))
-
-    clock = clock or SystemClock()
-    calendar = KrxCalendar.load_dir(root / "config" / "calendar")
-    code = probe_code or next(iter(app.instruments), PROBE_DEFAULT)
+        return str(exc)
     base.mkdir(parents=True, exist_ok=True)
     guard = GuardedHttp(KiwoomHttp(endpoint))
     cfg = KiwoomConfig(app.account, s.get("KIWOOM_PAPER_ACCOUNT_NO").reveal, s.get("KIWOOM_PAPER_APP_KEY").reveal,
                        s.get("KIWOOM_PAPER_SECRET_KEY").reveal, rest_url=rest_url, ws_url=ws_url,
                        per_tr_interval=per_tr_interval)
-    adapter = KiwoomAdapter(cfg, clock, http=guard)  # type: ignore[arg-type]
-    repo = Repository(startup.storage_path, Mode.PAPER)
+    return PaperConnection(KiwoomAdapter(cfg, clock, http=guard), guard, app,  # type: ignore[arg-type]
+                           startup.storage_path)
+
+
+def preflight_main(root: Path, environ: Mapping[str, str] | None = None, *, rest_url: str = MOCK_REST,
+                   ws_url: str = MOCK_WS, clock: Clock | None = None, probe_code: str | None = None,
+                   per_tr_interval: float = 1.1) -> int:
+    clock = clock or SystemClock()
+    conn = connect_paper(root, environ, clock, rest_url=rest_url, ws_url=ws_url, per_tr_interval=per_tr_interval)
+    if isinstance(conn, str):
+        return _refuse(conn)
+    adapter, guard, app = conn.adapter, conn.guard, conn.app
+    base = root / "var" / "paper"
+    try:
+        calendar = KrxCalendar.load_dir(root / "config" / "calendar")
+    except MarketDataError as exc:
+        adapter.close()
+        return _refuse(f"달력 파일 오류: {exc}")
+    code = probe_code or next(iter(app.instruments), PROBE_DEFAULT)
+    repo = Repository(conn.storage_path, Mode.PAPER)
     try:
         rep = run_preflight(adapter, guard, MarketDataStore(calendar, None), repo, clock, app.account, code,
                             app.instruments)

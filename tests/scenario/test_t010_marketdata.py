@@ -99,9 +99,18 @@ def test_calendar_rejects_bad_files(bad: dict) -> None:
         parse_calendar(bad, 2026)
 
 
-def test_calendar_dir_ignores_examples() -> None:
+def test_calendar_dir_ignores_examples(tmp_path: Path) -> None:
+    # 요구 변경(A-037): 저장소에 실제 달력(2024~2026)이 생겨, 예제 파일만 있는 디렉터리로 확인한다
+    (tmp_path / "krx-YYYY.example.toml").write_text(
+        (ROOT / "config" / "calendar" / "krx-YYYY.example.toml").read_text(encoding="utf-8"), encoding="utf-8")
+    cal = KrxCalendar.load_dir(tmp_path)
+    assert cal.session(date(2026, 10, 1)) is None
+
+
+def test_repository_calendars_load() -> None:
     cal = KrxCalendar.load_dir(ROOT / "config" / "calendar")
-    assert cal.session(date(2026, 10, 1)) is None  # 저장소에는 실제 달력이 없다 (X-U3: 사용자가 작성)
+    for y in (2024, 2025, 2026):
+        assert cal.session(date(y, 1, 1)) is not None and not cal.session(date(y, 1, 1)).is_open  # type: ignore[union-attr]
 
 
 def test_v75_live_market_status_conflict_blocks_day(env: Env) -> None:
