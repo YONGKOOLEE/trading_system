@@ -89,6 +89,9 @@ def same_day_buy_cash(repo: Repository, account: str, now: datetime, rates: Cost
     return total
 
 
+DAILY_BASE = "DAILY_BASE"   # 거래일별 일일 기준 감사 기록 (재검토2 #2)
+
+
 def same_day_cash_flow(repo: Repository, account: str, now: datetime, rates: CostRates,
                        since: datetime | None = None) -> Decimal:
     """오늘(거래일) 내부 기록 체결의 현금흐름: 매도 대금 − 비용·세금 − (매수 대금 + 비용). since 이후 체결만 (재검토 F3).
@@ -133,7 +136,19 @@ class DailyRiskTracker:
         self._base_at: dict[str, datetime] = {}
 
     def start_day(self, account: str, cash: Decimal) -> Decimal | None:
-        """일일 기준 시각에 호출. 기준 금액을 고정한다. 평가 불능이면 None(그날 위험 확대 거부)."""
+        """일일 기준 시각에 호출. 기준 금액을 고정한다. 평가 불능이면 None(그날 위험 확대 거부).
+
+        실운영(clock·cost_rates 있음)에서는 거래일별 기준(현금·평가액·시각)을 감사 기록 DAILY_BASE로 남기고, 같은
+        거래일에 다시 부르면(재시작) 저장된 기준을 쓴다 — 재시작으로 그날 손실이 L4에서 사라지지 않게 (재검토2 #2).
+        """
+        saved = self._saved_base(account)
+        if saved is not None:
+            base_cash, base_value, base_at = saved
+            self._base[account] = base_cash + base_value
+            self._base_cash[account] = base_cash
+            self._base_at[account] = base_at
+            self._cash.setdefault(account, cash)
+            return self._base[account]
         value = self._positions_value(account)
         if value is None:
             self._base.pop(account, None)
@@ -143,7 +158,27 @@ class DailyRiskTracker:
         self._base_cash[account] = cash
         if self._clock is not None:
             self._base_at[account] = self._clock.now()
+            if self._rates is not None:
+                now = self._clock.now()
+                with self._repo.tx():
+                    self._repo.audit(now, DAILY_BASE, "monitor", account, {
+                        "trade_date": self._repo.trade_date_of(now), "cash": str(cash), "value": str(value),
+                        "at": now.isoformat()})
         return self._base[account]
+
+    def _saved_base(self, account: str) -> tuple[Decimal, Decimal, datetime] | None:
+        if self._clock is None or self._rates is None:
+            return None
+        today = self._repo.trade_date_of(self._clock.now())
+        found = None
+        for e in self._repo.select("SELECT summary FROM audit_event WHERE kind=? AND ref=? ORDER BY seq",
+                                   (DAILY_BASE, account)):
+            rec = json.loads(e["summary"])
+            if rec.get("trade_date") == today:
+                found = rec
+        if found is None:
+            return None
+        return Decimal(found["cash"]), Decimal(found["value"]), datetime.fromisoformat(found["at"])
 
     def update_cash(self, account: str, cash: Decimal) -> None:
         self._cash[account] = cash
@@ -159,8 +194,10 @@ class DailyRiskTracker:
         if self._clock is None or self._rates is None:
             return cash
         base_cash = self._base_cash.get(account, cash)
-        return base_cash + same_day_cash_flow(self._repo, account, self._clock.now(), self._rates,
-                                              since=self._base_at.get(account))
+        base_at = self._base_at.get(account)
+        # 거래일은 기준 시각의 거래일로 고정한다 — 자정이 지나 다음 기준 시각 전까지 당일 체결이 빠지면 거짓 손익 (재검토2 #1)
+        day_of = base_at if base_at is not None else self._clock.now()
+        return base_cash + same_day_cash_flow(self._repo, account, day_of, self._rates, since=base_at)
 
     def _positions_value(self, account: str) -> Decimal | None:
         total = Decimal("0")

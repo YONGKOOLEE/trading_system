@@ -109,3 +109,89 @@ def test_f5_daily_base_retried_after_initial_failure(tmp_path) -> None:  # type:
         assert w.engine.account_state.daily_risk(APP_ACCOUNT) is not None
     finally:
         w.close()
+
+
+# --- 재검토2 #1: 자정이 지나도 일일 손익 현금흐름은 기준 구간의 거래일로 계산 (거짓 K2 방지) ---------------
+
+def test_f3b_pnl_stable_across_midnight(env: Env) -> None:
+    from datetime import timedelta
+    from decimal import Decimal
+
+    from tests.scenario.conftest import ACCOUNT
+    from tests.scenario.test_rv_halts import _buy_fill, _rv23
+    tracker, _ = _rv23(env)
+    tracker.start_day(ACCOUNT, Decimal("10000000"))
+    _buy_fill(env)
+    _sell_fill(env)
+    tracker.update_cash(ACCOUNT, Decimal("10000000"))
+    before = tracker.daily_risk(ACCOUNT).unrealized_change
+    env.clock.advance(timedelta(hours=16))                     # 09:05 → 다음날 01:05 KST: 자정 넘김, 다음 기준 시각 전
+    assert tracker.daily_risk(ACCOUNT).unrealized_change == before == Decimal("-2300")
+
+
+# --- 재검토2 #2: 같은 거래일 재시작은 저장된 일일 기준을 다시 쓴다 (재시작으로 L4 초기화 방지) -------------
+
+def test_f3c_restart_same_day_keeps_daily_base(env: Env) -> None:
+    from decimal import Decimal
+
+    from tests.scenario.conftest import ACCOUNT
+    from tests.scenario.test_rv_halts import _buy_fill, _rv23
+    tracker, _ = _rv23(env)
+    tracker.start_day(ACCOUNT, Decimal("10000000"))
+    _buy_fill(env)
+    _sell_fill(env)
+    from datetime import timedelta
+    env.clock.advance(timedelta(minutes=30))                   # 체결 30분 뒤 재시작
+    restarted, _ = _rv23(env)                                  # 재시작 = 새 추적기(메모리 비어 있음)
+    restarted.start_day(ACCOUNT, Decimal("9997700"))           # 재시작 시점 예수금(당일 반영됐다고 가정)
+    restarted.update_cash(ACCOUNT, Decimal("9997700"))
+    assert restarted.daily_risk(ACCOUNT).unrealized_change == Decimal("-2300")   # 재시작 전 손실 유지
+
+
+def test_f5b_daily_base_keeps_retrying_slowly_after_window(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from datetime import timedelta
+
+    from tests.scenario.test_t020_app import ACCOUNT as APP_ACCOUNT, World
+    from trading_system.app.engine import BASE_RETRY_WINDOW, BASE_SLOW_RETRY
+    w = World(tmp_path)
+    try:
+        tracker = w.engine.account_state.tracker
+        real = tracker.start_day
+        state = {"ok": False, "n": 0}
+
+        def flaky(account, cash):  # type: ignore[no-untyped-def]
+            state["n"] += 1
+            return real(account, cash) if state["ok"] else None
+        tracker.start_day = flaky
+        w.engine.start()
+        w.engine.tick()
+        w.clock.advance(BASE_RETRY_WINDOW + timedelta(seconds=1))
+        w.engine.tick()                                        # 빠른 재시도 기간 끝
+        n = state["n"]
+        w.engine.tick()
+        assert state["n"] == n                                 # 느린 간격 전엔 시도 안 함
+        state["ok"] = True
+        w.clock.advance(BASE_SLOW_RETRY)
+        w.engine.tick()
+        assert w.engine.account_state.daily_risk(APP_ACCOUNT) is not None   # 계속 시도해 회복
+    finally:
+        w.close()
+
+
+# --- 재검토2 #4: RESUME(K1) 뒤에 들어온 KILL이 RESUME에 해제되지 않는다 (KILL 먼저 처리 정렬의 역전) ---------
+
+def test_f1b_resume_then_kill_keeps_k1(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from tests.scenario.test_t020_app import ACCOUNT as APP_ACCOUNT, World
+    w = World(tmp_path)
+    try:
+        w.engine.start()
+        w.resume_k8()
+        w.command("KILL", {"account": None, "reason": "첫 킬"})
+        w.engine.tick()
+        assert "K1" in w.repo.active_halts(APP_ACCOUNT)
+        w.command("RESUME", {"account": None, "halt_type": "K1"})
+        w.command("KILL", {"account": None, "reason": "다시 킬"})   # 사용자가 곧바로 다시 킬
+        w.engine.tick()
+        assert "K1" in w.repo.active_halts(APP_ACCOUNT)              # 마지막 의사(KILL)가 남아야 한다
+    finally:
+        w.close()

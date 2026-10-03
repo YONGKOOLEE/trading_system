@@ -24,7 +24,7 @@ import threading
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from time import monotonic
@@ -89,7 +89,8 @@ class AccountState:
         self.tracker.update_cash(account, view.deposit)
 
 
-BASE_RETRY_WINDOW = timedelta(minutes=10)   # 일일 기준 금액 실패 시 재시도 기간 (재검토 F5, 임시값)
+BASE_RETRY_WINDOW = timedelta(minutes=10)   # 일일 기준 금액 실패 시 tick마다 재시도하는 기간 (재검토 F5, 임시값)
+BASE_SLOW_RETRY = timedelta(minutes=5)      # 그 뒤 재시도 간격 (재검토2 #3, 임시값)
 
 
 @dataclass
@@ -121,7 +122,8 @@ class Engine:
     evaluated: set[str] = field(default_factory=set)
     _day_start: datetime | None = None
     _last_reconcile: datetime | None = None
-    _base_retry_until: datetime | None = None   # 일일 기준 금액 재시도 마감 (재검토 F5)
+    _base_retry_until: datetime | None = None   # 일일 기준 금액 빠른 재시도 마감 (재검토 F5)
+    _base_next_try: datetime = datetime.min.replace(tzinfo=UTC)   # 다음 재시도 시각 (느린 재시도, 재검토2 #3)
     _reconcile_requested: threading.Event = field(default_factory=threading.Event)
     errors: list[str] = field(default_factory=list)
     _calls: "queue.Queue[Callable[[], object]]" = field(default_factory=queue.Queue)
@@ -299,16 +301,22 @@ class Engine:
                 self.alerts.alert("WARNING", "일일 기준 금액을 정할 수 없음(예수금·보유 시세 없음) — 위험 확대 거부, "
                                              f"{int(BASE_RETRY_WINDOW.total_seconds() // 60)}분 동안 다시 시도", None)
                 self._base_retry_until = now + BASE_RETRY_WINDOW
+                self._base_next_try = now
+            else:
+                self._base_retry_until = None   # 새 기준 시각에 확정되면 전날 재시도 상태는 끝
             if not first:
                 self.reporter.generate(self.account, now, lim.daily_reference_time, lim.version_hash())
-        elif self._base_retry_until is not None:
-            # 기준 금액 실패 재시도 (재검토 F5): 시작 직후 첫 tick엔 아직 시세가 없을 수 있다
+        elif self._base_retry_until is not None and now >= self._base_next_try:
+            # 기준 금액 실패 재시도 (재검토 F5): 시작 직후 첫 tick엔 아직 시세가 없을 수 있다. 처음 10분은 tick마다,
+            # 그 뒤엔 5분마다 다음 기준 시각까지 계속(재검토2 #3 — 일시 장애로 하루 전체가 막히지 않게)
             if self._start_day_base():
                 self._base_retry_until = None
                 self.alerts.alert("INFO", "일일 기준 금액 확정(재시도)", None)
             elif now >= self._base_retry_until:
-                self._base_retry_until = None
-                self.alerts.alert("WARNING", "일일 기준 금액 재시도 시간 초과 — 오늘 위험 확대 거부 유지, 사용자 확인", None)
+                if self._base_next_try <= self._base_retry_until:
+                    self.alerts.alert("WARNING", "일일 기준 금액 아직 미확정 — 위험 확대 거부 유지, "
+                                                 f"{int(BASE_SLOW_RETRY.total_seconds() // 60)}분마다 재시도, 사용자 확인", None)
+                self._base_next_try = now + BASE_SLOW_RETRY
         self._report_if_due(now, lim)
         self.halts.check_daily_loss(self.account, self.account_state.daily_risk(self.account), lim.l4_daily_loss_ratio)
         if self.watcher is not None:

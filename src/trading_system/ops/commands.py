@@ -67,7 +67,32 @@ class OpsProcessor:
     def process_pending(self) -> list[CommandOutcome]:
         """대기 명령을 처리한다. 킬 스위치를 먼저 처리하고, 명령 하나의 실패가 나머지를 막지 않게 한다 (CP-018 R-4)."""
         cmds = sorted(self._repo.pending_commands(), key=lambda c: (c["command"] != "KILL", c["created_seq"]))
-        return [self._process(cmd) for cmd in cmds]
+        # KILL을 먼저 처리하므로, 같은 묶음에서 KILL보다 먼저 들어온 RESUME K1이 그 KILL을 풀어 버리는 역전을 막는다
+        # (재검토2 #4): 그런 RESUME은 거부 — 사용자의 마지막 의사(KILL)를 따른다
+        last_kill = max((c["created_seq"] for c in cmds if c["command"] == "KILL"), default=None)
+        return [self._superseded(cmd) if self._resume_k1_before(cmd, last_kill) else self._process(cmd)
+                for cmd in cmds]
+
+    @staticmethod
+    def _resume_k1_before(cmd: dict, last_kill: int | None) -> bool:
+        if last_kill is None or cmd["command"] != "RESUME" or cmd["created_seq"] > last_kill:
+            return False
+        try:
+            return json.loads(cmd["args"]).get("halt_type") == "K1"
+        except (ValueError, AttributeError):
+            return False
+
+    def _superseded(self, cmd: dict) -> CommandOutcome:
+        cid, actor = cmd["command_id"], cmd["actor"]
+        note = "뒤이은 KILL 명령이 있어 K1 재개 거부 (사용자의 마지막 의사 = KILL)"
+        if cmd["channel"] == Channel.REMOTE:
+            self._executor.alert("WARNING", f"원격 명령 RESUME REJECTED: {note}", cid)
+        with self._repo.tx():
+            now = self._clock.now()
+            self._repo.finish_command(cid, "REJECTED", note, now)
+            self._repo.audit(now, "OPS_COMMAND", actor, cid,
+                             {"channel": cmd["channel"], "command": "RESUME", "status": "REJECTED", "result": note})
+        return CommandOutcome(cid, "REJECTED", note)
 
     def _process(self, cmd: dict) -> CommandOutcome:
         cid, channel, actor, name = cmd["command_id"], cmd["channel"], cmd["actor"], cmd["command"]
