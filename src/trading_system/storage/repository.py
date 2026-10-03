@@ -112,6 +112,15 @@ CREATE TABLE IF NOT EXISTS notification (
 CREATE TABLE IF NOT EXISTS audit_event (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT NOT NULL, at TEXT NOT NULL, kind TEXT NOT NULL,
   actor TEXT NOT NULL, ref TEXT, summary TEXT NOT NULL);
+-- 조회 인덱스: 데이터 의미 불변이라 스키마 버전을 올리지 않는다 — 기존 저장소도 열 때 생성 (review C절, DP-38)
+CREATE INDEX IF NOT EXISTS ix_intent_state ON intent(state);
+CREATE INDEX IF NOT EXISTS ix_ops_command_status ON ops_command(status);
+CREATE INDEX IF NOT EXISTS ix_audit_kind_ref ON audit_event(kind, ref);
+CREATE INDEX IF NOT EXISTS ix_audit_kind_at ON audit_event(kind, at);
+CREATE INDEX IF NOT EXISTS ix_gate_decision_account_at ON gate_decision(account, created_at);
+CREATE INDEX IF NOT EXISTS ix_broker_order_account_date ON broker_order(account, trade_date);
+CREATE INDEX IF NOT EXISTS ix_fill_order_key ON fill(order_key);
+CREATE INDEX IF NOT EXISTS ix_recon_item_state ON recon_item(state);
 CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit_event
   BEGIN SELECT RAISE(ABORT, 'audit_event is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit_event
