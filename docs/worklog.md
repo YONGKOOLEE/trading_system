@@ -213,7 +213,7 @@
 - 검토: 읽기 전용 에이전트 5개 → RV-01~25(docs/changes/review-2026-10-03-pre-paper0.md). RV-24·25는 01 승인 문구와 구현 불일치라 CP-021 대신 구현 정정.
 - 수정: 에이전트 4개 병렬(파일 소유 분리) + 리드 통합. 재검토 2회·e2e(다일 11, 장애 11)에서 추가 결함 F1(차단)~F9, 재검토2 #1~#4, 장애 결함 2건 수정.
 - 커밋(feat/T-016-fix, 로컬): a7c3298, 304e538, 62d1ff7, 63c94d0, c019731, a9a970d, 472a42b, 847b669.
-- 시험: 시작 759 passed → 최종 `.venv\Scripts\python -m pytest -q` 890 passed(228s). 시뮬레이터 응답 유실 e2e 간헐 실패 관찰(대기 추가로 대응, 재발 관찰).
+- 시험: 시작 759 passed → 최종 `.venv\Scripts\python -m pytest -q` 890 passed 2회 연속(228s·229s). 시뮬레이터 응답 유실 e2e 간헐 실패(수정 전 전체 실행 2/4) → 재조회 대기 추가 후 2/2 통과, 재발 관찰.
 - 임시 결정 DP-31~37, 새 미확인 K-U20(계좌번호 형식)·K-U21(빈 결과 목록 키).
 - 설정·외부: SNTP 조회 외 브로커·네트워크 연결 없음. .claude/settings.local.json에 Bash 자동 허용(사용자 지시) + 차단 보강(git clean, pip install, .env).
 - 다음: 사용자 확인(DP-31~37, 모의 예수금 ≥ 상한가×200, U-06) → main 병합 여부 → PAPER-0 실행(사용자, pv-procedure v0.2).
