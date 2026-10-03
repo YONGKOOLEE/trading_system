@@ -1,8 +1,8 @@
 # 세션 인계 (짧게 유지 — 60줄 이내, 작업이 끝날 때마다 덮어쓴다)
 
 - 갱신: 2026-10-03 16:05 / PAPER-0 전 전체 검토·수정 완료 / 다음: **사용자 확인 → (선택) main 병합 → PAPER-0 실행(사용자)**
-- 브랜치(로컬만, push·병합 없음): … → feat/T-016-prep → **feat/T-016-fix (최신)**. 커밋 a7c3298…847b669 (8개)
-- 테스트 `.venv\Scripts\python -m pytest -q` → 890 passed (약 4분)
+- 브랜치(로컬만, push·병합 없음): … → feat/T-016-fix → **feat/T-017-prep (최신, A-044 결과)**
+- 테스트 `.venv\Scripts\python -m pytest -q` → 902 passed (약 4분)
 
 ## 현재 상태
 - 6단계 구현. 완료: T-000~T-015, T-020, T-021. T-016 준비 완료 + PAPER-0 전 검토 수정 완료(실행 대기).
@@ -30,6 +30,10 @@
 - 시작 점검 `scripts\preflight.py`(엔진 실행 중이면 거부), 전략 `scripts\strategy.py`, 운영 `scripts\{status,kill,resume,reconcile-resolve,backup,restore-test}.py --mode PAPER`
 - 실행 `$env:TRADE_MODE='PAPER'; $env:PYTHONPATH='src'; .venv\Scripts\python -m trading_system.app run` (사용자만, 창 하나)
 - 권한: `.claude/settings.local.json` — PowerShell·Bash·Edit·Write 자동, push·reset·rebase·merge·clean·pip install·.env 차단.
+
+## A-044 결과 (2026-10-03 17:15~)
+- 1 결정표 `docs/decision-sheet.md` · 2 PAPER 집계 `scripts\paper-review.py` · 3 전략 후보 `docs/strategies/candidates-2026-10-03.md`(S-Q1~4) · 4 LIVE 사전 조사 `docs/broker-specs/live-prep-2026-10-03.md`
+- 브랜치 feat/T-017-prep (feat/T-016-fix 위). 마지막 전체 시험 902 passed
 
 ## 남은 위험·후속
 - 시뮬레이터 응답 유실 e2e(`test_kiwoom_sim_lost_order_response_resolved_by_query_and_ws`) 간헐 실패 이력(재조회 대기 추가 후 재발 관찰).

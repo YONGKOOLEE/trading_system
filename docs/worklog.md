@@ -217,3 +217,11 @@
 - 임시 결정 DP-31~37, 새 미확인 K-U20(계좌번호 형식)·K-U21(빈 결과 목록 키).
 - 설정·외부: SNTP 조회 외 브로커·네트워크 연결 없음. .claude/settings.local.json에 Bash 자동 허용(사용자 지시) + 차단 보강(git clean, pip install, .env).
 - 다음: 사용자 확인(DP-31~37, 모의 예수금 ≥ 상한가×200, U-06) → main 병합 여부 → PAPER-0 실행(사용자, pv-procedure v0.2).
+
+## 2026-10-03 (19) — A-044 무인 작업 (17:15~, 에이전트 없음)
+- 1 결정표 `docs/decision-sheet.md`(차단 Q-1 예수금·Q-2 U-06·Q-3 병합, DP-28~37 권장안). 2 PAPER 집계 도구 `scripts\paper-review.py`(읽기 전용, reporting/paper_review·app/review_tool, 시험 5).
+- 3 전략 후보 3종(제안·미등록, strategy/candidates, 시험 7) 오프라인 백테스트(모의 일봉 CSV 005930, 2024-07~2026-10, 슬리피지 100원): 추세 +2.41%·돌파 +0.87%·평균회귀 -0.05%(자금 대비, 투입 ≈0.8%, L7 100만 원 상한가 기준). 005930 보유 +237% — 국면 의존. 문서 `docs/strategies/candidates-2026-10-03.md`(S-Q1~4). 첫 실행은 sizing 표기·L7 위반으로 거부 → 수정 후 r3 실행(이전 실행 폴더 var/backtest/cand-*-v1-all, -r2는 남김).
+- 4 LIVE 사전 조사 `docs/broker-specs/live-prep-2026-10-03.md`: 거래세 시행령 제36001호(공식), 토큰 24시간(공식), 실전 호출 제한·수수료·호가 단위는 2차 출처뿐 → 미해소 유지. 웹 검색·조회만.
+- 시험: 각 단계 전체 `pytest -q` → 895, 902 passed. 새 시험은 구현 뒤 작성(실패 선확인 없음).
+- 커밋(feat/T-017-prep): 1acb106, 6ec01a5, ae8b4c1, 08ff59b, a9fa385, 마지막 문서 커밋.
+- 다음: 결정표 답 → main 병합 여부 → PAPER-0(사용자). 지시대로 작업 후 PC 종료.
