@@ -89,7 +89,7 @@ def ws_state_handler(engine: Engine, account: str):  # type: ignore[no-untyped-d
             halts.report_condition(HaltType.K5, account, K5_LINK_REALTIME, False, f"실시간 끊김: {msg}")
         elif state in (WsState.ONLINE, WsState.RECONNECTED):
             halts.report_condition(HaltType.K5, account, K5_LINK_REALTIME, True, f"실시간 {state.value}")
-            engine.request_reconcile()
+            engine.call_soon(engine.request_reconcile)   # 경로 보고 뒤에 대조 요청 — 같은 큐 순서 보장 (재검토 F6)
 
     return on_state
 

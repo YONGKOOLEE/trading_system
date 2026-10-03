@@ -124,7 +124,7 @@ class Supervisor:
                 continue
             self._dead_reported.add(label)
             self.engine.alerts.alert("EMERGENCY", f"{label} 스레드 종료 — K5, 재시작 필요", None)
-            self.halts.activate(HaltType.K5, "monitor", f"{label} 스레드 종료", self.engine.account)
+            self.halts.activate(HaltType.K5, "thread", f"{label} 스레드 종료", self.engine.account)  # 대조로 안 풀림 (F2)
 
     def _guard(self, name: str, fn: Callable[[], object]) -> object:
         try:

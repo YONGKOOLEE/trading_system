@@ -37,7 +37,8 @@ from .store import MarketDataStore, daily_bar_available, latest_complete_day
 
 CHART_PATH, INFO_PATH = "/api/dostk/chart", "/api/dostk/stkinfo"
 DAILY_RETRY = timedelta(minutes=5)      # 일봉 갱신 재시도 간격 (RV-04)
-DAILY_MAX_ATTEMPTS = 5
+DAILY_MAX_ATTEMPTS = 5                    # 빠른 재시도 횟수. 넘으면 알림 1회 후 느린 간격으로 계속 (재검토 F4)
+DAILY_SLOW_RETRY = timedelta(minutes=30)
 MASTER_MARKETS = ("0", "10", "8", "60")   # 코스피, 코스닥, ETF, ETN (ka10099 mrkt_tp)
 VI_DEFAULT = timedelta(minutes=2)
 LOOKBACK_DAYS = 400
@@ -283,8 +284,9 @@ class MarketPoller:
 
     호출 제한기 우선순위는 시세(최하)라 결과 불명 해소·대조 조회에 밀린다 (D-048).
     일봉(RV-04): 확정 봉이 있어야 하는 마지막 거래일(latest_complete_day — 정규장 마감과 20:00 중 늦은 시각 뒤,
-    DP-5)이 바뀌면 다시 받는다. 받은 봉이 그날까지 없으면 실패로 보고 DAILY_RETRY 간격으로 최대
-    DAILY_MAX_ATTEMPTS회까지 재시도, 다 실패하면 알림 1회(판정은 data_ok 거짓으로 신호 없음).
+    DP-5)이 바뀌면 다시 받는다. 받은 봉이 그날까지 없으면 실패로 보고 DAILY_RETRY 간격으로
+    DAILY_MAX_ATTEMPTS회 재시도, 그래도 실패하면 알림 1회 후 DAILY_SLOW_RETRY 간격으로 계속 시도(재검토 F4 —
+    저녁 장애가 다음 날 판정까지 막지 않게). 못 받는 동안 판정은 data_ok 거짓으로 신호 없음.
     run은 한 번의 조회 오류로 스레드가 죽지 않게 예외를 삼키고 알림한다 (RV-18).
     """
 
@@ -312,7 +314,7 @@ class MarketPoller:
             tgt, n, next_at = self._daily_try.get(code, (target, 0, now))
             if tgt != target:
                 n, next_at = 0, now
-            if n >= DAILY_MAX_ATTEMPTS or now < next_at:
+            if now < next_at:
                 continue
             self.feed.refresh_daily(code)
             last = self.feed.store.last_daily_day(code)
@@ -321,7 +323,7 @@ class MarketPoller:
                 self._daily_try.pop(code, None)
                 continue
             n += 1
-            self._daily_try[code] = (target, n, now + DAILY_RETRY)
+            self._daily_try[code] = (target, n, now + (DAILY_RETRY if n < DAILY_MAX_ATTEMPTS else DAILY_SLOW_RETRY))
             if n == DAILY_MAX_ATTEMPTS:
                 self._alert("WARNING", f"일봉 갱신 실패 {code}: {target} 확정 봉을 {n}회 시도해도 못 받음 — "
                                        f"그 종목 판정 신호 없음(data_ok 거짓), 사용자 확인")

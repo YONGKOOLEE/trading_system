@@ -89,12 +89,34 @@ def same_day_buy_cash(repo: Repository, account: str, now: datetime, rates: Cost
     return total
 
 
+def same_day_cash_flow(repo: Repository, account: str, now: datetime, rates: CostRates,
+                       since: datetime | None = None) -> Decimal:
+    """오늘(거래일) 내부 기록 체결의 현금흐름: 매도 대금 − 비용·세금 − (매수 대금 + 비용). since 이후 체결만 (재검토 F3).
+
+    일일 손익을 브로커 예수금(entr)의 당일 반영 여부(T+2, 미실측)와 무관하게 계산하려고 쓴다. 매수·매도 대칭.
+    """
+    rows = repo.select(
+        "SELECT b.side, f.quantity, f.price, f.at FROM fill f JOIN broker_order b ON f.order_key=b.order_key "
+        "WHERE b.account=? AND b.trade_date=?", (account, repo.trade_date_of(now)))
+    total = Decimal("0")
+    for r in rows:
+        if since is not None and from_iso(r["at"]) < since:   # 기준 시각과 같은 체결은 포함
+            continue
+        amount = Decimal(r["quantity"]) * Decimal(r["price"])
+        if r["side"] == "SELL":
+            total += amount - estimate_cost(amount, True, rates)
+        else:
+            total -= amount + estimate_cost(amount, False, rates)
+    return total
+
+
 class DailyRiskTracker:
     """게이트 입력(AccountFacts.daily_risk)의 실운영 구현. 현금은 공급자(브로커 조회·내부 계산)가 준다.
 
     clock·cost_rates를 주면(실운영 조립) RV-23 보정을 한다: 현금 조회 시각을 기록하고, 일일 손익의 현금은
-    "조회 예수금 − 당일 매수 체결(비용 포함)"으로 본다. entr가 당일 매수를 이미 반영했다면 이중 차감이 되어 손실이
-    크게 보인다 — 손실을 숨기지 않는 쪽(보수)을 택했다. 당일 매도 대금은 더하지 않는다(반영돼 있으면 이익을 부풀림).
+    "기준 시각에 고정한 현금 + 그 뒤 내부 체결 현금흐름(매도 대금 − 비용·세금 − 매수 대금·비용)"으로 본다.
+    장중 예수금(entr)이 당일 체결을 반영하는지(T+2)와 무관하고 매수·매도가 대칭이다 (재검토 F3 — 이전 방식은
+    매수 이중 차감 또는 매도 대금 누락으로 어느 가정이든 K2 오발동). 외부·수동 거래는 대조(K4)가 잡는다.
     RV-23, PAPER-0에서 entr·d2_entra 의미 실측 후 재결정.
     """
 
@@ -107,6 +129,8 @@ class DailyRiskTracker:
         self._base: dict[str, Decimal] = {}
         self._cash: dict[str, Decimal] = {}
         self._cash_at: dict[str, datetime] = {}
+        self._base_cash: dict[str, Decimal] = {}
+        self._base_at: dict[str, datetime] = {}
 
     def start_day(self, account: str, cash: Decimal) -> Decimal | None:
         """일일 기준 시각에 호출. 기준 금액을 고정한다. 평가 불능이면 None(그날 위험 확대 거부)."""
@@ -116,6 +140,9 @@ class DailyRiskTracker:
             return None
         self._base[account] = cash + value
         self._cash[account] = cash
+        self._base_cash[account] = cash
+        if self._clock is not None:
+            self._base_at[account] = self._clock.now()
         return self._base[account]
 
     def update_cash(self, account: str, cash: Decimal) -> None:
@@ -131,7 +158,9 @@ class DailyRiskTracker:
         cash = self._cash[account]
         if self._clock is None or self._rates is None:
             return cash
-        return cash - same_day_buy_cash(self._repo, account, self._clock.now(), self._rates)
+        base_cash = self._base_cash.get(account, cash)
+        return base_cash + same_day_cash_flow(self._repo, account, self._clock.now(), self._rates,
+                                              since=self._base_at.get(account))
 
     def _positions_value(self, account: str) -> Decimal | None:
         total = Decimal("0")

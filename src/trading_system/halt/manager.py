@@ -47,9 +47,11 @@ REQUIRED_CONDITIONS: dict[HaltType, tuple[str, ...]] = {
 # - reconciled는 마지막 경로 복구 보고 이후의 대조여야 한다(재접속 전 대조는 끊긴 동안의 통보 누락을 못 본다).
 # - 조회 경로(rest): 대조기가 브로커 조회 3종 성공 시 보고한다(조회 성공 = 연결 증거).
 # - 실시간 경로(realtime): 실시간 수신 쪽이 재접속(ONLINE·RECONNECTED) 시 보고한다(app/main.py).
+CANCEL_PENDING = "cancel_pending"   # record_only로 기록된 정지의 매수 미체결 취소 대기 (재검토 F1)
 K5_LINK_REST = "link:rest"
 K5_LINK_REALTIME = "link:realtime"
-_K5_LINK_OF_ACTOR = {"realtime": K5_LINK_REALTIME}   # 발동 주체 → 끊긴 경로 (그 밖은 조회 경로)
+K5_LINK_THREAD = "link:thread"   # 입출력 스레드 종료 — 프로세스 재시작(engine.start)만 정상 보고 (재검토 F2)
+_K5_LINK_OF_ACTOR = {"realtime": K5_LINK_REALTIME, "thread": K5_LINK_THREAD}   # 발동 주체 → 끊긴 경로 (그 밖은 조회 경로)
 
 
 class Channel:
@@ -80,12 +82,13 @@ class HaltManager:
     def activate(self, halt_type: HaltType, actor: str, reason: str, account: str | None = None, *,
                  instrument: str | None = None, owner: str | None = None, variant: str | None = None) -> str:
         """정지를 발동한다. 같은 유형·범위의 해제되지 않은 정지가 있으면 그 ID를 돌려준다."""
-        created = False
+        created = pending_cancel = False
         with self._repo.tx():
             now = self._clock.now()
             existing = self._find(halt_type, account, instrument, owner)
             if existing is not None:
                 halt_id = existing["halt_id"]
+                pending_cancel = _take_cancel_pending(self._repo, existing)
                 if existing["state"] == HaltState.AWAITING_RESUME.value:  # 다시 발동되면 조건을 처음부터
                     self._repo.update_halt(halt_id, state=HaltState.ACTIVE.value, conditions={})
                 if variant is not None and existing.get("variant") != variant:
@@ -112,8 +115,28 @@ class HaltManager:
         # 매수 미체결 취소는 정지 행이 새로 생길 때 한 번만 (RV-07). 정지 유지 중 재발동(매 tick L4 점검 등)이
         # 취소를 새 멱등키로 다시 보내면 주문 변경 자동 재시도가 된다 (CLAUDE.md §8-7). 다른 정지에 막힌 취소의
         # 재시도는 재개 경로(_retry_halt_cancels)로만 한다 (CP-018 R-10)
-        if created and halt_type in CANCELS_OPEN_BUYS:
+        # 감시 스레드가 행만 먼저 기록한 정지(record_only)는 취소 대기 표시를 남긴다 → 여기서 한 번 취소 (재검토 F1)
+        if (created or pending_cancel) and halt_type in CANCELS_OPEN_BUYS:
             self._cancel_open_buys(halt_id, account, owner if halt_type is HaltType.K9 else None)
+        return halt_id
+
+    def record_only(self, halt_type: HaltType, actor: str, reason: str, account: str | None = None) -> str | None:
+        """감시 스레드용 발동 (RV-22, 03 D-038): 정지 행·감사만 기록하고 주문은 내지 않는다.
+
+        매수 미체결 취소가 필요한 유형은 조건에 취소 대기 표시를 남기고, 판정·실행 스레드의 activate가 그 표시를
+        보고 한 번 취소한다(재검토 F1 — 표시 없이 행만 있으면 activate가 기존 행으로 보고 취소를 건너뛴다).
+        같은 범위의 미해제 정지가 이미 있으면 아무것도 하지 않고 None.
+        """
+        with self._repo.tx():
+            if self._find(halt_type, account, None, None) is not None:
+                return None
+            now = self._clock.now()
+            halt_id = self._repo.insert_halt(halt_type.value, account, actor, reason, now)
+            if halt_type in CANCELS_OPEN_BUYS:
+                self._repo.update_halt(halt_id, conditions={CANCEL_PENDING: {"ok": False, "at": now.isoformat()}})
+            self._repo.audit(now, "HALT_ACTIVATED", actor, halt_id, {
+                "type": halt_type.value, "account": account, "instrument": None, "owner": None,
+                "variant": None, "reason": reason, "path": "supervisor"})
         return halt_id
 
     def activate_best_effort(self, halt_type: HaltType, actor: str, reason: str, account: str | None = None) -> bool:
@@ -307,3 +330,14 @@ class HaltManager:
 
     def _alert(self, level: str, message: str, ref: str | None) -> None:
         self._alerts.alert(level, message, ref)
+
+
+def _take_cancel_pending(repo: Repository, row: dict) -> bool:
+    """취소 대기 표시가 있으면 지우고 True (activate의 tx 안에서 부른다 — 취소는 한 번만)."""
+    conds = json.loads(row["conditions"] or "{}")
+    if CANCEL_PENDING not in conds:
+        return False
+    del conds[CANCEL_PENDING]
+    repo.update_halt(row["halt_id"], conditions=conds)
+    row["conditions"] = json.dumps(conds)
+    return True

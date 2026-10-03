@@ -633,7 +633,7 @@ def test_v71_group_priority_holds_lower_priority_even_when_its_tr_is_free() -> N
     assert wait_until(lambda: len(lim._waiting) == 1)  # noqa: SLF001
     market = threading.Thread(target=run, args=(Priority.MARKET, "ka10001", "market"), daemon=True)
     market.start()
-    time.sleep(0.3)
+    assert wait_until(lambda: len(lim._waiting) == 2)  # noqa: SLF001 — 둘 다 대기열에 든 뒤 확인 (고정 sleep 대신)
     assert order == []                             # 시세 조회는 결과 불명 조회보다 먼저 나가지 않음
     now[0] = 1.0
     lim.wake()

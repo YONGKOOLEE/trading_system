@@ -42,7 +42,7 @@ from trading_system.evaluation.runner import run_evaluation
 from trading_system.execution.executor import ExecutionBlocked, Executor
 from trading_system.execution.resolver import ResolveProgress, UnknownResolver
 from trading_system.gate.gate import Gate
-from trading_system.halt.manager import HaltManager
+from trading_system.halt.manager import K5_LINK_THREAD, HaltManager
 from trading_system.marketdata.store import MarketDataStore
 from trading_system.monitoring.watchers import AlertWatcher, DailyRiskTracker
 from trading_system.ops.commands import OpsProcessor
@@ -89,6 +89,9 @@ class AccountState:
         self.tracker.update_cash(account, view.deposit)
 
 
+BASE_RETRY_WINDOW = timedelta(minutes=10)   # 일일 기준 금액 실패 시 재시도 기간 (재검토 F5, 임시값)
+
+
 @dataclass
 class Engine:
     repo: Repository
@@ -118,6 +121,7 @@ class Engine:
     evaluated: set[str] = field(default_factory=set)
     _day_start: datetime | None = None
     _last_reconcile: datetime | None = None
+    _base_retry_until: datetime | None = None   # 일일 기준 금액 재시도 마감 (재검토 F5)
     _reconcile_requested: threading.Event = field(default_factory=threading.Event)
     errors: list[str] = field(default_factory=list)
     _calls: "queue.Queue[Callable[[], object]]" = field(default_factory=queue.Queue)
@@ -138,8 +142,14 @@ class Engine:
         unknown = self.executor.recover_on_start()
         self.start_unknown = len(unknown)
         self.halts.on_start()
+        # 새 프로세스 = 입출력 스레드 새로 시작: 스레드 종료 K5 경로 정상 (재검토 F2). 대조(아래)가 이 보고보다 뒤라
+        # reconciled 조건도 이번 시작 대조로 판정된다. 해제 후에도 K8은 사용자 재개 전까지 유지
+        self.halts.report_condition(HaltType.K5, self.account, K5_LINK_THREAD, True, "프로세스 시작 — 스레드 새로 시작")
+        self.last_progress = self.mono()   # 시작 단계마다 진행 표시 — 긴 시작이 멈춤으로 보이지 않게 (재검토 F9)
         self._refresh_cash()
+        self.last_progress = self.mono()
         rep = self.recovery.check(self.account)
+        self.last_progress = self.mono()
         self._last_reconcile = self.clock.now()
         self.alerts.alert("WARNING" if not rep.ok else "INFO",
                           f"시작: 결과 불명 {len(unknown)}건, 복구 판정 {'통과' if rep.ok else '실패'} — "
@@ -163,10 +173,11 @@ class Engine:
 
         판정·실행 스레드가 주문 응답·호출 제한을 기다리는 동안에도 K1이 게이트에 보이게 한다. 이 스레드에서는
         HaltManager.activate를 부르지 않는다 — K1 발동은 매수 미체결 취소(주문)를 내기 때문이다. 취소와 명령 완료
-        기록은 판정·실행 스레드의 운영 명령 처리가 하며, 그때 activate는 이미 있는 K1을 찾아 취소만 한다.
+        기록은 판정·실행 스레드의 운영 명령 처리가 하며, 그때 activate는 record_only가 남긴 취소 대기 표시를 보고
+        한 번 취소한다(재검토 F1).
         안전성: 저장소는 연결 하나를 RLock으로 직렬화하고(tx 전체가 잠금 안, BEGIN IMMEDIATE), 브로커 전송은
         트랜잭션 밖에서만 하므로(INV-03) 여기서 잠금을 기다리는 시간은 다른 스레드의 짧은 저장 단위 하나뿐이다.
-        같은 범위(계좌, 종목·전략 없음)의 미해제 K1이 있으면 새로 만들지 않는다(HaltManager._find와 같은 기준).
+        같은 범위(계좌, 종목·전략 없음)의 미해제 K1이 있으면 새로 만들지 않는다(HaltManager.record_only).
         """
         n = 0
         for cmd in self.repo.pending_commands():
@@ -182,15 +193,8 @@ class Engine:
                 continue
             account, actor = args.get("account"), f"{cmd['channel']}:{cmd['actor']}"
             reason = args.get("reason") or "운영자 킬 스위치"
-            halt_id = None
-            with self.repo.tx():
-                now = self.clock.now()
-                if not any((r["halt_type"], r["account"], r["scope_instrument"], r["scope_owner"])
-                           == (HaltType.K1.value, account, None, None) for r in self.repo.halt_rows(None)):
-                    halt_id = self.repo.insert_halt(HaltType.K1.value, account, actor, reason, now)
-                    self.repo.audit(now, "HALT_ACTIVATED", actor, halt_id, {
-                        "type": HaltType.K1.value, "account": account, "instrument": None, "owner": None,
-                        "variant": None, "reason": reason, "path": "supervisor"})
+            # 행·감사만 기록하고 취소 대기 표시를 남긴다 — 취소는 판정·실행 스레드의 activate가 한 번 (재검토 F1)
+            halt_id = self.halts.record_only(HaltType.K1, actor, reason, account)
             if halt_id is not None:
                 n += 1
                 self.alerts.alert("EMERGENCY", f"정지 K1 발동: {reason} (매수 미체결 취소는 판정·실행 스레드가 처리)",
@@ -291,16 +295,30 @@ class Engine:
         if self._day_start is None or start > self._day_start:
             first = self._day_start is None
             self._day_start = start
-            cash = self.account_state.cash(self.account)
-            base = self.account_state.tracker.start_day(self.account, cash.deposit) if cash is not None else None
-            if base is None:
-                self.alerts.alert("WARNING", "일일 기준 금액을 정할 수 없음(예수금·보유 시세 없음) — 위험 확대 거부", None)
+            if not self._start_day_base():
+                self.alerts.alert("WARNING", "일일 기준 금액을 정할 수 없음(예수금·보유 시세 없음) — 위험 확대 거부, "
+                                             f"{int(BASE_RETRY_WINDOW.total_seconds() // 60)}분 동안 다시 시도", None)
+                self._base_retry_until = now + BASE_RETRY_WINDOW
             if not first:
                 self.reporter.generate(self.account, now, lim.daily_reference_time, lim.version_hash())
+        elif self._base_retry_until is not None:
+            # 기준 금액 실패 재시도 (재검토 F5): 시작 직후 첫 tick엔 아직 시세가 없을 수 있다
+            if self._start_day_base():
+                self._base_retry_until = None
+                self.alerts.alert("INFO", "일일 기준 금액 확정(재시도)", None)
+            elif now >= self._base_retry_until:
+                self._base_retry_until = None
+                self.alerts.alert("WARNING", "일일 기준 금액 재시도 시간 초과 — 오늘 위험 확대 거부 유지, 사용자 확인", None)
         self._report_if_due(now, lim)
         self.halts.check_daily_loss(self.account, self.account_state.daily_risk(self.account), lim.l4_daily_loss_ratio)
         if self.watcher is not None:
             self.watcher.scan(self.account, now)
+
+    def _start_day_base(self) -> bool:
+        cash = self.account_state.cash(self.account)
+        if cash is None:
+            return False
+        return self.account_state.tracker.start_day(self.account, cash.deposit) is not None
 
     def _report_if_due(self, now: datetime, lim: AccountLimits) -> None:
         """일일 보고 시각(report_time, 예 16:00) 경과 시 그날 보고서 (RV-21). 시작 직후 이미 지난 시각은 건너뛴다.

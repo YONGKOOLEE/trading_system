@@ -326,12 +326,22 @@ def test_rv04_daily_refresh_bounded_retry_then_alert() -> None:
     for _ in range(DAILY_MAX_ATTEMPTS + 3):
         clock.advance(DAILY_RETRY)
         p.poll_once()
-    assert len(f.calls) == DAILY_MAX_ATTEMPTS                # 상한
+    assert len(f.calls) == DAILY_MAX_ATTEMPTS                # 빠른 재시도 상한
     assert sum("일봉" in m for _, m in alerts.items) == 1
-    f.fail, f.lag_days = False, 0
-    clock._now = kst(DAY, 20, 1)  # noqa: SLF001             # 다음 확정일엔 새로 시도
+    # 재검토 F4: 상한 뒤에도 느린 간격으로 계속 시도 — 저녁 장애로 다음 날 판정 신호가 0이 되지 않게
+    # (기존 시험은 다음 확정일까지 멈추는 동작을 단언했다. 변경 이유: 재검토 F4)
+    from trading_system.marketdata.kiwoom_feed import DAILY_SLOW_RETRY
+    clock.advance(DAILY_SLOW_RETRY)
     p.poll_once()
     assert len(f.calls) == DAILY_MAX_ATTEMPTS + 1
+    assert sum("일봉" in m for _, m in alerts.items) == 1   # 알림은 한 번
+    f.fail, f.lag_days = False, 0
+    clock.advance(DAILY_SLOW_RETRY)
+    p.poll_once()
+    assert len(f.calls) == DAILY_MAX_ATTEMPTS + 2            # 회복되면 받음
+    clock.advance(DAILY_SLOW_RETRY)
+    p.poll_once()
+    assert len(f.calls) == DAILY_MAX_ATTEMPTS + 2            # 받은 뒤엔 다음 확정일까지 안 받음
 
 
 def test_rv04_stale_response_counts_as_failure() -> None:
@@ -404,8 +414,9 @@ def test_rv02_ws_online_reports_broker_connected_and_requests_reconcile(world: W
     assert len(k5) == 1 and json.loads(k5[0]["conditions"])[K5_LINK_REALTIME]["ok"] is False
     world.engine._reconcile_requested.clear()  # noqa: SLF001
     on_state(WsState.ONLINE, "연결")
-    assert world.engine._reconcile_requested.is_set()  # noqa: SLF001
+    assert not world.engine._reconcile_requested.is_set()  # noqa: SLF001 — 경로 보고보다 먼저 대조하지 않음 (F6)
     world.engine._drain_calls()  # noqa: SLF001
+    assert world.engine._reconcile_requested.is_set()  # noqa: SLF001
     conds = json.loads(world.repo.halt(k5[0]["halt_id"])["conditions"])
     assert conds[K5_LINK_REALTIME]["ok"] is True
 
