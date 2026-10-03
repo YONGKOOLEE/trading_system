@@ -1,0 +1,14 @@
+# PAPER 배포 설정 (T-020 형식, T-015 시작 점검용 초안). 비밀정보 없음. 로더: trading_system.config.app_file.
+
+[app]
+account = "KR-PAPER-01"
+loop_seconds = "0.5"
+reconcile_minutes = 1
+# SNTP 서버: 주소 미확인. SNTP 외부 연결 승인 전에는 사용하지 않는다(시작 점검은 시계 미점검으로 보고).
+sntp_servers = ["time.kriss.re.kr:123", "time.bora.net:123"]
+
+# 키움 모의 접속 스위치. 승인 A-035. **사용자가 직접 true로 바꾼다** (에이전트는 바꾸지 않는다).
+[paper]
+connection_approved = false
+
+# 종목·전략은 T-016(PAPER-0)에서 정한다. 비어 있으면 시작 점검은 005930으로 시세 조회만 한다.
