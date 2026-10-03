@@ -44,6 +44,9 @@ class _Order:
 
 
 class FakeBroker:
+    # 조회 체결번호 = 통보 체결번호 (같은 체결 레코드에서 만든다) → 결과 불명 해소가 조회 체결을 반영해도 된다 (RV-14)
+    query_fills_trusted = True
+
     def __init__(self, behavior: FakeBehavior = FakeBehavior.FILL) -> None:
         self.behavior = behavior
         self.sent: list[OrderRequest] = []  # 실제로 "전송된" 요청만 기록

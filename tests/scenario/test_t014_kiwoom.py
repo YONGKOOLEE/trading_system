@@ -594,17 +594,26 @@ def test_e2e_entry_filled_via_realtime(tmp_path: Path, sim: Sim, clock: FixedClo
 
 
 def test_e2e_lost_response_resolved_by_queries(tmp_path: Path, sim: Sim, clock: FixedClock) -> None:
+    # RV-14 수정(2026-10-03): 조회(kt00009) 체결은 자동 반영하지 않는다(K-U14, kiwoom-kr §7a "자동 반영 없음").
+    # 주문은 조회로 채택하고, 체결은 먼저 와서 보류된 실시간 00 통보가 채택 시점에 반영된다.
     repo, a, gate, ex = paper_env(tmp_path, sim, clock)
     sim.auto_fill = True
-    sim.script("kt10000", Scripted("timeout", apply=True))   # 서버는 접수·체결, 응답은 유실
-    d = gate.decide(GateRequest.from_signal(signal("e2")))
-    assert ex.submit(d.approved) is IntentState.UNKNOWN
-    res = UnknownResolver(repo, a, ex, clock, lambda s: None)
-    assert res.resolve(d.approved.intent_id) is ResolveOutcome.FOUND
-    assert repo.intent(d.approved.intent_id).state is IntentState.FILLED
-    assert repo.position(ALIAS, CODE).quantity == Decimal("10")
-    assert sent(sim, "kt10000") == 1
-    repo.close()
+    rt = realtime(a, sim, clock, [])
+    rt.start()
+    try:
+        assert wait_until(lambda: rt.state is WsState.ONLINE)
+        sim.script("kt10000", Scripted("timeout", apply=True))   # 서버는 접수·체결, 응답은 유실
+        d = gate.decide(GateRequest.from_signal(signal("e2")))
+        assert ex.submit(d.approved) is IntentState.UNKNOWN
+        assert wait_until(lambda: not a._events.empty())   # noqa: SLF001 — 체결 통보 도착(짝 없음 → 보류)
+        res = UnknownResolver(repo, a, ex, clock, lambda s: None)
+        assert res.resolve(d.approved.intent_id) is ResolveOutcome.FOUND
+        assert repo.intent(d.approved.intent_id).state is IntentState.FILLED
+        assert repo.position(ALIAS, CODE).quantity == Decimal("10")
+        assert sent(sim, "kt10000") == 1
+    finally:
+        rt.stop()
+        repo.close()
 
 
 def test_v71_group_priority_holds_lower_priority_even_when_its_tr_is_free() -> None:

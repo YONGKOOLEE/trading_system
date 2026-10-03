@@ -77,6 +77,10 @@ class KiwoomConfig:
 class KiwoomAdapter:
     """BrokerAdapter 구현 (fake와 같은 계약). 판정·실행 스레드에서 주문, 여러 스레드에서 조회를 호출할 수 있다."""
 
+    # K-U14: kt00009 cntr_no가 실시간 909와 같은 식별자인지 미확인 → 결과 불명 해소가 조회 체결을 자동 반영하지 않는다
+    # (kiwoom-kr §7a "자동 반영 없음", RV-14). PAPER-0 PV-04·PV-05로 확인 후 바꾼다.
+    query_fills_trusted = False
+
     def __init__(self, cfg: KiwoomConfig, clock: Clock, *, http: KiwoomHttp | None = None,
                  limiter: RateLimiter | None = None, on_critical: Callable[[str, str], None] | None = None) -> None:
         self.cfg = cfg
@@ -86,7 +90,8 @@ class KiwoomAdapter:
         self.limiter = limiter or RateLimiter(cfg.per_tr_interval)
         self.critical: list[tuple[str, str]] = []
         self._on_critical = on_critical
-        self.tokens = TokenManager(self.http, cfg.app_key, cfg.secret_key, clock, self._raise_critical)
+        self.tokens = TokenManager(self.http, cfg.app_key, cfg.secret_key, clock, self._raise_critical,
+                                   limiter=self.limiter)   # 발급도 호출 제한기 경유 (RV-19)
         self._events: queue.Queue[OrderEvent] = queue.Queue()
         self._lock = threading.Lock()
 
@@ -105,7 +110,7 @@ class KiwoomAdapter:
         """응답 계좌번호가 설정 계좌인지. 비교만 하고 값은 어디에도 남기지 않는다."""
         if value in (None, ""):
             return True
-        if str(value).strip() == self.cfg.account_no().strip():
+        if _same_account(value, self.cfg.account_no()):
             return True
         self._raise_critical("ACCOUNT_MISMATCH", f"{where}: 다른 계좌의 레코드 수신 — 버림")
         return False
@@ -180,6 +185,8 @@ class KiwoomAdapter:
         if r.status >= 500:
             return SubmitResult(SubmitOutcome.UNKNOWN, reason=f"{api_id}: HTTP {r.status}")
         if r.body is None:
+            if r.status == 401:
+                self.tokens.invalidate()   # 본문이 JSON이 아니어도 인증 오류 → 다음 요청부터 재발급 (RV-11, K-U7)
             return SubmitResult(SubmitOutcome.UNKNOWN, reason=f"{api_id}: 응답 해석 불가 (HTTP {r.status})")
         raw = normalize_code(r.body.get("return_code"))
         code = specific_code(raw, r.body.get("return_msg"))
@@ -238,9 +245,12 @@ class KiwoomAdapter:
             first = first or page.body
             assert page.body is not None
             if list_key is not None:
+                # 목록 키가 없거나 null이면 실패 — 빈 결과는 return_code 0 + 빈 목록일 때만 (RV-10, D-047).
+                # K-U 신규 제안(빈 결과 표현, 번호 미부여 — 미실측): 빈 결과에서 목록 키를 생략하는지 모름.
+                # 생략하면 조회 실패(K5 쪽)로 드러난다 — 안전한 쪽.
                 items = page.body.get(list_key)
                 if items is None:
-                    items = []
+                    raise BrokerQueryError(f"{api_id}: 목록 키 {list_key} 없음")
                 if not isinstance(items, list) or not all(isinstance(i, dict) for i in items):
                     raise BrokerQueryError(f"{api_id}: 목록 형식 아님")
                 rows.extend(items)
@@ -259,12 +269,20 @@ class KiwoomAdapter:
                 r = self.http.post(path, api_id, body, token, cont[0], cont[1])
             except (TokenError, AcquireTimeout, PreSendError, AfterSendError) as exc:
                 raise BrokerQueryError(f"{api_id}: {exc}") from None
+            if r.status == 401 and r.body is None:
+                # 비JSON 401도 인증 오류 → 토큰 무효화 후 같은 3회 안에서 다시 조회 (RV-11, K-U7)
+                self.tokens.invalidate()
+                last = f"{api_id}: HTTP 401 (본문 해석 불가)"
+                continue
             if r.status >= 500 or r.body is None:
                 raise BrokerQueryError(f"{api_id}: HTTP {r.status} 응답 해석 불가")
             code = specific_code(normalize_code(r.body.get("return_code")), r.body.get("return_msg"))
             if r.status == 401 and code in (None, 0):
                 code = 8005
-            cls = classify(code if code is not None else (0 if r.status < 400 else None))
+            if code is None:
+                # return_code 없는 응답은 성공으로 보지 않는다 — "주문 없음" 오확정 방지 (RV-10, D-047)
+                raise BrokerQueryError(f"{api_id}: return_code 없음 (HTTP {r.status})")
+            cls = classify(code)
             if cls is ErrorClass.OK and r.status < 400:
                 self.limiter.succeeded(api_id)
                 return r
@@ -341,6 +359,29 @@ class KiwoomAdapter:
 
 # --- 정규화 (순수 함수 — 계약 시험 대상) ----------------------------------------------------------
 
+def _account_digits(value: object) -> str | None:
+    """계좌번호 → 숫자만. 숫자·공백·'-' 외 문자가 있으면 None(비교 불가)."""
+    text = str(value).strip()
+    if not text or any(not (c.isascii() and (c.isdigit() or c in " -")) for c in text):
+        return None
+    return "".join(c for c in text if c.isdigit())
+
+
+def _same_account(received: object, configured: str) -> bool:
+    """응답 계좌번호가 설정 계좌인지 (RV-12). 값은 비교에만 쓰고 남기지 않는다.
+
+    K-U 신규 제안(계좌번호 형식, 번호 미부여 — 가정·미실측): 키움 계좌번호 = 8자리 계좌 + 2자리 상품코드.
+    응답이 8자리·10자리·'-' 포함 중 어느 형식인지 모른다 → 숫자만 남겨, 둘 다 10자리 이상이면 전체를,
+    아니면 앞 8자리를 비교한다. 8자리 미만·해석 불가는 불일치(보수적).
+    """
+    a, b = _account_digits(received), _account_digits(configured)
+    if a is None or b is None or len(a) < 8 or len(b) < 8:
+        return False
+    if len(a) >= 10 and len(b) >= 10:
+        return a == b
+    return a[:8] == b[:8]
+
+
 def _int_text(v: Decimal, field: str, positive: bool) -> str:
     if v != v.to_integral_value() or (positive and v <= 0) or v < 0:
         raise ValueError(f"{field}는 {'양의 ' if positive else ''}정수")
@@ -363,30 +404,35 @@ def build_orders(rows: list[dict], open_rows: list[dict]) -> list[BrokerOrderRec
     for r in rows:
         no = parse.order_no(r.get("ord_no"))
         kind = parse.kind_from_text(r.get("mdfy_cncl_tp"), r.get("io_tp_nm"))
+        otype = _order_type(r.get("trde_tp"))
         rec = {"kind": kind, "instrument": parse.stock_code(r.get("stk_cd")),
                "side": parse.side_from_text(r.get("io_tp_nm"), "io_tp_nm"),
-               "quantity": parse.qty(r.get("ord_qty"), "ord_qty"), "price": parse.price(r.get("ord_uv"), "ord_uv"),
-               "order_type": _order_type(r.get("trde_tp")),
+               "quantity": parse.qty(r.get("ord_qty"), "ord_qty"),
+               "price": parse.order_price(r.get("ord_uv"), "ord_uv", otype is OrderType.MARKET or kind == "CANCEL"),
+               "order_type": otype,
                "original": parse.optional_order_no(r.get("orig_ord_no"), "orig_ord_no"),
                "rejected": "거부" in str(r.get("acpt_tp") or "")}
         prev = by_no.get(no)
         if prev is not None and any(prev[k] != rec[k] for k in ("kind", "instrument", "side", "quantity")):
             raise parse.KiwoomParseError(f"주문 {no}의 행 내용이 서로 다름")
         by_no[no] = rec if prev is None else {**prev, "rejected": prev["rejected"] or rec["rejected"]}
-        cntr = str(r.get("cntr_no") or "").strip()
+        cntr = parse.fill_no(r.get("cntr_no"), "cntr_no")
         cq = parse.qty(r.get("cntr_qty") or "0", "cntr_qty")
-        if cntr and cntr.strip("0") and cq > 0:
+        if cntr and cq > 0:
             fills.setdefault(no, {})[cntr] = cq
     open_by_no: dict[str, dict] = {}
     for r in open_rows:
         no = parse.order_no(r.get("ord_no"))
+        okind = parse.kind_from_text(r.get("io_tp_nm"))
+        otype = _order_type(r.get("trde_tp"))
         open_by_no[no] = {"quantity": parse.qty(r.get("ord_qty"), "ord_qty"),
                           "left": parse.qty(r.get("oso_qty"), "oso_qty"),
                           "instrument": parse.stock_code(r.get("stk_cd")),
                           "side": parse.side_from_text(r.get("io_tp_nm"), "io_tp_nm"),
-                          "kind": parse.kind_from_text(r.get("io_tp_nm")),
-                          "price": parse.price(r.get("ord_pric"), "ord_pric"),
-                          "order_type": _order_type(r.get("trde_tp")),
+                          "kind": okind,
+                          "price": parse.order_price(r.get("ord_pric"), "ord_pric",
+                                                     otype is OrderType.MARKET or okind == "CANCEL"),
+                          "order_type": otype,
                           "original": parse.optional_order_no(r.get("orig_ord_no"), "orig_ord_no")}
     cancelled = {v["original"] for v in by_no.values() if v["kind"] == "CANCEL" and v["original"]}
     modified = {v["original"] for v in by_no.values() if v["kind"] == "MODIFY" and v["original"]}
@@ -422,9 +468,9 @@ def build_fills(rows: list[dict], day: date) -> list[FillRecord]:
     """kt00009 체결 행 → 체결 레코드. 체결번호가 없는 행은 쓰지 않는다 (D-094)."""
     seen: dict[tuple[str, str], FillRecord] = {}
     for r in rows:
-        cntr = str(r.get("cntr_no") or "").strip()
+        cntr = parse.fill_no(r.get("cntr_no"), "cntr_no")   # 실시간 909와 같은 정규화 (RV-14)
         q = parse.qty(r.get("cntr_qty") or "0", "cntr_qty")
-        if not cntr or not cntr.strip("0") or q <= 0:
+        if not cntr or q <= 0:
             continue
         no = parse.order_no(r.get("ord_no"))
         f = FillRecord(no, cntr, q, parse.price(r.get("cntr_uv"), "cntr_uv"), parse.hms(r.get("cntr_tm"), day, "cntr_tm"))

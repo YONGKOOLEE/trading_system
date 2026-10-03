@@ -61,7 +61,7 @@ def parse_order_event(values: dict, day: date, alias: str) -> OrderEvent | None:
     if state == "접수":
         return None
     if state == "체결":
-        fill_id = str(values.get("909") or "").strip()
+        fill_id = parse.fill_no(values.get("909"), "909")   # kt00009 cntr_no와 같은 정규화 (RV-14)
         if not fill_id:
             raise parse.KiwoomParseError("체결 통보에 체결번호(909) 없음")
         q = parse.qty(values.get("915"), "915")

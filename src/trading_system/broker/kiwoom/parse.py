@@ -57,6 +57,32 @@ def order_no(value: object, field: str = "ord_no") -> str:
     return value.zfill(7)
 
 
+def fill_no(value: object, field: str) -> str | None:
+    """체결번호(kt00009 cntr_no·실시간 909) 정규화 — 두 경로가 같은 함수를 쓴다 (RV-14, K-U14).
+
+    공백 제거 후 숫자만 받는다. 앞자리 0 개수가 경로마다 달라도 같은 값이 되도록 정수로 읽어 7자리 이상 0 채움
+    (주문번호 규칙과 같은 폭). 빈 값·전부 0 → None(체결번호 없음). 숫자가 아니면 해석 불가.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise KiwoomParseError(f"{field}: 체결번호 형식 아님")
+    text = value.strip()
+    if text == "":
+        return None
+    if not (text.isascii() and text.isdigit()):
+        raise KiwoomParseError(f"{field}: 체결번호 형식 아님")
+    n = int(text)
+    return None if n == 0 else str(n).zfill(7)
+
+
+def order_price(value: object, field: str, market: bool) -> Decimal:
+    """주문 가격. 시장가 주문은 가격이 없을 수 있다(빈 문자열) → 0 (RV-13, K-U17). 지정가의 빈 값은 해석 불가."""
+    if market and (value is None or (isinstance(value, str) and value.strip() == "")):
+        return Decimal("0")
+    return price(value, field)
+
+
 def optional_order_no(value: object, field: str) -> str | None:
     """원주문번호: 없으면 '0000000' 또는 빈 값 → None."""
     if value in (None, ""):
