@@ -1,6 +1,6 @@
 # 보조 기록 — 승인 근거가 아니다. 승인 근거는 docs/approvals.md.
 # 이 파일과 approvals.md가 충돌하면 진행하지 말고 사용자에게 확인한다.
-current_stage: 6            # 구현 — T-000~T-015·T-020·T-021 완료(T-015 키움 모의 시작 점검 통과, PV-11 갱신 관찰은 PAPER-0). 다음: T-016 준비. 인계: docs/handoff.md
+current_stage: 6            # 구현 — T-000~T-015·T-020·T-021 완료, T-016 준비 완료(실행 대기: 전략 전환 승인 2·SNTP 승인). 인계: docs/handoff.md
 delivery: M1                # 국내주식·ETF (키움 모의)
 business_definition: v0.6 approved   # 근거: A-029 (v0.5·v0.4·v0.3 superseded)
 gates:

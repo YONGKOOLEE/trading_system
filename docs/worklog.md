@@ -202,3 +202,8 @@
 - 문서: docs/strategies/paper0-verify/{strategy,backtest-v1,status,pv-procedure}.md, kiwoom-kr K-U6.
 - 시험: `.venv\Scripts\python -m pytest -q` → 759 passed.
 - 남은 사용자 항목: 전략 전환 승인 A-ID 2개(BACKTEST_PASSED·PAPER), SNTP 연결 승인, U-06 약관. 그 뒤 PAPER-0 실행(사용자).
+
+## 2026-10-03 (17) — 세션 종료 인계
+- 사용자에게 전체 로드맵(PAPER-0 → T-017 → T-018 전략 결정 → PAPER-1 → LIVE 별도 승인)과 LIVE 전 필수 항목 안내.
+- handoff.md 전면 갱신, .status 현재 단계 갱신. 코드 변경 없음, 시험 미실행(문서만). 마지막 시험 759 passed.
+- 다음 세션 첫 행동: 승인 3건 확인 → 전략 전환 → PAPER-0 실행 안내.
