@@ -228,8 +228,12 @@ def test_v90_snapshot_excludes_bars_not_yet_closed() -> None:
     morning = datetime(2026, 10, 1, 9, 5, tzinfo=KST)
     snap = s.snapshot("ev", "M1", ACCOUNT, morning, Decimal("1"), ["TST-A"], no_pos, lambda i: False)
     assert [b.at for b in snap.view("TST-A").daily_bars] == DAYS[:3]
+    # 정규장 마감 뒤라도 애프터마켓(~20:00) 중에는 당일 봉을 확정으로 보지 않는다 (DP-5, A-031)
     after_close = datetime(2026, 10, 1, 15, 30, tzinfo=KST)
-    snap2 = s.snapshot("ev", "M1", ACCOUNT, after_close, Decimal("1"), ["TST-A"], no_pos, lambda i: False)
+    snap_mid = s.snapshot("ev", "M1", ACCOUNT, after_close, Decimal("1"), ["TST-A"], no_pos, lambda i: False)
+    assert [b.at for b in snap_mid.view("TST-A").daily_bars] == DAYS[:3]
+    after_final = datetime(2026, 10, 1, 20, 0, tzinfo=KST)
+    snap2 = s.snapshot("ev", "M1", ACCOUNT, after_final, Decimal("1"), ["TST-A"], no_pos, lambda i: False)
     assert [b.at for b in snap2.view("TST-A").daily_bars] == DAYS
     # 미래 데이터를 바꿔도 아침 스냅샷은 같다 (V-91 성격)
     s.update_daily("TST-A", raw_days(DAYS, ["100", "101", "102", "999"]))

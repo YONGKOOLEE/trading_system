@@ -150,3 +150,13 @@
 - 결정 대기 DP-10~DP-26 추가(모두 비차단, 보수적 임시값). capabilities M1 일부 "검증 중"(DP-24).
 - 미해결: 결정 대기 일괄 검토, CP 필요 1건(DP-23 진입점 이름), PAPER 시작 전 사용자 확인(K-U1 IP·단말기, K-U6 거래정지 표시, X-U1 호가 표, X-U3 휴장일, 수수료 K-U9).
 - 다음 세션 첫 행동: handoff.md 확인 → 사용자 결정 대기열 검토 → T-015(키움 모의 접속, 조회만) 승인 여부.
+
+## 2026-10-03 (12) — 결정 대기 DP-1~26 확정(A-031), DP-5 변경 반영
+- 사용자 확인: DP-1~4·6~26 임시 결정 확정, DP-5 변경(일봉 확정 시각 = max(정규장 마감, 20:00), 애프터마켓 고려).
+- 변경: `marketdata/store.py`(DAILY_BAR_FINAL·daily_bar_final_at), `marketdata/kiwoom_feed.py`(당일 봉 저장 기준 동일화),
+  시험 2개(test_t010 V-90, test_t021 당일 봉) — 15:30~20:00 당일 봉 제외로 기대값 변경(요구 변경 A-031).
+  문서: approvals A-031, decisions-pending 상태 "확정", kiwoom-kr K-U19(ka10081 KRX/통합 범위, PAPER-0 확인).
+- 명령·결과: 변경 시험 먼저 실행 → 2 failed(예상), 구현 후 `.venv\Scripts\python -m pytest -q` → 700 passed. 브랜치 `fix/dp-5-daily-bar-cutoff`(feat/T-020-app에서 분기).
+- 발견: 텔레그램(ops/telegram)이 앱 실행 경로(app/main)에 연결되지 않았고 `.env` 키 이름도 없음 → T-013 실제 송수신 확인 불가. 보완 작업 승인 필요.
+- 미결: DP-2(04 V-80 문구 CP 여부), DP-25(03 D-092와 차이 정리 방식), DP-24/DP-1과 PAPER-0 순서(T-016 때).
+- 다음 세션 첫 행동: 사용자 T-015 준비(앱키·IP·.env.paper·config paper 3종) 확인 → T-015 승인 여부, 텔레그램 연결 보완 승인 여부.

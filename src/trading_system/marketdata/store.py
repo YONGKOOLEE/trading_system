@@ -3,7 +3,7 @@
 - 게이트 입력(MarketFacts)을 메모리 값으로만 제공한다(네트워크 호출 금지, 03 §5.1 v0.5). 값의 갱신은
   공급자(fake, 키움 T-021)가 `update_*`로 한다.
 - 시세 시각 = 시스템이 가격을 받은 시각 (03 D-095).
-- 판정 스냅샷의 봉은 판정 기준 시각에 **확정된 것만** 넣는다: 일봉은 그날 정규장 마감 시각 이후,
+- 판정 스냅샷의 봉은 판정 기준 시각에 **확정된 것만** 넣는다: 일봉은 그날 확정 시각(애프터마켓 종료 20:00) 이후,
   분봉은 봉 끝 시각 이후 (룩어헤드 방지, D-073).
 - 거래 상태 갱신(VI·거래정지 등, 키움 1h·0g)과 품질 실패는 정지(K10)와 알림으로 이어진다(연결된 경우).
 """
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
 from trading_system.domain.clock import KST
@@ -27,16 +27,23 @@ from .quality import Prepared, RawDaily, preprocess_daily
 from .ticks import TickTable
 
 
-def daily_bar_available(day: date, as_of: datetime, calendar: KrxCalendar | None) -> bool:
-    """일봉은 그날 정규장 마감 이후에만 확정된 것으로 본다."""
+DAILY_BAR_FINAL = time(20, 0)   # DP-5(A-031): 애프터마켓(NXT ~20:00) 종료 뒤. ka10081 일봉 범위(KRX/통합) 미확인
+
+
+def daily_bar_final_at(day: date, calendar: KrxCalendar | None) -> datetime:
+    """그날 일봉을 확정으로 보는 시각: 정규장 마감과 DAILY_BAR_FINAL 중 늦은 쪽."""
     close = None
     if calendar is not None:
         s = calendar.session(day)
         if s is not None and s.is_open:
             close = s.regular_close
-    if close is None:
-        close = datetime(day.year, day.month, day.day, 15, 30, tzinfo=KST)
-    return close <= as_of
+    final = datetime.combine(day, DAILY_BAR_FINAL, tzinfo=KST)
+    return final if close is None else max(close, final)
+
+
+def daily_bar_available(day: date, as_of: datetime, calendar: KrxCalendar | None) -> bool:
+    """일봉은 그날 확정 시각(daily_bar_final_at) 이후에만 확정된 것으로 본다."""
+    return daily_bar_final_at(day, calendar) <= as_of
 
 
 def latest_complete_day(as_of: datetime, calendar: KrxCalendar | None) -> date:

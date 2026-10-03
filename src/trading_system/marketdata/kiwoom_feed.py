@@ -33,7 +33,7 @@ from trading_system.domain.market import InstrumentInfo, Quote, TradingStatus
 from trading_system.domain.sinks import AlertSink
 
 from .quality import Prepared, RawDaily
-from .store import MarketDataStore
+from .store import MarketDataStore, daily_bar_available
 
 CHART_PATH, INFO_PATH = "/api/dostk/chart", "/api/dostk/stkinfo"
 MASTER_MARKETS = ("0", "10", "8", "60")   # 코스피, 코스닥, ETF, ETN (ka10099 mrkt_tp)
@@ -132,8 +132,8 @@ class KiwoomMarketFeed:
 
     def _daily_rows(self, rows: list[dict], today: date) -> list[RawDaily]:
         session = self.store.session(today)
-        closed_today = session is not None and session.is_open and session.regular_close is not None and \
-            self._now() >= session.regular_close
+        closed_today = session is not None and session.is_open and \
+            daily_bar_available(today, self._now(), self.store.calendar)
         out: dict[date, RawDaily] = {}
         for r in rows:
             dt = str(r.get("dt") or "")

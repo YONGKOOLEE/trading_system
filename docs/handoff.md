@@ -1,18 +1,18 @@
 # 세션 인계 (짧게 유지 — 60줄 이내, 작업이 끝날 때마다 덮어쓴다)
 
-- 갱신: 2026-10-03 / A-030 무인 진행 완료(묶음 B·C 오프라인·T-014·T-021·T-020) / 다음: **결정 대기 검토 → T-015 승인 여부**
+- 갱신: 2026-10-03 / DP-1~26 확정(A-031, DP-5는 변경: 일봉 확정 20:00) / 다음: **사용자 T-015 준비 → T-015 승인 여부**
 
 ## 현재 상태
 - 6단계 구현. 완료: T-000~T-014, T-020, T-021 (T-014·T-021은 네트워크 없이 합성 응답, T-020은 fake 브로커 종단).
 - 테스트 `.venv\Scripts\python -m pytest -q` → 700 passed (약 2분).
 - 브랜치(로컬만, push·main 병합 없음): … → feat/T-013-telegram → fix/review-bundle-b → feat/T-014-kiwoom-adapter
-  → feat/T-021-kiwoom-feed → **feat/T-020-app (최신)**. 다음 작업은 최신 브랜치에서 분기.
+  → feat/T-021-kiwoom-feed → feat/T-020-app → **fix/dp-5-daily-bar-cutoff (최신)**. 다음 작업은 최신 브랜치에서 분기.
 - 승인본: 업무정의서 v0.6, 00 v0.4, 01 v0.5, 02 v0.7, 03 v0.5, 04 v0.5, 05 v0.4 (A-029). 무인 진행 권한 A-030.
 - 실전 주문 코드·LIVE: 승인 없음. PAPER 접속: 사용자가 `config/app.paper.toml [paper] connection_approved = true`로 직접 켜야 함.
 
 ## 세션 시작 시 읽을 것 (이것만)
 1. CLAUDE.md (자동), 이 파일, `git status`, `docs/.status`
-2. `docs/decisions-pending.md` (DP-1~DP-26, 사용자 일괄 검토 대상)
+2. `docs/decisions-pending.md` (DP-1~DP-26 확정 A-031. 미결: DP-2 04 V-80 문구, DP-25 03 D-092 차이, DP-24·DP-1과 PAPER-0 순서)
 3. 다음 작업 행: `docs/05-plan.md` §2 T-015 + `docs/broker-specs/kiwoom-kr.md` §7a·§8
 
 ## 구현 구조 요약
@@ -26,9 +26,11 @@
 - PAPER-0 실측 필요(PV): K-U14 kt00009 행 단위·체결번호 일치, K-U16 911 누계 여부, K-U17 정정·취소·거부 문자열, K-U10 1700 대기, K-U5 실시간 보장.
 - CAP-ORD-03 정정 미구현(취소만). 분봉(CAP-DAT-02) 미지원. 거래 이벤트 트리거(CAP-TRG-03·04) 미지원.
 - 진입점 이름(DP-23)은 원하면 CP로 03 §7 개정.
+- 텔레그램이 app/main에 연결 안 됨, `.env` 키 이름 없음 → T-013 실제 송수신 확인 전 보완 필요(승인 대기).
+- K-U19 ka10081 일봉 KRX/통합 범위 — PAPER-0에서 KRX 종가와 비교.
 
 ## 사용자에게 남은 결정·확인
-- decisions-pending DP-1~DP-26 확정/변경
+- DP-2·DP-25 승인 문서 정정 방식(CP 여부)
 - T-015 키움 모의 접속 승인(외부 연결, D-083), `.env.paper` 작성(에이전트는 읽지 않음), K-U1 IP·단말기 요건
 - 실제 설정값: limits·market·app·calendar(휴장일 X-U3)·ticks(X-U1) — 저장소에 기본값 없음
 

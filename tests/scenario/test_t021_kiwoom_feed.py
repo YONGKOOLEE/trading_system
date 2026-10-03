@@ -78,9 +78,12 @@ def test_daily_excludes_partial_today_until_close(sim: Sim, clock: FixedClock) -
     p = f.refresh_daily(A)
     assert p is not None and p.report.ok and max(b.at for b in p.bars) == date(2026, 10, 1)   # 장중 당일 봉 제외
     clock._now = kst(2026, 10, 2, 15, 40)  # noqa: SLF001
+    p_mid = f.refresh_daily(A)                # 애프터마켓 중(~20:00)에는 당일 봉 제외 (DP-5, A-031)
+    assert p_mid is not None and max(b.at for b in p_mid.bars) == date(2026, 10, 1)
+    clock._now = kst(2026, 10, 2, 20, 0)  # noqa: SLF001
     p2 = f.refresh_daily(A)
     assert p2 is not None and max(b.at for b in p2.bars) == date(2026, 10, 2)
-    snap = store.snapshot("ev", "M1", ALIAS, kst(2026, 10, 2, 16, 0), Decimal("1"), [A], lambda i: None,
+    snap = store.snapshot("ev", "M1", ALIAS, kst(2026, 10, 2, 20, 0), Decimal("1"), [A], lambda i: None,
                           lambda i: False)
     assert snap.view(A).data_ok
 
