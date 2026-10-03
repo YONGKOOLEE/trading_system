@@ -41,7 +41,7 @@ from .startup import check_startup
 
 ORDER_API_IDS = frozenset({"kt10000", "kt10001", "kt10002", "kt10003"})
 # 이 시스템이 쓰는 조회 API (adapter: 예수금·잔고·주문·미체결, kiwoom_feed: 일봉·시세·종목 정보·VI)
-QUERY_APIS = ("kt00005", "kt00018", "kt00009", "ka10075", "ka10081", "ka10001", "ka10099", "ka10054")
+QUERY_APIS = ("kt00001", "kt00018", "kt00009", "ka10075", "ka10081", "ka10001", "ka10099", "ka10054")
 PROBE_DEFAULT = "005930"   # 배포 설정에 종목이 없을 때 시세 조회에 쓸 종목 (조회만)
 SECRET_KEYS = ("KIWOOM_PAPER_APP_KEY", "KIWOOM_PAPER_SECRET_KEY", "KIWOOM_PAPER_ACCOUNT_NO",
                "KIWOOM_PAPER_ACCOUNT_ALIAS")
@@ -53,6 +53,16 @@ class CallRecord:
     status: int | None        # 응답이 없으면 None
     code: int | None
     error_class: str          # ErrorClass 값 또는 TRANSPORT
+    message: str = ""         # 실패 응답의 서버 문구(가림 처리·길이 제한). 성공 응답은 남기지 않는다
+
+
+MESSAGE_MAX = 160
+
+
+def _server_message(body: dict | None) -> str:
+    if body is None:
+        return ""
+    return Masker().text(str(body.get("return_msg") or ""))[:MESSAGE_MAX]
 
 
 class GuardedHttp:
@@ -87,7 +97,8 @@ class GuardedHttp:
             cls = classify(code if code is not None else (0 if r.status < 400 else None))
             if r.status >= 400 and cls is ErrorClass.OK:
                 cls = ErrorClass.UNEXPECTED
-        self.records.append(CallRecord(api_id, r.status, code, cls.value))
+        msg = "" if cls is ErrorClass.OK else _server_message(r.body)
+        self.records.append(CallRecord(api_id, r.status, code, cls.value, msg))
         return r
 
 
@@ -97,6 +108,8 @@ class ApiStatus:
     calls: int
     ok: bool                  # 정상 응답이 한 번 이상
     error_class: str = ""     # 마지막 실패 분류
+    code: int | None = None   # 마지막 실패 코드
+    message: str = ""         # 마지막 실패 서버 문구(가림 처리)
 
 
 @dataclass
@@ -155,7 +168,7 @@ def run_preflight(adapter: KiwoomAdapter, guard: GuardedHttp, store: MarketDataS
         rep.token_expires_at = exp.astimezone(KST).isoformat() if exp else None
 
         account_steps: list[tuple[str, Callable[[], object]]] = [
-            ("예수금 kt00005", lambda: adapter.query_cash(account)),
+            ("예수금 kt00001",lambda: adapter.query_cash(account)),
             ("잔고 kt00018", lambda: adapter.query_positions(account)),
             ("주문·미체결 kt00009·ka10075", lambda: adapter.query_orders(account)),
             ("체결 kt00009", lambda: adapter.query_fills(account)),
@@ -172,7 +185,8 @@ def run_preflight(adapter: KiwoomAdapter, guard: GuardedHttp, store: MarketDataS
         feed = KiwoomMarketFeed(adapter, store, clock, {probe_code: info})
         prepared = feed.refresh_daily(probe_code)
         if prepared is not None and not prepared.report.ok:
-            rep.warnings.append(f"일봉 품질 검사 실패({probe_code}) — 조회는 됨")
+            rep.warnings.append(f"일봉 품질 검사 실패({probe_code}) — 조회는 됨: "
+                                f"{'; '.join(prepared.report.issues[:5])}")
         feed.refresh_quote(probe_code)
         feed.refresh_master()
         feed.refresh_vi()
@@ -205,8 +219,11 @@ def _summarize(rep: PreflightReport, guard: GuardedHttp, adapter: KiwoomAdapter)
     for api in QUERY_APIS:
         recs = by_api.get(api, [])
         ok = any(r.error_class == ErrorClass.OK.value for r in recs)
-        bad = [r.error_class for r in recs if r.error_class != ErrorClass.OK.value]
-        rep.apis.append(ApiStatus(api, len(recs), ok, bad[-1] if bad else ""))
+        failed = [r for r in recs if r.error_class != ErrorClass.OK.value]
+        bad = [r.error_class for r in failed]
+        last = failed[-1] if failed else None
+        rep.apis.append(ApiStatus(api, len(recs), ok, last.error_class if last else "",
+                                  last.code if last else None, last.message if last else ""))
         if any(r.code == 8104 for r in recs):
             rep.unsupported.append(api)
         if issued and not recs:
@@ -298,7 +315,8 @@ def _print(rep: PreflightReport) -> None:
           f"{' (만료 ' + rep.token_expires_at + ')' if rep.token_expires_at else ''}, "
           f"폐기 {'완료' if rep.token_revoked else '안 됨'}")
     for a in rep.apis:
-        print(f"  {a.api_id}: {'정상' if a.ok else '실패'} (호출 {a.calls}회{', ' + a.error_class if a.error_class else ''})")
+        detail = f", {a.error_class} 코드 {a.code} {a.message}" if a.error_class else ""
+        print(f"  {a.api_id}: {'정상' if a.ok else '실패'} (호출 {a.calls}회{detail})")
     print(f"  시작 대조: {rep.reconcile or '안 함'}")
     print(f"  주문 API 전송: 0건{' (차단 ' + str(len(rep.order_api_blocked)) + '회)' if rep.order_api_blocked else ''}")
     for w in rep.warnings:

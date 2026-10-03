@@ -323,9 +323,10 @@ class KiwoomAdapter:
 
     def query_cash(self, account: str) -> CashView:
         self._require_account(account)
-        body, _ = self._query("kt00005", {"dmst_stex_tp": "KRX"}, None)
+        # kt00001 예수금상세현황(qry_tp 3 추정조회, 명세 예시값). kt00005는 모의 미제공(실측 2026-10-03, RC9000)
+        body, _ = self._query("kt00001", {"qry_tp": "3"}, None)
         try:
-            return CashView(parse.dec(body.get("entr"), "entr"), parse.dec(body.get("ord_alowa"), "ord_alowa"))
+            return CashView(parse.dec(body.get("entr"), "entr"), parse.dec(body.get("ord_alow_amt"), "ord_alow_amt"))
         except parse.KiwoomParseError as exc:
             raise BrokerQueryError(f"예수금 조회 해석 불가: {exc}") from None
 

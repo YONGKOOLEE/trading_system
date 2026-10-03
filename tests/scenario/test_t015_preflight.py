@@ -126,6 +126,23 @@ def test_mock_unsupported_8104_fails_and_names_api(sim: Sim, clock: FixedClock, 
     assert ("MOCK_UNSUPPORTED" in {k for k, _ in a.critical})
 
 
+def test_rc9000_shape_is_reported_as_mock_unsupported(sim: Sim, clock: FixedClock, tmp_path: Path) -> None:
+    sim.script("ka10099", Scripted("body", body={"return_code": 20,
+                                                 "return_msg": "[2000](RC9000:모의투자에서는 해당업무가 제공되지 않습니다.)"}))
+    rep, _, _ = run(sim, clock, tmp_path)
+    assert not rep.ok and rep.unsupported == ["ka10099"]
+
+
+def test_failure_message_kept_masked_for_diagnosis(sim: Sim, clock: FixedClock, tmp_path: Path) -> None:
+    sim.script("kt00001", Scripted("body", body={"return_code": 20,
+                                                 "return_msg": f"가상 업무 오류 계좌 {ACCOUNT_NO} 확인"}))
+    rep, _, _ = run(sim, clock, tmp_path)
+    st = next(s for s in rep.apis if s.api_id == "kt00001")
+    assert st.code == 20 and "가상 업무 오류" in st.message
+    assert ACCOUNT_NO not in json.dumps(rep.to_dict(), ensure_ascii=False)
+    assert all(s.message == "" for s in rep.apis if s.ok and s.error_class == "")
+
+
 def test_token_failure_stops_before_queries(sim: Sim, clock: FixedClock, tmp_path: Path) -> None:
     sim.token_fail = 10
     rep, _, _ = run(sim, clock, tmp_path)
@@ -134,11 +151,11 @@ def test_token_failure_stops_before_queries(sim: Sim, clock: FixedClock, tmp_pat
 
 
 def test_mode_mismatch_code_is_reported(sim: Sim, clock: FixedClock, tmp_path: Path) -> None:
-    sim.script("kt00005", Scripted("body", body={"return_code": 8030, "return_msg": "[8030:실전/모의 투자구분 불일치]"}))
+    sim.script("kt00001", Scripted("body", body={"return_code": 8030, "return_msg": "[8030:실전/모의 투자구분 불일치]"}))
     rep, a, _ = run(sim, clock, tmp_path)
     assert not rep.ok
     assert "MODE_MISMATCH" in {k for k, _ in a.critical}
-    assert any(s.api_id == "kt00005" and s.error_class == "MODE_MISMATCH" for s in rep.apis)
+    assert any(s.api_id == "kt00001" and s.error_class == "MODE_MISMATCH" for s in rep.apis)
 
 
 def test_guard_blocks_order_api_before_send(sim: Sim, clock: FixedClock) -> None:

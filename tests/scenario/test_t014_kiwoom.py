@@ -164,7 +164,7 @@ def test_v103_mode_mismatch_and_terminal_are_critical(sim: Sim, clock: FixedCloc
     sim.script("kt10000", Scripted("body", body={"return_code": code, "return_msg": "x"}))
     assert a.place_order(buy()).outcome is SubmitOutcome.UNKNOWN
     assert crit == [kind]
-    sim.script("kt00005", Scripted("body", body={"return_code": code, "return_msg": "x"}))
+    sim.script("kt00001", Scripted("body", body={"return_code": code, "return_msg": "x"}))
     with pytest.raises(BrokerQueryError):
         a.query_cash(ALIAS)
     assert crit == [kind, kind]
@@ -177,6 +177,18 @@ def test_error_classes() -> None:
         ErrorClass.OK, ErrorClass.AUTH, ErrorClass.AUTH, ErrorClass.MODE_MISMATCH, ErrorClass.TERMINAL,
         ErrorClass.RATE_LIMIT, ErrorClass.RATE_LIMIT, ErrorClass.INPUT, ErrorClass.UNEXPECTED,
         ErrorClass.MOCK_UNSUPPORTED, ErrorClass.BUSINESS, ErrorClass.UNEXPECTED]
+    # 실측(2026-10-03, kt00005): 모의 미제공은 8104 말고 return_code 20 + RC9000 문구로도 온다 (kiwoom-kr K-U8)
+    rc9000 = "[2000](RC9000:모의투자에서는 해당업무가 제공되지 않습니다.)"
+    assert specific_code(20, rc9000) == 8104 and classify(specific_code(20, rc9000)) is ErrorClass.MOCK_UNSUPPORTED
+    assert specific_code(20, "[2000](RC4007:가상 다른 업무 오류)") == 20
+
+
+def test_cash_query_uses_kt00001_because_kt00005_is_not_in_mock(sim: Sim, clock: FixedClock) -> None:
+    a = adapter(sim, clock)
+    cash = a.query_cash(ALIAS)
+    assert cash.deposit == cash.broker_orderable == Decimal("10000000")
+    assert sent(sim, "kt00001") == 1 and sent(sim, "kt00005") == 0
+    assert next(b for api, b, _ in sim.log if api == "kt00001") == {"qry_tp": "3"}
 
 
 # --- V-70 호출 제한: 주문 재전송 0, 조회 제한된 재시도 ---------------------------------------------
@@ -184,10 +196,10 @@ def test_error_classes() -> None:
 def test_v70_rate_limit_query_retries_then_fails(sim: Sim, clock: FixedClock) -> None:
     lim = RateLimiter(0.0, max_penalty=0.05)
     a = adapter(sim, clock, limiter=lim)
-    sim.script("kt00005", *[Scripted("body", body={"return_code": 1700, "return_msg": "초과"})] * 2)
+    sim.script("kt00001", *[Scripted("body", body={"return_code": 1700, "return_msg": "초과"})] * 2)
     assert a.query_cash(ALIAS).deposit == Decimal("10000000")
-    assert sent(sim, "kt00005") == 3
-    sim.script("kt00005", *[Scripted("body", body={"return_code": 1700, "return_msg": "초과"})] * 3)
+    assert sent(sim, "kt00001") == 3
+    sim.script("kt00001", *[Scripted("body", body={"return_code": 1700, "return_msg": "초과"})] * 3)
     with pytest.raises(BrokerQueryError, match="1700"):
         a.query_cash(ALIAS)
     sim.script("kt10000", Scripted("body", body={"return_code": 1700, "return_msg": "초과"}))

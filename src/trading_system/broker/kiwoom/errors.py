@@ -43,10 +43,18 @@ def embedded_code(message: object) -> int | None:
     return int(m.group(1) or m.group(2)) if m else None
 
 
+MOCK_UNSUPPORTED_CODE = 8104
+# 실측(2026-10-03, 키움 모의 kt00005): 모의 미제공이 8104가 아니라 return_code 20 + "[2000](RC9000:모의투자에서는
+# 해당업무가 제공되지 않습니다.)"로 왔다 → 8104와 같은 뜻으로 본다 (kiwoom-kr K-U8)
+_MOCK_RC = "RC9000"
+
+
 def specific_code(return_code: int | None, message: object) -> int | None:
     """실패 응답이면 본문 안 구체 코드를 우선한다. 성공(0)은 메시지와 무관하게 0."""
     if return_code == 0:
         return 0
+    if _MOCK_RC in str(message or ""):
+        return MOCK_UNSUPPORTED_CODE
     return embedded_code(message) or return_code
 
 
@@ -61,7 +69,7 @@ def classify(code: int | None) -> ErrorClass:
         return ErrorClass.TERMINAL
     if 8001 <= code <= 8031 or code == 8103 or code == GENERIC_AUTH_CODE:
         return ErrorClass.AUTH
-    if code == 8104:
+    if code == MOCK_UNSUPPORTED_CODE:
         return ErrorClass.MOCK_UNSUPPORTED
     if code == 8200:
         return ErrorClass.CORPORATE

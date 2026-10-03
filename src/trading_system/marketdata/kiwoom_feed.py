@@ -198,9 +198,10 @@ class KiwoomMarketFeed:
         return True
 
     def refresh_vi(self) -> bool:
+        # 거래량·거래대금 범위는 필수 값(빈 값이면 1511, 실측 2026-10-03). 사용 안 함(0)이라도 명세 예시처럼 "0"
         body = {"mrkt_tp": "000", "bf_mkrt_tp": "1", "stk_cd": "", "motn_tp": "0", "skip_stk": "000000000",
-                "trde_qty_tp": "0", "min_trde_qty": "", "max_trde_qty": "", "trde_prica_tp": "0",
-                "min_trde_prica": "", "max_trde_prica": "", "motn_drc": "0", "stex_tp": "1"}
+                "trde_qty_tp": "0", "min_trde_qty": "0", "max_trde_qty": "0", "trde_prica_tp": "0",
+                "min_trde_prica": "0", "max_trde_prica": "0", "motn_drc": "0", "stex_tp": "1"}
         try:
             with call_priority(Priority.MARKET):
                 _, rows = self.api.query_raw(INFO_PATH, "ka10054", body, "motn_stk")

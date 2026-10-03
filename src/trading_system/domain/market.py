@@ -173,7 +173,7 @@ class CashView:
     """주문 가능 현금의 두 출처 (03 §6.2)."""
 
     deposit: Decimal           # 내부 기준 예수금
-    broker_orderable: Decimal  # 브로커가 알려 준 주문가능현금 (키움 kt00005)
+    broker_orderable: Decimal  # 브로커가 알려 준 주문가능현금 (키움 kt00001 ord_alow_amt)
 
     def __post_init__(self) -> None:
         _dec("deposit", self.deposit)

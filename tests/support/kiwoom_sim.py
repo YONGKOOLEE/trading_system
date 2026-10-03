@@ -336,8 +336,14 @@ class Sim:
         return self._paged(rows, "acnt_evlt_remn_indv_tot", hdr, {"tot_pur_amt": f"{0:015d}"})
 
     def _kt00005(self, body: dict, hdr: dict) -> tuple[int, dict, dict]:
-        e = f"{int(self.entr):012d}"
-        return 200, {"entr": e, "ord_alowa": e, "return_code": 0, "return_msg": "조회 완료"}, {}
+        # 실측(2026-10-03, 키움 모의): 모의투자 미제공 — 8104가 아니라 return_code 20 + RC9000 문구
+        return 200, {"return_code": 20, "return_msg": "[2000](RC9000:모의투자에서는 해당업무가 제공되지 않습니다.)"}, {}
+
+    def _kt00001(self, body: dict, hdr: dict) -> tuple[int, dict, dict]:
+        if body.get("qry_tp") not in ("2", "3"):
+            return 200, {"return_code": 1511, "return_msg": "[1511:필수 입력 값에 값이 존재하지 않습니다. 필수입력 파라미터=qry_tp]"}, {}
+        e = f"{int(self.entr):015d}"
+        return 200, {"entr": e, "ord_alow_amt": e, "return_code": 0, "return_msg": "조회 완료"}, {}
 
 
 # --- 시장 데이터 (T-021) — Sim에 붙이는 처리기 ---------------------------------------------------------
@@ -369,8 +375,16 @@ def _ka10099(self: Sim, body: dict, hdr: dict) -> tuple[int, dict, dict]:
     return self._paged(self.master.get(body["mrkt_tp"], []), "list", hdr)
 
 
+KA10054_REQUIRED = ("mrkt_tp", "bf_mkrt_tp", "motn_tp", "skip_stk", "trde_qty_tp", "min_trde_qty", "max_trde_qty",
+                    "trde_prica_tp", "min_trde_prica", "max_trde_prica", "motn_drc", "stex_tp")
+
+
 def _ka10054(self: Sim, body: dict, hdr: dict) -> tuple[int, dict, dict]:
     _md_init(self)
+    for k in KA10054_REQUIRED:   # 실측(2026-10-03): 필수 값이 비면 1511
+        if str(body.get(k) or "") == "":
+            return 200, {"return_code": 1511,
+                         "return_msg": f"입력 값 오류입니다[1511:필수 입력 값에 값이 존재하지 않습니다. 필수입력 파라미터={k}]"}, {}
     return self._paged(self.vi_rows, "motn_stk", hdr)
 
 
