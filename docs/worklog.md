@@ -166,3 +166,11 @@
   PAPER 설정 A-034: `config/limits.paper.toml`·`market.paper.toml` 작성, 프로젝트 로더로 검증 통과(경고 0). 비용 요율 DP-27 보수 임시값.
   `.env.paper_virtual` → `.env.paper` 이름 변경(키 4개 존재·형식만 점검, 값 미열람, git 제외 확인). 텔레그램 연결은 사용자 "나중에".
   시험 미실행(코드 변경 없음).
+
+## 2026-10-03 (13) — T-015 시작 점검 구현(오프라인), 권한 설정
+- 승인: A-035 T-015(키움 모의 연결, 조회만), K-U1 IP 등록 사용자 보고.
+- 구현: `app/preflight.py`(GuardedHttp: 주문 API 전송 전 차단·호출 분류 기록 / run_preflight: 토큰 발급 → 조회 8종 1회씩 → 시작 대조 → 토큰 폐기 / preflight_main: 연결 전 거부), `scripts/preflight.py`, `config/app.paper.toml`(connection_approved=false).
+- 시험: `test_t015_preflight.py` 18건(구현 전 수집 오류 확인). 돌연변이 6종 중 2종 미검출 → 시험 보강 후 6종 검출. `.venv\Scripts\python -m pytest -q` → 718 passed. 커밋 `feat(T-015)` (브랜치 feat/T-015-preflight).
+- 권한: `.claude/settings.local.json`(git 제외) — PowerShell·Edit·Write 허용, push·reset·rebase·merge·clean·pip install·.env 읽기/수정 차단. Remove-Item 차단 줄은 미반영(설정 파일 수정은 매번 확인 필요).
+- 미실행: 실제 키움 모의 접속(PV-06·PV-11). 사용자: `.env.paper`에 `TRADE_MODE=PAPER` 추가, `connection_approved = true`.
+- 다음 세션 첫 행동: 사용자 설정 확인 → `scripts/preflight.py` 실행 → 결과를 kiwoom-kr K-U8·PV-06·PV-11에 기록.

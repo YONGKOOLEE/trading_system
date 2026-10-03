@@ -1,14 +1,15 @@
 # 세션 인계 (짧게 유지 — 60줄 이내, 작업이 끝날 때마다 덮어쓴다)
 
-- 갱신: 2026-10-03 / DP-1~26 확정(A-031), CP-019 반영(A-033: 03 v0.6·04 v0.6·05 v0.5), PAPER 한도·시장 설정(A-034), `.env.paper` 키 4개 확인 / 다음: **K-U1 확인 → T-015 승인 여부**
+- 갱신: 2026-10-03 / T-015 승인(A-035), 시작 점검 구현·오프라인 시험 완료 / 다음: **사용자 스위치 2개 → `scripts/preflight.py` 실제 실행**
 
 ## 현재 상태
-- 6단계 구현. 완료: T-000~T-014, T-020, T-021 (T-014·T-021은 네트워크 없이 합성 응답, T-020은 fake 브로커 종단).
-- 테스트 `.venv\Scripts\python -m pytest -q` → 700 passed (약 2분).
-- 브랜치(로컬만, push·main 병합 없음): … → feat/T-013-telegram → fix/review-bundle-b → feat/T-014-kiwoom-adapter
-  → feat/T-021-kiwoom-feed → feat/T-020-app → **fix/dp-5-daily-bar-cutoff (최신)**. 다음 작업은 최신 브랜치에서 분기.
+- 6단계 구현. 완료: T-000~T-014, T-020, T-021. T-015는 구현·오프라인 시험 완료, 실제 모의 접속(PV-06·PV-11) 대기.
+- 테스트 `.venv\Scripts\python -m pytest -q` → 718 passed (약 2분).
+- 브랜치(로컬만, push·main 병합 없음): … → feat/T-020-app → fix/dp-5-daily-bar-cutoff → **feat/T-015-preflight (최신)**.
+- 실행 전 사용자 할 일: `.env.paper`에 `TRADE_MODE=PAPER` 줄 추가, `config/app.paper.toml` `connection_approved = true`.
+  실행: `$env:TRADE_MODE='PAPER'; .venv\Scripts\python scripts\preflight.py` → 결과 `var/paper/preflight/*.json`.
 - 승인본: 업무정의서 v0.6, 00 v0.4, 01 v0.5, 02 v0.7 (A-029), 03 v0.6, 04 v0.6, 05 v0.5 (A-033). 무인 진행 권한 A-030.
-- PAPER 준비: `.env.paper` 있음(키 4개 형식 정상, 값 미열람), `config/limits.paper.toml`·`market.paper.toml` 있음(A-034, 비용은 DP-27 임시값). 없음: `.env`(TRADE_MODE), `app.paper.toml`, 달력, 호가 표.
+- PAPER 준비: `.env.paper`(키 4개, TRADE_MODE 줄 없음), `config/limits.paper.toml`·`market.paper.toml`(A-034, 비용 DP-27 임시값), `app.paper.toml`(종목·전략 없음, SNTP 주소 미확인). 없음: 달력, 호가 표.
 - 실전 주문 코드·LIVE: 승인 없음. PAPER 접속: 사용자가 `config/app.paper.toml [paper] connection_approved = true`로 직접 켜야 함.
 
 ## 세션 시작 시 읽을 것 (이것만)
@@ -32,7 +33,7 @@
 
 ## 사용자에게 남은 결정·확인
 - DP-27 수수료·매도 세율 실제 값, 텔레그램 연결 보완(사용자 "나중에")
-- T-015 키움 모의 접속 승인(외부 연결, D-083), `.env.paper` 작성(에이전트는 읽지 않음), K-U1 IP·단말기 요건
+- K-U1 단말기 요건(IP 등록은 완료 보고), 노출된 모의 키 재발급 여부
 - 실제 설정값: limits·market·app·calendar(휴장일 X-U3)·ticks(X-U1) — 저장소에 기본값 없음
 
 ## 작업 방식 (토큰 절약)
