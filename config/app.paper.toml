@@ -9,6 +9,11 @@ sntp_servers = ["time.kriss.re.kr:123", "time.bora.net:123"]
 
 # 키움 모의 접속 스위치. 승인 A-035. **사용자가 직접 true로 바꾼다** (에이전트는 바꾸지 않는다).
 [paper]
-connection_approved = false
+connection_approved = true
 
-# 종목·전략은 T-016(PAPER-0)에서 정한다. 비어 있으면 시작 점검은 005930으로 시세 조회만 한다.
+# PAPER-0 종목: 사용자 결정 A-037 (삼성전자 1종목). 전략은 T-016에서 등록·승인 후 추가한다.
+[[instruments]]
+code = "005930"
+kind = "STOCK"
+leverage = "1"
+lot_size = "1"

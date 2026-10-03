@@ -2,6 +2,8 @@
 
 - 등록 검증: 명세 누락, 형식, 능력 미지원, 규칙 우선순위 모호, 전략 한도 > 계좌 한도 → 거부 (E-8~E-10, V-85).
   능력 지원 기준: BACKTEST 대상은 "지원"·"검증 중", PAPER·LIVE 대상은 "지원"만 (결정 대기열 DP-1).
+  예외(DP-24 해법 a, A-037): PAPER-0 검증 전략은 사용자 승인 A-ID가 있으면 PAPER 대상에서 "검증 중"을 허용한다.
+  범위 강제: M1 한정, 고정 수량(S-4), 종목 목록(U-A), 시장가 능력만(PAPER0_CAPABILITIES), 전략 L7 필수.
 - 상태 전이는 00 §2.11 표만 허용하고 **승인 A-ID**가 있어야 한다 (INV-13). 시스템은 상태를 스스로 바꾸지 않는다.
 - 초안 → 백테스트 통과: 이 시스템 백테스트 실행 기록(증거)이 있어야 함 (A-029).
 - PAPER 이후 → 중지: K9 정지 발동(사유별 변형). 중지 → 이전 상태: K9 재개. 폐기: K9(사용자 판단) 유지.
@@ -37,6 +39,8 @@ _SIGNAL_STATES = {
     Mode.LIVE: frozenset({StrategyState.LIVE}),
 }
 _RISK_UP = (RequestType.ENTRY, RequestType.INCREASE)
+# PAPER-0 검증 전략이 쓸 수 있는 능력: 정해진 시각 판정·일봉·시장가·국내 상장주식 (04 §4.1 "1주 단위 시장가")
+PAPER0_CAPABILITIES = frozenset({"CAP-TRG-01", "CAP-DAT-01", "CAP-ORD-01", "CAP-INS-01"})
 
 
 @dataclass(frozen=True)
@@ -46,10 +50,37 @@ class RegistrationResult:
     reg_id: str | None = None
 
 
-def validate_spec(spec: StrategySpec, caps: CapabilityTable, account_limits: AccountLimits | None,
-                  target_mode: Mode) -> list[str]:
-    """등록 명세 검증 (00 §2.4·§2.13). 문제 목록을 돌려준다(없으면 통과)."""
+def _paper0_problems(spec: StrategySpec, target_mode: Mode, approval: str) -> list[str]:
+    """PAPER-0 검증 전략 예외의 범위 (DP-24 a). 하나라도 어긋나면 예외를 쓰지 않고 거부한다."""
     p: list[str] = []
+    if target_mode is not Mode.PAPER:
+        p.append(f"PAPER-0 검증 승인은 PAPER 대상에만 쓴다 ({target_mode.value} 대상 불가)")
+    if not _APPROVAL.fullmatch(approval or ""):
+        p.append("PAPER-0 검증 승인: 사용자 승인 A-ID(A-숫자)가 필요하다")
+    if tuple(spec.markets) != ("M1",):
+        p.append("PAPER-0 검증 전략: markets는 M1만")
+    if spec.sizing != "S-4":
+        p.append("PAPER-0 검증 전략: sizing은 고정 수량 S-4만 (04 §4.1 1주 단위)")
+    if spec.universe_method != "U-A" or not spec.universe:
+        p.append("PAPER-0 검증 전략: universe_method는 종목 목록 U-A만")
+    extra = sorted(set(spec.capabilities) - PAPER0_CAPABILITIES)
+    if extra:
+        p.append(f"PAPER-0 검증 전략: 허용되지 않는 능력 {', '.join(extra)} (시장가 능력만)")
+    if spec.limits.l7_max_order_amount is None:
+        p.append("PAPER-0 검증 전략: limits.l7_max_order_amount(1회 주문 금액 상한) 필수")
+    return p
+
+
+def validate_spec(spec: StrategySpec, caps: CapabilityTable, account_limits: AccountLimits | None,
+                  target_mode: Mode, verification_approval: str | None = None) -> list[str]:
+    """등록 명세 검증 (00 §2.4·§2.13). 문제 목록을 돌려준다(없으면 통과).
+
+    verification_approval: PAPER-0 검증 전략 승인 A-ID (DP-24 a). 주면 범위 검사를 통과해야 하고, 통과하면
+    PAPER 대상에서 "검증 중" 능력을 허용한다."""
+    p: list[str] = []
+    paper0 = verification_approval is not None
+    if paper0:
+        p.extend(_paper0_problems(spec, target_mode, verification_approval or ""))
     if not _ID.fullmatch(spec.strategy_id or ""):
         p.append("strategy_id: 영문 소문자·숫자·하이픈")
     if not isinstance(spec.version, int) or isinstance(spec.version, bool) or spec.version < 1:
@@ -71,7 +102,8 @@ def validate_spec(spec: StrategySpec, caps: CapabilityTable, account_limits: Acc
 
     if not spec.capabilities:
         p.append("capabilities: 필요 능력 누락")
-    allowed = {"지원", "검증 중"} if target_mode is Mode.BACKTEST else {"지원"}
+    allowed = {"지원", "검증 중"} if target_mode is Mode.BACKTEST or (paper0 and target_mode is Mode.PAPER) \
+        else {"지원"}
     for cap in spec.capabilities:
         if cap not in caps:
             p.append(f"{cap}: 정의되지 않은 능력")
@@ -155,9 +187,10 @@ class StrategyRegistry:
         self._halts = halts
 
     def register(self, spec: StrategySpec, params: dict[str, object], caps: CapabilityTable,
-                 account_limits: AccountLimits | None, target_mode: Mode | None = None) -> RegistrationResult:
+                 account_limits: AccountLimits | None, target_mode: Mode | None = None,
+                 verification_approval: str | None = None) -> RegistrationResult:
         target = target_mode or self._repo.mode
-        problems = validate_spec(spec, caps, account_limits, target)
+        problems = validate_spec(spec, caps, account_limits, target, verification_approval)
         parsed: dict[str, object] = {}
         if not problems:
             try:
@@ -174,7 +207,9 @@ class StrategyRegistry:
             now = self._clock.now()
             reg_id = self._repo.insert_strategy_registration({
                 "strategy_id": spec.strategy_id, "version": spec.version, "spec_hash": spec.spec_hash(),
-                "spec_json": json.dumps({"limits": _limits_json(spec.limits), "markets": list(spec.markets)},
+                "spec_json": json.dumps({"limits": _limits_json(spec.limits), "markets": list(spec.markets),
+                                         **({"verification_approval": verification_approval}
+                                            if verification_approval is not None else {})},
                                         ensure_ascii=False),
                 "params_hash": params_hash(parsed) if parsed else None,
                 "params_json": json.dumps({k: str(v) for k, v in parsed.items()}, ensure_ascii=False) if parsed else None,
@@ -185,7 +220,8 @@ class StrategyRegistry:
                 self._repo.upsert_strategy_state(spec.strategy_id, spec.version, self._market,
                                                  StrategyState.DRAFT.value, None, None, spec.spec_hash(), now)
             self._repo.audit(now, "STRATEGY_REGISTRATION", "registry", reg_id, {
-                "strategy": spec.owner, "result": "REJECTED" if problems else "PASSED", "problems": problems})
+                "strategy": spec.owner, "result": "REJECTED" if problems else "PASSED", "problems": problems,
+                "verification_approval": verification_approval})
         return RegistrationResult(not problems, tuple(problems), reg_id)
 
     # --- 상태 전이 ----------------------------------------------------------------------
