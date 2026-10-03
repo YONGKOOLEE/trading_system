@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -21,11 +23,22 @@ LOOP_DELAY_LIMIT = 5.0      # 초
 CLOCK_JUMP_LIMIT = 2.0      # 벽시계와 단조 시계 차이 (초)
 
 
-def write_heartbeat(path: Path, now: datetime) -> None:
+HEARTBEAT_RETRIES = 3       # Windows: watchdog·preflight가 읽는 순간 교체가 PermissionError로 실패할 수 있다 (RV-06)
+
+
+def write_heartbeat(path: Path, now: datetime, *, retries: int = HEARTBEAT_RETRIES,
+                    sleep: Callable[[float], None] = time.sleep) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(now.astimezone(UTC).isoformat(), encoding="utf-8")
-    tmp.replace(path)  # 원자적 교체: watchdog가 반쯤 쓴 파일을 읽지 않게
+    for i in range(retries):
+        try:
+            tmp.replace(path)  # 원자적 교체: watchdog가 반쯤 쓴 파일을 읽지 않게
+            return
+        except PermissionError:
+            if i == retries - 1:
+                raise
+            sleep(0.05)
 
 
 @dataclass(frozen=True)
@@ -51,7 +64,13 @@ def watchdog_check(path: Path, now: datetime, stale: timedelta = HEARTBEAT_STALE
 
 
 class LoopMonitor:
-    """1초 타이머마다 tick(단조 시각, 벽시각)을 부른다. 지연·점프를 감지하면 K8 + 알림 (V-61)."""
+    """1초 타이머마다 tick(단조 시각, 벽시각)을 부른다. 지연·점프를 감지하면 K8 + 알림 (V-61).
+
+    RV-05: 단조 시각과 벽시각은 **같은 순간**에 채취해 넘긴다. 감시 스레드(app/supervisor.py)가 부르며,
+    `waited`(타이머를 건 뒤 실제로 깨어나기까지 걸린 초)를 주면 루프 지연을 그 값으로 판정한다 — 감시 자신의
+    작업 시간(SNTP 조회 등)이나 판정·실행 스레드의 작업 시간은 지연이 아니다. 지연은 프로세스 전체가 멈춘 경우
+    (절전·일시 정지)만 뜻한다 (D-064). 판정·실행 스레드의 멈춤은 감시 스레드가 따로 알림한다.
+    """
 
     def __init__(self, halts: HaltControl | None, alerts: AlertSink | None) -> None:
         self._halts = halts
@@ -59,15 +78,16 @@ class LoopMonitor:
         self._last: tuple[float, datetime] | None = None
         self.events: list[str] = []
 
-    def tick(self, mono: float, wall: datetime) -> str | None:
+    def tick(self, mono: float, wall: datetime, waited: float | None = None) -> str | None:
         prev, self._last = self._last, (mono, wall)
         if prev is None:
             return None
         d_mono = mono - prev[0]
         d_wall = (wall - prev[1]).total_seconds()
+        delay = d_mono if waited is None else waited
         reason = None
-        if d_mono > LOOP_DELAY_LIMIT:
-            reason = f"루프 지연 {d_mono:.1f}초 (기준 {LOOP_DELAY_LIMIT}초)"
+        if delay > LOOP_DELAY_LIMIT:
+            reason = f"루프 지연 {delay:.1f}초 (기준 {LOOP_DELAY_LIMIT}초)"
         elif abs(d_wall - d_mono) > CLOCK_JUMP_LIMIT:
             reason = f"시계 점프 {d_wall - d_mono:+.1f}초 (절전·일시 정지 의심)"
         if reason is None:

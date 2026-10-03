@@ -15,8 +15,8 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 
-from trading_system.domain.clock import last_kst_time_at_or_before, to_iso
-from trading_system.domain.market import DailyRisk
+from trading_system.domain.clock import Clock, from_iso, last_kst_time_at_or_before, to_iso
+from trading_system.domain.market import CashView, CostRates, DailyRisk, estimate_cost
 from trading_system.domain.sinks import AlertSink
 from trading_system.storage.repository import Repository
 
@@ -70,14 +70,43 @@ class AlertWatcher:
         return fired
 
 
-class DailyRiskTracker:
-    """게이트 입력(AccountFacts.daily_risk)의 실운영 구현. 현금은 공급자(브로커 조회·내부 계산)가 준다."""
+def same_day_buy_cash(repo: Repository, account: str, now: datetime, rates: CostRates,
+                      since: datetime | None = None) -> Decimal:
+    """오늘(거래일) 내부 기록 매수 체결 금액 + 추정 비용 (RV-23). since가 있으면 그 시각 이후 체결만.
 
-    def __init__(self, repo: Repository, price_of: Callable[[str], Decimal | None]) -> None:
+    RV-23, PAPER-0에서 entr·d2_entra 의미 실측 후 재결정: 키움 kt00001 entr(예수금)가 당일 체결을 반영하는지(T+2)
+    미확인이라, 반영 여부를 모르는 당일 매수 현금 유출을 보수적으로 따로 계산한다. 체결 시각은 통보 시각(없으면 수신 시각).
+    """
+    rows = repo.select(
+        "SELECT f.quantity, f.price, f.at FROM fill f JOIN broker_order b ON f.order_key=b.order_key "
+        "WHERE b.account=? AND b.side='BUY' AND b.trade_date=?", (account, repo.trade_date_of(now)))
+    total = Decimal("0")
+    for r in rows:
+        if since is not None and from_iso(r["at"]) <= since:
+            continue
+        amount = Decimal(r["quantity"]) * Decimal(r["price"])
+        total += amount + estimate_cost(amount, False, rates)
+    return total
+
+
+class DailyRiskTracker:
+    """게이트 입력(AccountFacts.daily_risk)의 실운영 구현. 현금은 공급자(브로커 조회·내부 계산)가 준다.
+
+    clock·cost_rates를 주면(실운영 조립) RV-23 보정을 한다: 현금 조회 시각을 기록하고, 일일 손익의 현금은
+    "조회 예수금 − 당일 매수 체결(비용 포함)"으로 본다. entr가 당일 매수를 이미 반영했다면 이중 차감이 되어 손실이
+    크게 보인다 — 손실을 숨기지 않는 쪽(보수)을 택했다. 당일 매도 대금은 더하지 않는다(반영돼 있으면 이익을 부풀림).
+    RV-23, PAPER-0에서 entr·d2_entra 의미 실측 후 재결정.
+    """
+
+    def __init__(self, repo: Repository, price_of: Callable[[str], Decimal | None], *,
+                 clock: Clock | None = None, cost_rates: CostRates | None = None) -> None:
         self._repo = repo
         self._price_of = price_of
+        self._clock = clock
+        self._rates = cost_rates
         self._base: dict[str, Decimal] = {}
         self._cash: dict[str, Decimal] = {}
+        self._cash_at: dict[str, datetime] = {}
 
     def start_day(self, account: str, cash: Decimal) -> Decimal | None:
         """일일 기준 시각에 호출. 기준 금액을 고정한다. 평가 불능이면 None(그날 위험 확대 거부)."""
@@ -91,6 +120,18 @@ class DailyRiskTracker:
 
     def update_cash(self, account: str, cash: Decimal) -> None:
         self._cash[account] = cash
+        if self._clock is not None:
+            self._cash_at[account] = self._clock.now()
+
+    def cash_at(self, account: str) -> datetime | None:
+        """마지막 현금 조회 반영 시각 (RV-23 신선도). 시계가 없으면 None."""
+        return self._cash_at.get(account)
+
+    def _pnl_cash(self, account: str) -> Decimal:
+        cash = self._cash[account]
+        if self._clock is None or self._rates is None:
+            return cash
+        return cash - same_day_buy_cash(self._repo, account, self._clock.now(), self._rates)
 
     def _positions_value(self, account: str) -> Decimal | None:
         total = Decimal("0")
@@ -110,4 +151,38 @@ class DailyRiskTracker:
         value = self._positions_value(account)
         if value is None:
             return DailyRisk(base, Decimal("0"), Decimal("0"), Decimal("0"), evaluable=False)
-        return DailyRisk(base, Decimal("0"), self._cash[account] + value - base, Decimal("0"))
+        return DailyRisk(base, Decimal("0"), self._pnl_cash(account) + value - base, Decimal("0"))
+
+
+class ConservativeCashFacts:
+    """게이트 입력 AccountFacts 감싸기 (RV-23). G8이 쓰는 현금을 보수적으로 준다.
+
+    - 신선도: 마지막 현금 조회가 max_age보다 오래됐거나 기록이 없으면 None(모름) → G8이 위험 확대를 거부한다.
+      위험 축소(감액·청산·취소)는 G8을 거치지 않아 영향이 없다.
+    - 예수금: 조회 값 − 당일 매수 체결 전액(비용 포함). entr가 T+2로 당일 매수를 반영하지 않을 수 있어서.
+    - 주문가능현금: 조회 값 − 조회 시각 이후 매수 체결(비용 포함). 조회 시점까지는 브로커가 반영했다고 본다.
+    max_age는 판정 방식 값(임시): 조립 지점이 대조 주기 × 3으로 정한다. RV-23, PAPER-0에서 entr·d2_entra 의미 실측 후 재결정.
+    """
+
+    def __init__(self, inner: object, tracker: DailyRiskTracker, clock: Clock, max_age: timedelta) -> None:
+        if tracker._rates is None:  # noqa: SLF001
+            raise ValueError("ConservativeCashFacts에는 비용 요율이 있는 추적기가 필요")
+        self._inner = inner
+        self._tracker = tracker
+        self._clock = clock
+        self._max_age = max_age
+
+    def daily_risk(self, account: str) -> DailyRisk | None:
+        return self._inner.daily_risk(account)  # type: ignore[attr-defined, no-any-return]
+
+    def cash(self, account: str) -> CashView | None:
+        view = self._inner.cash(account)  # type: ignore[attr-defined]
+        at = self._tracker.cash_at(account)
+        now = self._clock.now()
+        if view is None or at is None or now - at > self._max_age:
+            return None
+        rates = self._tracker._rates  # noqa: SLF001
+        assert rates is not None
+        return CashView(view.deposit - same_day_buy_cash(self._tracker._repo, account, now, rates),  # noqa: SLF001
+                        view.broker_orderable - same_day_buy_cash(self._tracker._repo, account, now, rates,  # noqa: SLF001
+                                                                  since=at))

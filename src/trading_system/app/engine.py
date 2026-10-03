@@ -1,14 +1,16 @@
 """판정·실행 엔진 (T-020, 03 D-038 v0.5·D-092·§3·§6.6·§6.7).
 
 판정·실행 스레드 하나가 `tick()`을 주기적으로 부른다. 한 tick 안에서 순서대로:
-1. 운영 명령(명령 테이블 = 요청 큐, KILL 먼저) — 1초 안 처리 (loop_seconds ≤ 1 권장)
+1. 운영 명령(명령 테이블 = 요청 큐, KILL 먼저) — 1초 안 처리 (loop_seconds ≤ 1 권장). KILL의 K1 행은 감시 스레드가
+   먼저 기록한다(fast_kill, RV-22) — 이 스레드가 주문 응답을 기다리는 동안에도 게이트에 보이게
 2. 실시간 통보 반영 (어댑터 큐 → 실행기)
 3. 결과 불명 해소 한 단계 (의도별 다음 조회 시각이 지난 것만, D-092)
 4. 일일 기준 시각: 기준 금액 고정·일일 보고, 일일 손실 L4 → K2
-5. 주기 대조 (장중 주기·실시간 재접속 후 요청)
+5. 대조 (장중 주기·장 마감 후 1회·요청 시 — RV-25)
 6. 예정 판정 (달력상 거래일, 예정 시각 + 유예 안, K8 등 전역 정지 중이면 건너뜀) → 게이트 → 실행기
 7. 실행 정책: CAP-ORD-03을 선언한 전략의 미체결 주문이 정해진 시간을 넘으면 취소 요청(게이트 경유)
-입출력 스레드(실시간 수신·텔레그램·시세 조회·시계 점검)는 큐·저장소에만 쓰고 주문하지 않는다.
+입출력·감시 스레드(실시간 수신·텔레그램·시세 조회·감시)는 큐·저장소에만 쓰고 주문하지 않는다.
+단계·훅 오류는 루프 밖으로 내보내지 않는다(기록 실패 시 로컬 파일, RV-06). last_progress = 감시 스레드의 멈춤 판정 근거.
 
 시작(start): 실행기 재시작 정리(recover_on_start) → K8 발동 → 예수금 조회 → 복구 판정(대조 포함).
 K8 해제는 사용자 재개(운영 명령)로만 한다 (01 §2.11, CLAUDE.md §8-9).
@@ -16,13 +18,16 @@ K8 해제는 사용자 재개(운영 명령)로만 한다 (01 §2.11, CLAUDE.md 
 
 from __future__ import annotations
 
+import json
 import queue
 import threading
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+from pathlib import Path
+from time import monotonic
 
 from trading_system.broker.base import BrokerAdapter, BrokerQueryError
 from trading_system.broker.ratelimit import Priority, call_priority
@@ -43,6 +48,7 @@ from trading_system.monitoring.watchers import AlertWatcher, DailyRiskTracker
 from trading_system.ops.commands import OpsProcessor
 from trading_system.reconciliation.reconciler import Reconciler, RecoveryChecker, RecoveryReport
 from trading_system.reporting.daily import DailyReporter
+from trading_system.storage.oplog import log_exception
 from trading_system.storage.repository import Repository
 from trading_system.strategy.base import Strategy
 
@@ -115,10 +121,22 @@ class Engine:
     _reconcile_requested: threading.Event = field(default_factory=threading.Event)
     errors: list[str] = field(default_factory=list)
     _calls: "queue.Queue[Callable[[], object]]" = field(default_factory=queue.Queue)
+    fallback_file: Path | None = None            # 저장소에 못 쓸 때의 로컬 기록 (RV-06)
+    log_dir: Path | None = None                  # 운영 로그(예외 traceback, storage/oplog) — var/<mode>/logs
+    start_unknown: int = 0                       # 시작 시 결과 불명 의도 수 (시작 출력용)
+    mono: Callable[[], float] = monotonic
+    last_progress: float = 0.0                   # 판정·실행 스레드 마지막 진행(단조 시각) — 감시 스레드가 읽음
+    _fast_killed: set[str] = field(default_factory=set)
+    _closed_reconciled: date | None = None       # 장 마감 후 1회 대조를 한 거래일 (RV-25)
+    _report_at: datetime | None = None           # 마지막으로 지난 보고 시각 (RV-21)
+
+    def __post_init__(self) -> None:
+        self.last_progress = self.mono()
 
     # --- 시작 -------------------------------------------------------------------------
     def start(self) -> RecoveryReport:
         unknown = self.executor.recover_on_start()
+        self.start_unknown = len(unknown)
         self.halts.on_start()
         self._refresh_cash()
         rep = self.recovery.check(self.account)
@@ -140,12 +158,52 @@ class Engine:
                 return
             fn()
 
+    def fast_kill(self) -> int:
+        """감시 스레드가 부른다 (RV-22, 03 D-038): 대기 중인 KILL 명령의 K1 정지 행을 바로 기록한다.
+
+        판정·실행 스레드가 주문 응답·호출 제한을 기다리는 동안에도 K1이 게이트에 보이게 한다. 이 스레드에서는
+        HaltManager.activate를 부르지 않는다 — K1 발동은 매수 미체결 취소(주문)를 내기 때문이다. 취소와 명령 완료
+        기록은 판정·실행 스레드의 운영 명령 처리가 하며, 그때 activate는 이미 있는 K1을 찾아 취소만 한다.
+        안전성: 저장소는 연결 하나를 RLock으로 직렬화하고(tx 전체가 잠금 안, BEGIN IMMEDIATE), 브로커 전송은
+        트랜잭션 밖에서만 하므로(INV-03) 여기서 잠금을 기다리는 시간은 다른 스레드의 짧은 저장 단위 하나뿐이다.
+        같은 범위(계좌, 종목·전략 없음)의 미해제 K1이 있으면 새로 만들지 않는다(HaltManager._find와 같은 기준).
+        """
+        n = 0
+        for cmd in self.repo.pending_commands():
+            cid = cmd["command_id"]
+            if cmd["command"] != "KILL" or cid in self._fast_killed:
+                continue
+            self._fast_killed.add(cid)
+            try:
+                args = json.loads(cmd["args"])
+            except ValueError:
+                continue   # 형식 오류는 운영 명령 처리가 거부로 기록
+            if not isinstance(args, dict) or cmd["channel"] not in ("LOCAL", "REMOTE"):
+                continue
+            account, actor = args.get("account"), f"{cmd['channel']}:{cmd['actor']}"
+            reason = args.get("reason") or "운영자 킬 스위치"
+            halt_id = None
+            with self.repo.tx():
+                now = self.clock.now()
+                if not any((r["halt_type"], r["account"], r["scope_instrument"], r["scope_owner"])
+                           == (HaltType.K1.value, account, None, None) for r in self.repo.halt_rows(None)):
+                    halt_id = self.repo.insert_halt(HaltType.K1.value, account, actor, reason, now)
+                    self.repo.audit(now, "HALT_ACTIVATED", actor, halt_id, {
+                        "type": HaltType.K1.value, "account": account, "instrument": None, "owner": None,
+                        "variant": None, "reason": reason, "path": "supervisor"})
+            if halt_id is not None:
+                n += 1
+                self.alerts.alert("EMERGENCY", f"정지 K1 발동: {reason} (매수 미체결 취소는 판정·실행 스레드가 처리)",
+                                  halt_id)
+        return n
+
     def request_reconcile(self) -> None:
         """다른 스레드(실시간 재접속 등)가 부른다. 다음 tick에서 대조."""
         self._reconcile_requested.set()
 
     # --- 한 주기 ---------------------------------------------------------------------
     def tick(self) -> None:
+        self.last_progress = self.mono()
         now = self.clock.now()
         steps: list[tuple[str, Callable[[], object]]] = [
             ("calls", self._drain_calls), ("ops", self._ops), ("events", self.executor.process_events),
@@ -153,17 +211,60 @@ class Engine:
             ("reconcile", lambda: self._reconcile_if_due(now)), ("evaluate", lambda: self._evaluate_due(now)),
             ("exec_policy", lambda: self._exec_policy(now))]
         for name, step in steps:
+            self.last_progress = self.mono()
             try:
                 step()
             except ExecutionBlocked:
                 pass  # 실행기 차단(K7 등)은 이미 정지·알림됨
             except Exception as exc:  # noqa: BLE001 — 한 단계 오류로 루프를 멈추지 않는다(감시는 계속)
-                self.errors.append(f"{name}: {type(exc).__name__}: {exc} | {traceback.format_exc(limit=5)}")
-                del self.errors[:-50]
-                self.alerts.alert("EMERGENCY", f"엔진 단계 오류 {name}: {type(exc).__name__} — K8, 대조 후 재개", None)
-                self.halts.activate(HaltType.K8, "engine", f"엔진 단계 오류 {name}: {type(exc).__name__}", None)
+                self._step_failed(name, exc)
         for hook in self.on_tick:
-            hook(now)
+            try:
+                hook(now)
+            except Exception as exc:  # noqa: BLE001 — 훅 실패는 기록·알림만 (RV-06)
+                log_exception(self.log_dir, "engine.hook", exc)
+                self._record_error(f"hook: {type(exc).__name__}: {exc} | {traceback.format_exc(limit=5)}")
+                kind = type(exc).__name__
+                self._best_effort(lambda: self.alerts.alert("WARNING", f"엔진 훅 오류: {kind}", None), "알림")
+        self.flush_alerts()
+        self.last_progress = self.mono()
+
+    def flush_alerts(self) -> None:
+        """알림 중복 억제 요약 기록 (AuditAlertSink.flush가 있으면). 실패는 삼킨다."""
+        flush = getattr(self.alerts, "flush", None)
+        if flush is not None:
+            try:
+                flush()
+            except Exception as exc:  # noqa: BLE001
+                log_exception(self.log_dir, "alerts.flush", exc)
+
+    def _record_error(self, msg: str) -> None:
+        self.errors.append(msg)
+        del self.errors[:-50]
+
+    def _step_failed(self, name: str, exc: Exception) -> None:
+        """단계 오류 → 알림 + K8. 기록이 실패해도(StorageFailure 등) 예외를 루프 밖으로 내보내지 않는다 (RV-06).
+        K8 기록 실패는 로컬 대체 파일에 남긴다 (실행기는 저장 실패 시 K7로 이미 막힘)."""
+        kind = type(exc).__name__
+        detail = f"{name}: {kind}: {exc} | {traceback.format_exc(limit=5)}"
+        log_exception(self.log_dir, f"engine.step:{name}", exc)
+        self._record_error(detail)
+        self._best_effort(lambda: self.alerts.alert(
+            "EMERGENCY", f"엔진 단계 오류 {name}: {kind} — K8, 대조 후 재개", None), "알림", detail)
+        self._best_effort(lambda: self.halts.activate(
+            HaltType.K8, "engine", f"엔진 단계 오류 {name}: {kind}", None), "K8 기록", detail)
+
+    def _best_effort(self, fn: Callable[[], object], what: str, context: str = "") -> bool:
+        try:
+            fn()
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self._fallback(f"{what} 실패: {type(exc).__name__}: {exc} / {context}")
+            return False
+
+    def _fallback(self, text: str) -> None:
+        from .supervisor import write_fallback
+        write_fallback(self.fallback_file, text)
 
     def _ops(self) -> None:
         self.ops.process_pending()
@@ -196,9 +297,22 @@ class Engine:
                 self.alerts.alert("WARNING", "일일 기준 금액을 정할 수 없음(예수금·보유 시세 없음) — 위험 확대 거부", None)
             if not first:
                 self.reporter.generate(self.account, now, lim.daily_reference_time, lim.version_hash())
+        self._report_if_due(now, lim)
         self.halts.check_daily_loss(self.account, self.account_state.daily_risk(self.account), lim.l4_daily_loss_ratio)
         if self.watcher is not None:
             self.watcher.scan(self.account, now)
+
+    def _report_if_due(self, now: datetime, lim: AccountLimits) -> None:
+        """일일 보고 시각(report_time, 예 16:00) 경과 시 그날 보고서 (RV-21). 시작 직후 이미 지난 시각은 건너뛴다.
+        기준 시각(08:30) 경계의 보고서는 그대로 둔다(같은 거래일의 다음 판, 저장소가 판 번호를 올림)."""
+        at = last_kst_time_at_or_before(now, lim.report_time)
+        if self._report_at is None:
+            self._report_at = at
+            return
+        if at <= self._report_at:
+            return
+        self._report_at = at
+        self.reporter.generate(self.account, now, lim.daily_reference_time, lim.version_hash(), current_day=True)
 
     # 대조 ---------------------------------------------------------------------------
     def _refresh_cash(self) -> None:
@@ -209,11 +323,22 @@ class Engine:
             self.alerts.alert("WARNING", f"예수금 조회 실패: {exc}", None)
 
     def _reconcile_if_due(self, now: datetime) -> None:
-        due = self._last_reconcile is None or now - self._last_reconcile >= self.reconcile_every
-        if not (due or self._reconcile_requested.is_set()):
+        """대조 주기 (01 "장중 주기 대조, 체결 통보 후, 장 마감 후 1회", RV-25): 주기 대조는 정규장 안에서만,
+        장 마감 뒤 한 번, 요청(재접속·체결 통보 후 등 request_reconcile)은 언제든."""
+        requested = self._reconcile_requested.is_set()
+        today = now.astimezone(KST).date()
+        s = self.store.session(today)
+        is_open = s is not None and s.is_open and s.regular_open is not None and s.regular_close is not None
+        in_session = is_open and s.regular_open <= now <= s.regular_close  # type: ignore[union-attr,operator]
+        after_close = is_open and now > s.regular_close  # type: ignore[union-attr,operator]
+        periodic = in_session and (self._last_reconcile is None or now - self._last_reconcile >= self.reconcile_every)
+        closing = after_close and self._closed_reconciled != today
+        if not (requested or periodic or closing):
             return
         self._reconcile_requested.clear()
         self._last_reconcile = now
+        if after_close:
+            self._closed_reconciled = today
         self._refresh_cash()
         self.reconciler.run(self.account, "PERIODIC")
 

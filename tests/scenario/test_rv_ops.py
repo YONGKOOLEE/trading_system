@@ -227,6 +227,20 @@ def test_preflight_refuses_while_engine_heartbeat_fresh(tmp_path: Path, no_netwo
     assert no_network == []
 
 
+def test_preflight_refuses_while_instance_lock_held(tmp_path: Path, no_network: list[str],
+                                                    capsys: pytest.CaptureFixture[str]) -> None:
+    """하트비트가 아직 없어도(시작 직후) 실행 잠금이 잡혀 있으면 거부 (RV-15)."""
+    from trading_system.app.instance_lock import acquire_instance_lock
+    root = make_root(tmp_path, env_lines=ENV_OK, approved=True)
+    lock = acquire_instance_lock(root / "var" / "paper")
+    try:
+        assert preflight_main(root, {"TRADE_MODE": "PAPER"}, clock=FixedClock(T0)) == 2
+    finally:
+        lock.release()
+    assert "실행 중" in capsys.readouterr().out
+    assert no_network == []
+
+
 def _run(root: Path, sim: Sim, clock: FixedClock, query) -> int:  # type: ignore[no-untyped-def]
     return preflight_main(root, {"TRADE_MODE": "PAPER"}, rest_url=sim.url, ws_url=sim.ws_url, clock=clock,
                           probe_code=CODE, per_tr_interval=0.0, sntp_query=query)

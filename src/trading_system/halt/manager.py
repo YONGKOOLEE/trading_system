@@ -42,6 +42,16 @@ REQUIRED_CONDITIONS: dict[HaltType, tuple[str, ...]] = {
 }
 
 
+# K5 연결 경로 (RV-02). K5 행 조건에 경로별 상태를 "link:<경로>"로 남긴다.
+# - broker_connected = 기록된 모든 경로가 마지막 보고에서 정상(ok). 끊긴 경로를 다른 경로의 성공으로 풀지 않는다.
+# - reconciled는 마지막 경로 복구 보고 이후의 대조여야 한다(재접속 전 대조는 끊긴 동안의 통보 누락을 못 본다).
+# - 조회 경로(rest): 대조기가 브로커 조회 3종 성공 시 보고한다(조회 성공 = 연결 증거).
+# - 실시간 경로(realtime): 실시간 수신 쪽이 재접속(ONLINE·RECONNECTED) 시 보고한다(app/main.py).
+K5_LINK_REST = "link:rest"
+K5_LINK_REALTIME = "link:realtime"
+_K5_LINK_OF_ACTOR = {"realtime": K5_LINK_REALTIME}   # 발동 주체 → 끊긴 경로 (그 밖은 조회 경로)
+
+
 class Channel:
     LOCAL = "LOCAL"
     REMOTE = "REMOTE"
@@ -70,6 +80,7 @@ class HaltManager:
     def activate(self, halt_type: HaltType, actor: str, reason: str, account: str | None = None, *,
                  instrument: str | None = None, owner: str | None = None, variant: str | None = None) -> str:
         """정지를 발동한다. 같은 유형·범위의 해제되지 않은 정지가 있으면 그 ID를 돌려준다."""
+        created = False
         with self._repo.tx():
             now = self._clock.now()
             existing = self._find(halt_type, account, instrument, owner)
@@ -82,15 +93,26 @@ class HaltManager:
                     self._repo.update_halt(halt_id, variant=variant)
                     self._repo.audit(now, "HALT_VARIANT", actor, halt_id, {
                         "type": halt_type.value, "from": existing.get("variant"), "to": variant, "reason": reason})
+                awaiting = existing["state"] == HaltState.AWAITING_RESUME.value
+                conds = {} if awaiting else json.loads(existing["conditions"] or "{}")
             else:
                 halt_id = self._repo.insert_halt(halt_type.value, account, actor, reason, now,
                                                  instrument=instrument, owner=owner, variant=variant)
+                created = True
+                conds = {}
                 self._repo.audit(now, "HALT_ACTIVATED", actor, halt_id, {
                     "type": halt_type.value, "account": account, "instrument": instrument, "owner": owner,
                     "variant": variant, "reason": reason})
                 level = "EMERGENCY" if halt_type in EMERGENCY else "WARNING"
                 self._alert(level, f"정지 {halt_type.value} 발동: {reason}", halt_id)
-        if halt_type in CANCELS_OPEN_BUYS:
+            if halt_type is HaltType.K5:   # 끊긴 연결 경로를 기록한다 (RV-02)
+                conds[_K5_LINK_OF_ACTOR.get(actor, K5_LINK_REST)] = {"ok": False, "at": now.isoformat(),
+                                                                      "evidence": reason}
+                self._repo.update_halt(halt_id, conditions=conds)
+        # 매수 미체결 취소는 정지 행이 새로 생길 때 한 번만 (RV-07). 정지 유지 중 재발동(매 tick L4 점검 등)이
+        # 취소를 새 멱등키로 다시 보내면 주문 변경 자동 재시도가 된다 (CLAUDE.md §8-7). 다른 정지에 막힌 취소의
+        # 재시도는 재개 경로(_retry_halt_cancels)로만 한다 (CP-018 R-10)
+        if created and halt_type in CANCELS_OPEN_BUYS:
             self._cancel_open_buys(halt_id, account, owner if halt_type is HaltType.K9 else None)
         return halt_id
 
@@ -152,6 +174,11 @@ class HaltManager:
             for row in rows:
                 conds = json.loads(row["conditions"])
                 conds[name] = {"ok": ok, "at": now.isoformat(), "evidence": evidence}
+                if halt_type is HaltType.K5 and name == "broker_connected":
+                    # 경로를 가리지 않는 연결 보고 = 모든 경로에 대한 보고 (RV-02 이전 계약 유지).
+                    # 운영 코드는 경로별(K5_LINK_REST·K5_LINK_REALTIME)로 보고한다
+                    for k in [k for k in conds if k.startswith("link:")]:
+                        conds[k] = {"ok": ok, "at": now.isoformat(), "evidence": evidence}
                 met = self._conditions_met(halt_type, row, conds)
                 state = row["state"]
                 if not met:
@@ -213,6 +240,8 @@ class HaltManager:
 
     def _missing(self, halt_type: HaltType, row: dict, conds: dict | None = None) -> list[str]:
         conds = json.loads(row["conditions"]) if conds is None else conds
+        if halt_type is HaltType.K5:
+            return self._k5_missing(conds)
         missing = [n for n in REQUIRED_CONDITIONS[halt_type] if not conds.get(n, {}).get("ok")]
         if halt_type is HaltType.K2:
             ref = self._reference_time_of(row["account"]) if row["account"] else None
@@ -224,6 +253,22 @@ class HaltManager:
             accounts = [row["account"]] if row["account"] else self._repo.accounts()
             if any(i.account in accounts for i in self._repo.intents_in_state(IntentState.UNKNOWN)):
                 missing.append("결과 불명 의도 남아 있음")
+        return missing
+
+    @staticmethod
+    def _k5_missing(conds: dict) -> list[str]:
+        """K5: 모든 기록된 연결 경로 정상 + 그 뒤의 대조 일치 (RV-02, 01 K5 "연결 복구 + 대조")."""
+        links = {k: v for k, v in conds.items() if k.startswith("link:")}
+        missing: list[str] = []
+        if links:
+            missing += [f"broker_connected({k})" for k, v in sorted(links.items()) if not v.get("ok")]
+        elif not conds.get("broker_connected", {}).get("ok"):
+            missing.append("broker_connected")   # 경로 기록이 없는 이전 행: 명시 보고만 인정
+        rec = conds.get("reconciled", {})
+        if not rec.get("ok"):
+            missing.append("reconciled")
+        elif links and from_iso(rec["at"]) < max(from_iso(v["at"]) for v in links.values()):
+            missing.append("reconciled(연결 복구 이후 대조 필요)")
         return missing
 
     # --- K3 사람 확정 (02 ST-01 "사람 확정") ---------------------------------------

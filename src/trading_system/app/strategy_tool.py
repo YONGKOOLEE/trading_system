@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import argparse
+import getpass
+import uuid
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -73,10 +75,24 @@ def strategy_main(argv: Sequence[str] | None = None, root: Path | None = None) -
         except ValueError as exc:
             print(f"전이 거부: {exc}")
             return 1
+        cid = _queue_k9_sync(repo, f"{ns.strategy_id}:{ns.version}")
         print(f"전이 완료: {ns.strategy_id} v{ns.version} → {ns.to_state} (승인 {ns.approval})")
+        print(f"  K9 동기화 운영 명령 {cid} — 실행 중인 엔진(또는 다음 시작)이 처리한다")
         return 0
     finally:
         repo.close()
+
+
+def _queue_k9_sync(repo: Repository, owner: str) -> str:
+    """K9 동기화를 엔진에 맡긴다 (RV-20). 이 도구는 브로커·게이트 없이 돌므로 K9 발동(매수 미체결 취소 포함)을 직접 하지
+    않는다. 엔진의 운영 명령 처리기가 저장소 상태를 읽어 K9를 발동·해제한다. 그 사이에도 게이트 G6가 STOPPED·RETIRED
+    전략의 위험 확대 신호를 거부한다(signal_rejection)."""
+    cid = f"local-{uuid.uuid4().hex}"
+    with repo.tx():
+        now = SystemClock().now()
+        repo.insert_command(cid, "LOCAL", getpass.getuser(), "STRATEGY_SYNC", {"owner": owner}, now)
+        repo.audit(now, "OPS_COMMAND_RECEIVED", "strategy-tool", cid, {"command": "STRATEGY_SYNC", "owner": owner})
+    return cid
 
 
 def _register(registry: StrategyRegistry, root: Path, mode: Mode) -> int:

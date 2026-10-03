@@ -29,8 +29,9 @@ from trading_system.gate.gate import Gate
 from trading_system.gate.ports import ClockHealth, GateInputs, GatePolicy
 from trading_system.halt.manager import HaltManager
 from trading_system.marketdata.store import MarketDataStore
-from trading_system.monitoring.watchers import AlertThresholds, AlertWatcher, DailyRiskTracker
+from trading_system.monitoring.watchers import AlertThresholds, AlertWatcher, ConservativeCashFacts, DailyRiskTracker
 from trading_system.ops.commands import OpsProcessor
+from trading_system.ops.reconcile import ReconcileResolver
 from trading_system.reconciliation.reconciler import Reconciler, RecoveryChecker
 from trading_system.reporting.daily import DailyReporter
 from trading_system.storage.alerts import AuditAlertSink
@@ -83,10 +84,21 @@ def build_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: BrokerAd
         q = store.quote(inst)
         return q.price if q is not None else None
 
-    tracker = DailyRiskTracker(repo, price_of)
+    quote_age = timedelta(seconds=gate_settings.quote_max_age_seconds)
+
+    def fresh_price_of(inst: str):  # type: ignore[no-untyped-def]
+        # 일일 손익(L4·K2)은 신선한 시세로만 (RV-18). 낡으면 평가 불능 → 게이트가 위험 확대 거부.
+        # 일일 보고서(장 마감 후)는 마지막 시세(price_of)를 그대로 쓴다
+        return store.fresh_price(inst, clock.now(), quote_age)
+
+    tracker = DailyRiskTracker(repo, fresh_price_of, clock=clock, cost_rates=gate_settings.cost_rates)  # RV-23 보정
     acct = AccountState(tracker)
+    # G8 현금: 조회 신선도 + 미반영 당일 매수 체결 보수 차감 (RV-23, PAPER-0에서 entr·d2_entra 의미 실측 후 재결정).
+    # 신선도 한도(임시): max(대조 주기 × 3, 10분). 현금은 대조 때마다 조회하므로 조회 실패가 이어지면 모름이 된다.
+    # 조회 이후 매수 체결은 따로 차감하므로 한도 안의 낡음은 외부 거래분만 남는다
+    gate_account = ConservativeCashFacts(acct, tracker, clock, max(reconcile_every * 3, timedelta(minutes=10)))
     registry = StrategyRegistry(repo, clock, None)
-    gate = Gate(repo, clock, GateInputs(settings, store, acct, registry, clock_health),
+    gate = Gate(repo, clock, GateInputs(settings, store, gate_account, registry, clock_health),
                 GatePolicy.from_settings(gate_settings))
     executor = Executor(repo, broker, clock, kill_file, alerts=alerts)
     halts = HaltManager(repo, gate, executor, clock, alerts=alerts,
@@ -95,10 +107,11 @@ def build_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: BrokerAd
     registry.attach_halts(halts)
     store.halts, store.alerts, store.account = halts, alerts, account
     resolver = UnknownResolver(repo, broker, executor, clock, wait=lambda s: None)
-    reconciler = Reconciler(repo, broker, clock, halts, alerts)
+    reconciler = Reconciler(repo, broker, clock, halts, alerts, drain_events=executor.process_events)  # RV-24
     recovery = RecoveryChecker(repo, reconciler, halts, clock_health.clock_ok)
-    ops = OpsProcessor(repo, gate, executor, halts, clock, reconciler=reconciler, resolver=resolver,
-                       kill_file=kill_file)
+    # RECONCILE_RESOLVE는 대조 불일치 해소기(resolve(item_id, method, actor))로 — 결과 불명 해소기가 아님 (RV-01)
+    ops = OpsProcessor(repo, gate, executor, halts, clock, reconciler=reconciler,
+                       resolver=ReconcileResolver(repo, executor, clock), kill_file=kill_file, registry=registry)
 
     loaded: list[LoadedStrategy] = []
     for si in strategies:

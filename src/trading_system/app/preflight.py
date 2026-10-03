@@ -33,6 +33,7 @@ from trading_system.config.modes import read_trade_mode
 from trading_system.domain.clock import KST, Clock, SystemClock
 from trading_system.domain.enums import Mode
 from trading_system.domain.market import InstrumentInfo, InstrumentKind
+from trading_system.app.instance_lock import instance_running
 from trading_system.marketdata.calendar import KrxCalendar
 from trading_system.marketdata.errors import MarketDataError
 from trading_system.marketdata.kiwoom_feed import KiwoomMarketFeed
@@ -357,6 +358,8 @@ def preflight_main(root: Path, environ: Mapping[str, str] | None = None, *, rest
                    per_tr_interval: float = 1.1,
                    sntp_query: Callable[[str, int], Decimal] | None = None) -> int:
     clock = clock or SystemClock()
+    if instance_running(root / "var" / "paper"):   # 시작 직후(하트비트 전)도 막는다 (RV-15)
+        return _refuse("PAPER 엔진이 실행 중(실행 잠금 보유) — 동시에 점검하지 않는다. 엔진 종료 후 다시 실행")
     alive = engine_alive(root / "var" / "paper" / "heartbeat", clock.now())
     if alive:
         return _refuse(alive)

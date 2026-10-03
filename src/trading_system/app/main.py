@@ -6,8 +6,11 @@
             BACKTEST는 fake 브로커로 엔진을 돌리는 연습 실행(운영 명령·정지 훈련용, 시세 없음 → 위험 확대 거부).
   backtest  일봉 CSV로 백테스트를 돌려 var/backtest/<실행ID>/에 DB·보고서를 남긴다.
 
-스레드 (03 D-038 v0.5): 판정·실행 = 이 프로세스의 주 스레드. 실시간 수신·시세 조회·텔레그램은 각자 스레드이며
-저장소 연결을 따로 쓰고, 정지 발동·대조 요청은 엔진에 맡긴다(call_soon). 주문은 판정·실행 스레드만 한다.
+스레드 (03 D-038 v0.5): 판정·실행 = 이 프로세스의 주 스레드. 감시(app/supervisor.py: KILL 즉시 반영·하트비트·
+루프 감시·SNTP·스레드 생존, RV-22)·실시간 수신·시세 조회(일봉 갱신 포함)·텔레그램은 각자 스레드이며 저장소는
+잠금으로 직렬화된 연결 하나를 같이 쓴다. 정지 발동·조건 보고·대조 요청은 엔진에 맡긴다(call_soon, QueuedHalts) —
+K1 행 기록만 감시 스레드가 직접(Engine.fast_kill). 주문은 판정·실행 스레드만 한다.
+단일 실행: var/<mode>/run.lock (RV-15). 치명 예외는 var/<mode>/logs/fatal.log에 남긴다 (RV-06).
 """
 
 from __future__ import annotations
@@ -18,8 +21,9 @@ import os
 import signal
 import threading
 import time
+import traceback
 from collections.abc import Sequence
-from datetime import date, datetime, time as dtime
+from datetime import date, time as dtime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -30,33 +34,64 @@ from trading_system.config.market_file import load_market_settings, parse_alert_
 from trading_system.config.modes import parse_trade_mode, read_trade_mode
 from trading_system.domain.clock import SystemClock
 from trading_system.domain.enums import HaltType, Mode
+from trading_system.halt.manager import K5_LINK_REALTIME
 from trading_system.marketdata.calendar import KrxCalendar
 from trading_system.marketdata.quality import RawDaily
 from trading_system.marketdata.store import MarketDataStore
 from trading_system.marketdata.ticks import load_ticks
-from trading_system.monitoring.liveness import LoopMonitor, write_heartbeat
 from trading_system.ops.cli import REPO_ROOT
+from trading_system.storage.oplog import log_exception
 from trading_system.storage.repository import Repository
 
 from .engine import Engine
+from .instance_lock import InstanceLocked, acquire_instance_lock
 from .startup import LiveNotAvailable, check_startup
+from .supervisor import QueuedHalts, Supervisor, write_fallback
 from .wiring import StrategyInput, build_engine, load_strategy
 
 
-class QueuedHalts:
-    """다른 스레드용 HaltControl: 실제 발동은 판정·실행 스레드에서 (저장소 연결을 스레드 사이에 나누지 않음)."""
+def record_fatal(path: Path, exc: BaseException) -> None:
+    """프로세스를 끝내는 예외를 저장소와 독립된 파일에 남긴다 (RV-06). 실패해도 원래 예외를 가리지 않는다."""
+    text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    write_fallback(path, f"치명 오류로 종료: {type(exc).__name__}\n{text}")
+    log_exception(path.parent, "main.fatal", exc)   # 운영 로그(storage/oplog)에도 — 예외를 내보내지 않음
 
-    def __init__(self, engine: Engine) -> None:
-        self._engine = engine
 
-    def activate(self, halt_type: HaltType, actor: str, reason: str, account: str | None = None, **kw: object) -> str:
-        self._engine.call_soon(lambda: self._engine.halts.activate(halt_type, actor, reason, account, **kw))
-        return ""
+def start_summary(engine: Engine, rep) -> str:  # type: ignore[no-untyped-def]
+    """시작 콘솔 요약 (RV-16): 복구 실패 사유·결과 불명 건수·활성 정지·전략 상태. 비밀정보 없음(계좌는 별칭)."""
+    lines = [f"  결과 불명 의도: {engine.start_unknown}건"]
+    lines += [f"  복구 미충족: {f}" for f in rep.failures] or ["  복구 조건: 충족"]
+    try:
+        halts = sorted(set(engine.repo.active_halts(engine.account)))
+        lines.append(f"  활성 정지: {', '.join(halts) or '없음'}")
+        for s in engine.repo.strategy_states():
+            lines.append(f"  전략 {s['strategy_id']} v{s['version']} {s['market']}: {s['state']}"
+                         + (f" ({s['stop_reason']})" if s.get("stop_reason") else ""))
+    except Exception as exc:  # noqa: BLE001 — 표시 실패로 시작을 막지 않는다
+        lines.append(f"  상태 표시 실패: {type(exc).__name__}")
+    return "\n".join(lines)
 
-    def report_condition(self, halt_type: HaltType, account: str | None, condition: str, ok: bool,
-                         detail: str = "", **kw: object) -> None:
-        self._engine.call_soon(lambda: self._engine.halts.report_condition(halt_type, account, condition, ok,
-                                                                           detail, **kw))
+
+def ws_state_handler(engine: Engine, account: str):  # type: ignore[no-untyped-def]
+    """실시간 연결 상태 → K5 재개 조건 broker_connected (RV-02, 01 K5). 판정·실행 스레드로 넘긴다(QueuedHalts).
+
+    ONLINE·RECONNECTED: 실시간 경로(K5_LINK_REALTIME) 정상 보고 → 대조 요청. 순서가 중요하다: tick에서 calls 단계가
+    대조보다 먼저라 대조 시각이 경로 복구 시각보다 늦게 된다(재접속 전 대조는 reconciled로 인정하지 않음).
+    OFFLINE·FAILED: K5 발동(actor "realtime" → 실시간 경로 끊김). 경로 구분 없는 broker_connected는 보고하지 않는다
+    (조회 경로 끊김까지 함께 풀림). 조회 경로 정상은 대조 성공이 보고한다.
+    """
+    from trading_system.broker.kiwoom.realtime import WsState
+    halts = QueuedHalts(engine)
+
+    def on_state(state: WsState, msg: str) -> None:
+        if state in (WsState.OFFLINE, WsState.FAILED):
+            halts.activate(HaltType.K5, "realtime", f"실시간 끊김: {msg}", account)
+            halts.report_condition(HaltType.K5, account, K5_LINK_REALTIME, False, f"실시간 끊김: {msg}")
+        elif state in (WsState.ONLINE, WsState.RECONNECTED):
+            halts.report_condition(HaltType.K5, account, K5_LINK_REALTIME, True, f"실시간 {state.value}")
+            engine.request_reconcile()
+
+    return on_state
 
 
 # --- 공통 로딩 ------------------------------------------------------------------------------------
@@ -107,7 +142,33 @@ def run_main(root: Path, environ: dict[str, str] | None = None, max_seconds: flo
         print(f"시작 거부(브로커 연결 없음): {exc}")
         return 2
 
-    base.mkdir(parents=True, exist_ok=True)
+    try:
+        lock = acquire_instance_lock(base)    # 단일 실행 (RV-15): 프로세스 수명 동안 유지
+    except InstanceLocked as exc:
+        print(f"시작 거부(브로커 연결 없음): {exc}")
+        return 2
+    fatal_log = base / "logs" / "fatal.log"
+    prev_hook = threading.excepthook
+
+    def thread_died(args: threading.ExceptHookArgs) -> None:   # 입출력 스레드가 죽으면 파일에 남김 (RV-06·RV-18)
+        if args.exc_value is not None:
+            record_fatal(fatal_log, args.exc_value)
+        prev_hook(args)
+
+    threading.excepthook = thread_died
+    try:
+        return _run(root, mode, base, startup, app, gate_settings, alert_thresholds, calendar, ticks, caps,
+                    strategies, max_seconds)
+    except BaseException as exc:
+        record_fatal(fatal_log, exc)
+        raise
+    finally:
+        threading.excepthook = prev_hook
+        lock.release()
+
+
+def _run(root: Path, mode: Mode, base: Path, startup, app: AppSettings, gate_settings, alert_thresholds,  # type: ignore[no-untyped-def]
+         calendar, ticks, caps, strategies: list[StrategyInput], max_seconds: float | None) -> int:
     clock = SystemClock()
     repo = Repository(startup.storage_path, mode)
     store = MarketDataStore(calendar, ticks)
@@ -134,16 +195,26 @@ def run_main(root: Path, environ: dict[str, str] | None = None, max_seconds: flo
         except ConfigError as exc:
             print(f"시작 거부(주문 없음): {exc}")
             return 2
+        engine.fallback_file = base / "logs" / "engine-fallback.log"
+        engine.log_dir = base / "logs"
         clock_monitor._halts, clock_monitor._alerts = engine.halts, engine.alerts  # noqa: SLF001 — 조립 지점
-        clock_monitor.check()
-        _hooks(engine, clock_monitor, base)
-        if extra is not None:
-            threads += extra(engine, stop, closers)
+        clock_monitor.check()                         # 시작 점검은 판정·실행 스레드(이 스레드)에서 직접
+        clock_monitor._halts = QueuedHalts(engine)    # noqa: SLF001 — 이후 점검은 감시 스레드 → 정지는 큐로 (RV-22)
+        io_threads = extra(engine, stop, closers) if extra is not None else []
+        # 감시 스레드 (RV-22, D-038): KILL 즉시 반영·하트비트·루프 감시·SNTP·입출력 스레드 생존. 주문은 하지 않는다
+        sup = Supervisor(engine, heartbeat=base / "heartbeat", fallback=engine.fallback_file,
+                         clock_monitor=clock_monitor,
+                         watched=[(t, "시세 조회") for t in io_threads if t.name == "market-poller"])
+        sup_thread = threading.Thread(target=sup.run, args=(stop,), name="supervisor", daemon=True)
+        sup_thread.start()
+        threads.append(sup_thread)
         rep = engine.start()
         print(f"시작: 모드 {mode.value}, 계좌 {app.account}, 복구 판정 {'통과' if rep.ok else '실패'} "
               f"— K8 재개: scripts/resume.py --mode {mode.value} K8")
-        for t in threads:
+        print(start_summary(engine, rep))
+        for t in io_threads:
             t.start()
+            threads.append(t)
         signal.signal(signal.SIGINT, lambda *_: stop.set())
         started = time.monotonic()
         while not stop.is_set():
@@ -169,23 +240,9 @@ def _minutes(n: int):  # type: ignore[no-untyped-def]
     return timedelta(minutes=n)
 
 
-def _hooks(engine: Engine, clock_monitor, base: Path) -> None:  # type: ignore[no-untyped-def]
-    loop = LoopMonitor(engine.halts, engine.alerts)
-    last_clock = [time.monotonic()]
-
-    def hook(now: datetime) -> None:
-        write_heartbeat(base / "heartbeat", now)
-        loop.tick(time.monotonic(), now)
-        if time.monotonic() - last_clock[0] > 600:   # 10분마다 시계 점검 (01 §2.7)
-            last_clock[0] = time.monotonic()
-            clock_monitor.check()
-
-    engine.on_tick.append(hook)
-
-
 def _paper_broker(startup, app: AppSettings, clock, store: MarketDataStore):  # type: ignore[no-untyped-def]
     from trading_system.broker.kiwoom.adapter import KiwoomAdapter, KiwoomConfig
-    from trading_system.broker.kiwoom.realtime import KiwoomRealtime, WsState, order_handlers
+    from trading_system.broker.kiwoom.realtime import KiwoomRealtime, order_handlers
     from trading_system.marketdata.kiwoom_feed import KiwoomMarketFeed, MarketPoller
     s = startup.secrets
     need = ("KIWOOM_PAPER_APP_KEY", "KIWOOM_PAPER_SECRET_KEY", "KIWOOM_PAPER_ACCOUNT_NO", "KIWOOM_PAPER_ACCOUNT_ALIAS")
@@ -196,11 +253,12 @@ def _paper_broker(startup, app: AppSettings, clock, store: MarketDataStore):  # 
         raise ConfigError(".env.paper의 계좌 별칭이 배포 설정과 다르다")
     holder: dict = {}
 
-    def critical(kind: str, msg: str) -> None:
+    def critical(kind: str, msg: str, actor: str = "broker") -> None:
         e = holder.get("engine")
         if e is None:
             return
-        QueuedHalts(e).activate(HaltType.K5, "broker", f"{kind}: {msg}", app.account)
+        # actor "realtime" = 실시간 경로 끊김, 그 밖 = 조회 경로 (halt.manager K5 경로 구분, RV-02)
+        QueuedHalts(e).activate(HaltType.K5, actor, f"{kind}: {msg}", app.account)
         e.call_soon(lambda: e.alerts.alert("EMERGENCY", f"브로커 치명 오류 {kind} — K5", None))
         if kind == "MODE_MISMATCH":
             holder["stop"].set()   # 모드 불일치는 즉시 중단 (03 §4)
@@ -212,24 +270,18 @@ def _paper_broker(startup, app: AppSettings, clock, store: MarketDataStore):  # 
     def extra(engine: Engine, stop: threading.Event, closers: list) -> list[threading.Thread]:
         holder["engine"], holder["stop"] = engine, stop
         feed = KiwoomMarketFeed(adapter, store, clock, app.instruments,
-                                held=lambda c: c in engine.repo.positions(app.account), alerts=None)
-
-        def on_state(state: WsState, msg: str) -> None:
-            if state is WsState.OFFLINE:
-                QueuedHalts(engine).activate(HaltType.K5, "realtime", f"실시간 끊김: {msg}", app.account)
-            elif state is WsState.RECONNECTED:
-                engine.request_reconcile()   # 대조 일치 → K5 자동 해제 조건 (01 K5)
+                                held=lambda c: c in engine.repo.positions(app.account), alerts=engine.alerts)
+        on_state = ws_state_handler(engine, app.account)   # K5 broker_connected 보고 (RV-02)
 
         handlers = {**order_handlers(adapter.push_event, app.account, clock,
                                      lambda v: adapter._check_account(v, "00")),  # noqa: SLF001
                     **feed.handlers()}
         rt = KiwoomRealtime(adapter.cfg.ws_url, adapter.tokens, clock,
                             registrations=[("00", []), ("04", [])] + feed.registrations(), handlers=handlers,
-                            on_state=on_state, on_critical=critical)
-        poller = MarketPoller(feed)
+                            on_state=on_state, on_critical=lambda k, m: critical(k, m, "realtime"))
+        poller = MarketPoller(feed, alerts=engine.alerts)
         closers.extend([rt.stop, adapter.close])
-        for code in app.instruments:
-            feed.refresh_daily(code)
+        poller.refresh_daily_if_due()   # 시작 시 1회 (이후 확정일이 바뀌면 시세 스레드가 다시 받음, RV-04)
         return [threading.Thread(target=rt.start, name="ws-start", daemon=True),
                 threading.Thread(target=poller.run, args=(stop, 1.2), name="market-poller", daemon=True)]
 

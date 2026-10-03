@@ -285,6 +285,33 @@ class StrategyRegistry:
                                          owner=owner)
             self._halts.resume(HaltType.K9, None, "LOCAL", actor, owner=owner)
 
+    def sync_k9_from_state(self, owner: str, actor: str) -> str:
+        """저장소의 전략 상태에 K9를 맞춘다 (RV-20). 엔진 밖 도구(scripts/strategy.py)가 전이를 기록하고 운영 명령
+        STRATEGY_SYNC를 남기면, 엔진이 이 함수로 K9를 발동·해제한다. 상태는 바꾸지 않는다(승인 A-ID 전이는 이미 기록됨,
+        INV-13). 같은 상태로 여러 번 불러도 결과가 같다(이미 있는 K9는 다시 발동해도 같은 행, 취소 재전송 없음 RV-07)."""
+        if self._halts is None:
+            raise ValueError("정지 관리자가 연결되지 않음")
+        state = self.state_of(owner)
+        if state is None:
+            raise ValueError(f"등록되지 않은 전략 {owner}")
+        sid, _, ver = owner.rpartition(":")
+        row = self._repo.strategy_state(sid, int(ver), self._market)
+        assert row is not None
+        if state is StrategyState.STOPPED:
+            reason = StopReason(row["stop_reason"]) if row["stop_reason"] else StopReason.USER
+            self._halts.activate(HaltType.K9, actor, f"전략 중지 ({reason.value})", None, owner=owner,
+                                 variant=reason.value)
+            return f"K9 발동·유지 ({reason.value})"
+        if state is StrategyState.RETIRED:
+            self._halts.activate(HaltType.K9, actor, "전략 폐기", None, owner=owner, variant=StopReason.USER.value)
+            return "K9 발동·유지 (폐기)"
+        if not any(r["halt_type"] == HaltType.K9.value and r["scope_owner"] == owner
+                   for r in self._repo.halt_rows(None)):
+            return "K9 없음"
+        self._halts.report_condition(HaltType.K9, None, "strategy_resumed", True, f"상태 {state.value}", owner=owner)
+        self._halts.resume(HaltType.K9, None, "LOCAL", actor, owner=owner)
+        return f"K9 해제 (상태 {state.value})"
+
     # --- 게이트 입력 (StrategyFacts) ---------------------------------------------------
     def state_of(self, owner: str) -> StrategyState | None:
         sid, _, ver = owner.rpartition(":")

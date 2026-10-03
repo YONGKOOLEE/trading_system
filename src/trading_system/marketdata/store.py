@@ -132,6 +132,21 @@ class MarketDataStore:
         inst = self._data.get(instrument)
         return inst.quote if inst else None
 
+    def fresh_price(self, instrument: str, now: datetime, max_age: timedelta) -> Decimal | None:
+        """손익 평가용 가격 (RV-18): 받은 지 max_age 넘은 시세는 모름(None) — 낡은 가격으로 L4·K2를 계산하지 않는다.
+        모르면 일일 손익이 평가 불능이 되어 게이트가 위험 확대를 거부한다(보수적)."""
+        q = self.quote(instrument)
+        if q is None or q.at > now or now - q.at > max_age:
+            return None
+        return q.price
+
+    def last_daily_day(self, instrument: str) -> date | None:
+        """저장된 원시 일봉의 마지막 날짜 (일봉 갱신 성공 판정용, RV-04)."""
+        inst = self._data.get(instrument)
+        if inst is None or not inst.raw:
+            return None
+        return max(r.day for r in inst.raw)
+
     def instrument(self, instrument: str) -> InstrumentInfo | None:
         inst = self._data.get(instrument)
         return inst.info if inst else None

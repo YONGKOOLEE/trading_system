@@ -22,8 +22,9 @@ from trading_system.gate.gate import Gate
 from trading_system.halt.manager import Channel, HaltManager
 from trading_system.storage.repository import Repository
 
-LOCAL_ONLY = frozenset({"CONFIRM_UNKNOWN", "RECONCILE", "RECONCILE_RESOLVE"})
-KNOWN = frozenset({"KILL", "RESUME", "CANCEL", "REDUCE", "EXIT", "CONFIRM_UNKNOWN", "RECONCILE", "RECONCILE_RESOLVE"})
+LOCAL_ONLY = frozenset({"CONFIRM_UNKNOWN", "RECONCILE", "RECONCILE_RESOLVE", "STRATEGY_SYNC"})
+KNOWN = frozenset({"KILL", "RESUME", "CANCEL", "REDUCE", "EXIT", "CONFIRM_UNKNOWN", "RECONCILE", "RECONCILE_RESOLVE",
+                   "STRATEGY_SYNC"})
 
 
 class _Reconciles(Protocol):
@@ -32,6 +33,10 @@ class _Reconciles(Protocol):
 
 class _Resolves(Protocol):
     def resolve(self, item_id: str, method: str, actor: str) -> str: ...
+
+
+class _SyncsStrategy(Protocol):
+    def sync_k9_from_state(self, owner: str, actor: str) -> str: ...
 
 
 class CommandError(ValueError):
@@ -48,8 +53,9 @@ class CommandOutcome:
 class OpsProcessor:
     def __init__(self, repo: Repository, gate: Gate, executor: Executor, halts: HaltManager, clock: Clock, *,
                  reconciler: _Reconciles | None = None, resolver: _Resolves | None = None,
-                 kill_file: Path | None = None) -> None:
+                 kill_file: Path | None = None, registry: _SyncsStrategy | None = None) -> None:
         self._kill_file = kill_file
+        self._registry = registry
         self._reconciler = reconciler
         self._resolver = resolver
         self._repo = repo
@@ -117,6 +123,10 @@ class OpsProcessor:
             if self._resolver is None:
                 raise CommandError("해소기가 연결되지 않음")
             return "DONE", self._resolver.resolve(args["item_id"], args["method"], actor)
+        if name == "STRATEGY_SYNC":  # 전략 도구가 남긴 상태 전이를 K9에 반영 (RV-20, 01 K9, INV-13)
+            if self._registry is None:
+                raise CommandError("전략 등록부가 연결되지 않음")
+            return "DONE", self._registry.sync_k9_from_state(str(args["owner"]), f"{channel}:{actor}")
         req = self._request(cid, name, args)
         d = self._gate.decide(req)
         if d.result is not GateResult.APPROVED or d.approved is None:

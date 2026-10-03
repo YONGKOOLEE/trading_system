@@ -33,9 +33,11 @@ from trading_system.domain.market import InstrumentInfo, Quote, TradingStatus
 from trading_system.domain.sinks import AlertSink
 
 from .quality import Prepared, RawDaily
-from .store import MarketDataStore, daily_bar_available
+from .store import MarketDataStore, daily_bar_available, latest_complete_day
 
 CHART_PATH, INFO_PATH = "/api/dostk/chart", "/api/dostk/stkinfo"
+DAILY_RETRY = timedelta(minutes=5)      # 일봉 갱신 재시도 간격 (RV-04)
+DAILY_MAX_ATTEMPTS = 5
 MASTER_MARKETS = ("0", "10", "8", "60")   # 코스피, 코스닥, ETF, ETN (ka10099 mrkt_tp)
 VI_DEFAULT = timedelta(minutes=2)
 LOOKBACK_DAYS = 400
@@ -280,16 +282,52 @@ class MarketPoller:
     """시세 조회 주기 관리 (IO 스레드). 한 번 부를 때 한 종목 시세를 돌아가며 갱신, 주기마다 종목 상태·VI.
 
     호출 제한기 우선순위는 시세(최하)라 결과 불명 해소·대조 조회에 밀린다 (D-048).
+    일봉(RV-04): 확정 봉이 있어야 하는 마지막 거래일(latest_complete_day — 정규장 마감과 20:00 중 늦은 시각 뒤,
+    DP-5)이 바뀌면 다시 받는다. 받은 봉이 그날까지 없으면 실패로 보고 DAILY_RETRY 간격으로 최대
+    DAILY_MAX_ATTEMPTS회까지 재시도, 다 실패하면 알림 1회(판정은 data_ok 거짓으로 신호 없음).
+    run은 한 번의 조회 오류로 스레드가 죽지 않게 예외를 삼키고 알림한다 (RV-18).
     """
 
-    def __init__(self, feed: KiwoomMarketFeed, master_every: int = 60) -> None:
+    def __init__(self, feed: KiwoomMarketFeed, master_every: int = 60, alerts: AlertSink | None = None) -> None:
         self.feed = feed
         self._codes = sorted(feed.infos)
         self._i = 0
         self._n = 0
         self._master_every = master_every
+        self._alerts = alerts if alerts is not None else feed.alerts
+        self._daily_done: dict[str, date] = {}
+        self._daily_try: dict[str, tuple[date, int, datetime]] = {}   # 종목 → (목표 확정일, 시도 수, 다음 시도 시각)
+        self.errors: list[str] = []
+
+    def _alert(self, level: str, msg: str) -> None:
+        if self._alerts is not None:
+            self._alerts.alert(level, msg, None)
+
+    def refresh_daily_if_due(self) -> None:
+        now = self.feed.clock.now()
+        target = latest_complete_day(now, self.feed.store.calendar)
+        for code in self._codes:
+            if self._daily_done.get(code) == target:
+                continue
+            tgt, n, next_at = self._daily_try.get(code, (target, 0, now))
+            if tgt != target:
+                n, next_at = 0, now
+            if n >= DAILY_MAX_ATTEMPTS or now < next_at:
+                continue
+            self.feed.refresh_daily(code)
+            last = self.feed.store.last_daily_day(code)
+            if last is not None and last >= target:
+                self._daily_done[code] = target
+                self._daily_try.pop(code, None)
+                continue
+            n += 1
+            self._daily_try[code] = (target, n, now + DAILY_RETRY)
+            if n == DAILY_MAX_ATTEMPTS:
+                self._alert("WARNING", f"일봉 갱신 실패 {code}: {target} 확정 봉을 {n}회 시도해도 못 받음 — "
+                                       f"그 종목 판정 신호 없음(data_ok 거짓), 사용자 확인")
 
     def poll_once(self) -> None:
+        self.refresh_daily_if_due()
         if self._n % self._master_every == 0:
             self.feed.refresh_master()
             self.feed.refresh_vi()
@@ -300,6 +338,17 @@ class MarketPoller:
         self.feed.tick()
 
     def run(self, stop: threading.Event, interval: float) -> None:
+        fails = 0
         while not stop.is_set():
-            self.poll_once()
+            try:
+                self.poll_once()
+                if fails >= 1:
+                    self._alert("INFO", f"시세 조회 오류 회복 (연속 {fails}회 뒤)")
+                fails = 0
+            except Exception as exc:  # noqa: BLE001 — 시세 스레드는 죽지 않는다(RV-18). 낡은 시세는 G11이 막음
+                fails += 1
+                self.errors.append(f"{type(exc).__name__}: {exc}")
+                del self.errors[:-50]
+                if fails == 1 or fails % 100 == 0:
+                    self._alert("WARNING", f"시세 조회 오류 {type(exc).__name__} (연속 {fails}회) — 시세 낡으면 위험 확대 거부")
             stop.wait(interval)
