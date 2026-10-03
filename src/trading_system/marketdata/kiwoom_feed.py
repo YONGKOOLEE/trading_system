@@ -316,7 +316,11 @@ class MarketPoller:
                 n, next_at = 0, now
             if now < next_at:
                 continue
-            self.feed.refresh_daily(code)
+            try:
+                self.feed.refresh_daily(code)
+            except Exception as exc:  # noqa: BLE001 — 예상 밖 오류도 실패 1회로 세고 간격을 지킨다 (재검토2 #6)
+                self.errors.append(f"일봉 {code}: {type(exc).__name__}")
+                del self.errors[:-100]
             last = self.feed.store.last_daily_day(code)
             if last is not None and last >= target:
                 self._daily_done[code] = target

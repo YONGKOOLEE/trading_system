@@ -214,3 +214,28 @@ def test_requery_waits_once_before_requery(env: Env) -> None:
                      drain_events=env.executor.process_events, requery_wait=wait)
     rec.run(ACCOUNT, "PERIODIC")
     assert waited == [1]                       # 재조회 전에 정확히 한 번 기다린다
+
+
+# --- 재검토2 #6: 일봉 갱신 중 예상 밖 예외도 실패로 세고 간격을 지킨다(1.2초마다 재시도·시세 갱신 막힘 방지) ---
+
+def test_daily_refresh_unexpected_exception_counts_as_failure_and_quotes_continue() -> None:
+    from tests.scenario.test_rv_loop import DAY, Alerts, FakeFeed, kst
+    from trading_system.domain.clock import FixedClock
+    from trading_system.marketdata.kiwoom_feed import DAILY_RETRY, MarketPoller
+    clock = FixedClock(kst(DAY, 10, 0))
+    f = FakeFeed(clock)
+    quotes: list[str] = []
+    f.refresh_quote = lambda code: quotes.append(code)  # type: ignore[method-assign]
+
+    def boom(code: str):  # type: ignore[no-untyped-def]
+        f.calls.append(clock.now())
+        raise KeyError("저장 중 예상 밖 오류")
+    f.refresh_daily = boom  # type: ignore[method-assign]
+    p = MarketPoller(f, alerts=Alerts())  # type: ignore[arg-type]
+    p.poll_once()
+    p.poll_once()
+    assert len(f.calls) == 1                     # 간격 전 재시도 없음
+    assert quotes                                # 같은 주기의 시세 갱신은 계속
+    clock.advance(DAILY_RETRY)
+    p.poll_once()
+    assert len(f.calls) == 2
