@@ -69,6 +69,9 @@ def strategy_main(argv: Sequence[str] | None = None, root: Path | None = None) -
             return _show(repo)
         if ns.cmd == "register":
             return _register(registry, base, mode)
+        if ns.evidence and not (base / ns.evidence).is_file():   # 증거 보고서는 실제로 있어야 한다 (V-113)
+            print(f"전이 거부: 증거 파일 없음 ({ns.evidence}) — --root 기준 경로")
+            return 1
         try:
             registry.transition(ns.strategy_id, ns.version, StrategyState(ns.to_state), ns.approval,
                                 evidence=ns.evidence, stop_reason=StopReason(ns.stop_reason) if ns.stop_reason else None)

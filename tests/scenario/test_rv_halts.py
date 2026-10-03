@@ -205,6 +205,8 @@ def test_rv20_strategy_tool_stop_queues_sync_command(tmp_path: Path) -> None:
     root = tool_root(tmp_path)
     base = ["--mode", "PAPER", "--root", str(root)]
     assert strategy_main(["register", *base]) == 0
+    (root / "var/backtest/x").mkdir(parents=True, exist_ok=True)   # 증거 파일 실재 필요 (V-113)
+    (root / "var/backtest/x/report.md").write_text("# report", encoding="utf-8")
     assert strategy_main(["transition", *base, "paper0-verify", "1", "BACKTEST_PASSED", "--approval", "A-901",
                           "--evidence", "var/backtest/x/report.md"]) == 0
     assert strategy_main(["transition", *base, "paper0-verify", "1", "PAPER", "--approval", "A-902"]) == 0

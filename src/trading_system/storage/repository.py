@@ -232,6 +232,7 @@ class Repository:
                                           timeout=busy_timeout)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL")
+        self.connection.execute("PRAGMA synchronous=FULL")   # 커밋 내구성: 빌드 기본값에 기대지 않음 (INV-03 전송 전 기록)
         self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.executescript(SCHEMA)
         self._bind_mode()

@@ -130,6 +130,9 @@ def test_register_then_transitions_with_user_approvals(tmp_path: Path, capsys: p
     assert strategy_main(["register", "--mode", "PAPER", "--root", str(root)]) == 0
     assert state(root) == "DRAFT"
     report = "var/backtest/paper0-verify-v1/report.md"
+    # 증거 파일은 실제로 있어야 한다 (V-113 강화, review-2026-10-03 C절 — 기존 시험은 없는 경로로 통과했음)
+    (root / report).parent.mkdir(parents=True, exist_ok=True)
+    (root / report).write_text("# report", encoding="utf-8")
     assert strategy_main(["transition", "--mode", "PAPER", "--root", str(root), "paper0-verify", "1",
                           "BACKTEST_PASSED", "--approval", "A-901", "--evidence", report]) == 0
     assert strategy_main(["transition", "--mode", "PAPER", "--root", str(root), "paper0-verify", "1",
@@ -151,6 +154,8 @@ def test_register_without_verification_approval_is_rejected(tmp_path: Path) -> N
     ["transition", "--mode", "PAPER", "paper0-verify", "1", "BACKTEST_PASSED", "--approval", "A-901"],  # 증거 없음
     ["transition", "--mode", "PAPER", "paper0-verify", "1", "BACKTEST_PASSED", "--approval", "ok",
      "--evidence", "x"],                                                                          # A-ID 아님
+    ["transition", "--mode", "PAPER", "paper0-verify", "1", "BACKTEST_PASSED", "--approval", "A-901",
+     "--evidence", "var/backtest/none/report.md"],                                                # 증거 파일 없음 (V-113)
 ])
 def test_bad_transitions_refused(tmp_path: Path, args: list[str]) -> None:
     root = tool_root(tmp_path)
