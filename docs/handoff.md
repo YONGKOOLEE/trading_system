@@ -1,10 +1,11 @@
 # 세션 인계 (짧게 유지 — 60줄 이내, 작업이 끝날 때마다 덮어쓴다)
 
-- 갱신: 2026-10-03 / T-015 승인(A-035), 시작 점검 구현·오프라인 시험 완료 / 다음: **사용자 스위치 2개 → `scripts/preflight.py` 실제 실행**
+- 갱신: 2026-10-03 / T-015 실제 키움 모의 시작 점검 **통과**(조회 8종, 대조 MATCH, 주문 0건, kiwoom-kr §7b) / 다음: **CP-020 승인 → T-016 준비(달력·종목·DP-24 순서 문제)**
 
 ## 현재 상태
-- 6단계 구현. 완료: T-000~T-014, T-020, T-021. T-015는 구현·오프라인 시험 완료, 실제 모의 접속(PV-06·PV-11) 대기.
-- 테스트 `.venv\Scripts\python -m pytest -q` → 718 passed (약 2분).
+- 6단계 구현. 완료: T-000~T-015(T-015: PV-06 통과, PV-11은 발급·만료만 — 갱신 관찰은 PAPER-0), T-020, T-021.
+- 테스트 `.venv\Scripts\python -m pytest -q` → 721 passed (약 2분).
+- 실측으로 바뀐 것: 예수금 kt00005 → kt00001(모의 미제공 RC9000), ka10054 범위값 "0". 승인 문서 정정은 CP-020(draft).
 - 브랜치(로컬만, push·main 병합 없음): … → feat/T-020-app → fix/dp-5-daily-bar-cutoff → **feat/T-015-preflight (최신)**.
 - 실행 전 사용자 할 일: `.env.paper`에 `TRADE_MODE=PAPER` 줄 추가, `config/app.paper.toml` `connection_approved = true`.
   실행: `$env:TRADE_MODE='PAPER'; .venv\Scripts\python scripts\preflight.py` → 결과 `var/paper/preflight/*.json`.

@@ -174,3 +174,12 @@
 - 권한: `.claude/settings.local.json`(git 제외) — PowerShell·Edit·Write 허용, push·reset·rebase·merge·clean·pip install·.env 읽기/수정 차단. Remove-Item 차단 줄은 미반영(설정 파일 수정은 매번 확인 필요).
 - 미실행: 실제 키움 모의 접속(PV-06·PV-11). 사용자: `.env.paper`에 `TRADE_MODE=PAPER` 추가, `connection_approved = true`.
 - 다음 세션 첫 행동: 사용자 설정 확인 → `scripts/preflight.py` 실행 → 결과를 kiwoom-kr K-U8·PV-06·PV-11에 기록.
+
+## 2026-10-03 (14) — T-015 실제 키움 모의 시작 점검 (조회만, 주문 0건)
+- 사용자: `.env.paper` TRADE_MODE 추가, `connection_approved = true`. 실행 `$env:TRADE_MODE='PAPER'; .venv\Scripts\python scripts\preflight.py` 3회.
+- 1·2회 실패: kt00005 모의 미제공(return_code 20 + RC9000, 8104 아님), ka10054 1511(min_trde_qty 필수). 2회차 전 실패 응답 서버 문구(가림 처리) 기록 기능 추가.
+- 수정: kt00001로 교체(`adapter.query_cash`), RC9000 = 8104 취급(`errors.specific_code`), ka10054 범위값 "0"(`kiwoom_feed`). 시험 서버도 실측대로 엄격화(kt00005 RC9000, ka10054 필수값). 공식 명세 JSON(S2) 내려받아 필드 확인(스크래치, 저장소 미포함).
+- 3회: **통과** — 토큰 발급·폐기, 조회 8종 정상, 시작 대조 MATCH, 주문 API 0건. 경고: 달력 없음(일봉 품질 거짓 경고 포함), SNTP 미점검.
+- 시험: `.venv\Scripts\python -m pytest -q` → 721 passed.
+- 문서: kiwoom-kr §7b 실측·K-U1·K-U8 해소, CP-020 draft(01·03의 kt00005 문구), DP-28(qry_tp 3).
+- 미결: CP-020 승인, PV-11 만료 전 갱신 관찰(장시간 실행 필요, PAPER-0), 달력 2024~2026(X-U3).
