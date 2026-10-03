@@ -5,9 +5,11 @@ quote_max_age_seconds = 60     # A-028. PAPER-0 PV-15 측정 후 재결정
 price_limit_ratio = "0.30"     # KRX ±30% (krx-market §3)
 
 [costs]
-# DP-27 보수 임시값: 실제 요율보다 높게 잡아 비용·손실 추정을 크게 한다. 사용자 확인(K-U9·세법) 후 교체
-commission_rate = "0.0005"     # 0.05%
-sell_tax_rate = "0.0025"       # 0.25%
+# 사용자 확정 A-038 (2026-10-03): 수수료 0.015%(매수·매도 각각), 매도 세금 0.20%
+#   코스피 = 거래세 0.05% + 농특세 0.15%, 코스닥 = 거래세 0.20% → 두 시장 모두 0.20%라 한 값으로 둔다
+#   ETF·ETN(거래세 면제 등)은 CAP-INS-02·03 미지원이라 아직 고려하지 않음 — 지원 시 시장·상품별 요율 필요
+commission_rate = "0.00015"    # 0.015%
+sell_tax_rate = "0.0020"       # 0.20%
 
 [alerts]
 reject_surge_count = 5
