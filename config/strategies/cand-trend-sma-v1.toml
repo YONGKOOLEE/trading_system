@@ -1,0 +1,11 @@
+# 후보(제안, 미등록) cand-trend-sma v1 — T-018 결정 전 PAPER 사용 금지 (A-044 3단계)
+strategy = "cand-trend-sma"
+version = 1
+
+[params]
+fast = 20
+slow = 60
+atr_n = 14
+atr_mult = "2"
+risk_ratio = "0.004"
+max_weight = "0.09"

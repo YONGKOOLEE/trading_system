@@ -1,0 +1,11 @@
+# 후보(제안, 미등록) cand-meanrev-rsi v1 — T-018 결정 전 PAPER 사용 금지 (A-044 3단계)
+strategy = "cand-meanrev-rsi"
+version = 1
+
+[params]
+trend_n = 100
+rsi_entry = "10"
+stop_pct = "0.05"
+hold_max = 5
+risk_ratio = "0.004"
+max_weight = "0.09"
