@@ -26,6 +26,7 @@
 3. `docs/changes/review-2026-10-03-pre-paper0.md`, pv-procedure, kiwoom-kr §7b
 
 ## 도구 (사람 실행)
+- PAPER 기록 집계(T-017 준비, 읽기 전용) `scripts\paper-review.py --mode PAPER` → var/paper/review/review-*.md
 - 시작 점검 `scripts\preflight.py`(엔진 실행 중이면 거부), 전략 `scripts\strategy.py`, 운영 `scripts\{status,kill,resume,reconcile-resolve,backup,restore-test}.py --mode PAPER`
 - 실행 `$env:TRADE_MODE='PAPER'; $env:PYTHONPATH='src'; .venv\Scripts\python -m trading_system.app run` (사용자만, 창 하나)
 - 권한: `.claude/settings.local.json` — PowerShell·Bash·Edit·Write 자동, push·reset·rebase·merge·clean·pip install·.env 차단.
