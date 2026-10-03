@@ -14,7 +14,7 @@
   조회 연속 3회 실패 → K5, 일일 손익 = 기준 현금 + 내부 체결 현금흐름(DAILY_BASE 저장).
 
 ## 다음 세션 첫 행동
-1. 사용자 확인 요청: DP-31~37(임시값), 모의 예수금 ≥ 005930 상한가×200(pv-procedure 체크 7), U-06 약관
+1. 사용자 확인 요청: **`docs/decision-sheet.md`** (차단 Q-1 예수금·Q-2 U-06·Q-3 병합, DP-28~37 권장안)
 2. 사용자 지시 시 feat/T-016-fix → main 병합(D-085)
 3. PAPER-0 실행 안내: `docs/strategies/paper0-verify/pv-procedure.md` v0.2 (cd → preflight → run → 09:25까지 K8 재개)
 4. 1일차 확인: K-U20 계좌번호 형식, K-U21 빈 결과 목록 키, K-U14 909=cntr_no, K-U16 첫 체결 후 K4 여부, entr·d2_entra 세 시점
