@@ -195,3 +195,22 @@ def test_f1b_resume_then_kill_keeps_k1(tmp_path) -> None:  # type: ignore[no-unt
         assert "K1" in w.repo.active_halts(APP_ACCOUNT)              # 마지막 의사(KILL)가 남아야 한다
     finally:
         w.close()
+
+
+# --- 재조회 전 대기 (01 "재조회 1회 (체결 반영 지연 확인)") — 늦게 온 체결 통보를 기다린 뒤 다시 조회 ----------
+
+def test_requery_waits_once_before_requery(env: Env) -> None:
+    from decimal import Decimal
+
+    from tests.scenario.conftest import ACCOUNT
+    from trading_system.reconciliation.reconciler import Reconciler
+    from trading_system.storage.alerts import AuditAlertSink
+    env.broker.add_external_order(ACCOUNT, "TST-C", "BUY", Decimal("1"))   # 불일치 원인
+    waited: list[int] = []
+
+    def wait() -> None:
+        waited.append(1)
+    rec = Reconciler(env.repo, env.broker, env.clock, env.halts, AuditAlertSink(env.repo, env.clock),
+                     drain_events=env.executor.process_events, requery_wait=wait)
+    rec.run(ACCOUNT, "PERIODIC")
+    assert waited == [1]                       # 재조회 전에 정확히 한 번 기다린다

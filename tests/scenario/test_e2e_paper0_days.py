@@ -109,6 +109,7 @@ def make_root(tmp: Path) -> Path:
 
 
 class PaperWorld:
+    requery_wait = None   # 대조 재조회 전 대기 (fake 브로커는 통보가 동기라 불필요)
     def __init__(self, tmp: Path) -> None:
         self.root = make_root(tmp)
         self.clock = FixedClock(kst(DAYS[0], 8, 20))
@@ -161,6 +162,7 @@ class PaperWorld:
                                    gate_settings=gate_settings, caps=load_capabilities(ROOT / "docs" / "capabilities.md"),
                                    strategies=strategies, kill_file=self.root / "var" / "paper" / "KILL",
                                    clock_health=ClockOk(), alert_thresholds=alert_thresholds,
+                                   requery_wait=self.requery_wait,
                                    reconcile_every=timedelta(minutes=app.reconcile_minutes))
         # 대조 실행 기록 (원래 동작은 그대로)
         real_run = self.engine.reconciler.run
@@ -475,6 +477,8 @@ def test_supervisor_stepping_around_entry_no_false_k8(world: PaperWorld) -> None
 # 시세·일봉은 PaperFeed(가상) 그대로. 브로커 주문·조회·실시간 체결 통보·재접속만 시뮬레이터(127.0.0.1)로.
 
 class KiwoomPaperWorld(PaperWorld):
+    # 실시간 통보가 별도 스레드로 늦게 올 수 있다 — 실운영(main)처럼 재조회 전 짧게 기다린다 (01 "체결 반영 지연 확인")
+    requery_wait = staticmethod(lambda: __import__("time").sleep(0.5))
     def make_broker(self):  # type: ignore[no-untyped-def]
         import itertools
 

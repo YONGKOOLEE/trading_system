@@ -326,6 +326,8 @@ class Executor:
     def _apply_fill(self, order: BrokerOrderRow, intent: IntentRow, ev: OrderEvent, now: datetime) -> None:
         if not ev.fill_id:
             return self._anomaly(ev, "체결 식별자 없음", order.account)
+        if self._repo.select("SELECT 1 FROM fill WHERE fill_key=?", (f"{order.order_key}|{ev.fill_id}",)):
+            return None  # 이미 반영한 체결의 중복 통보 — 수량 초과 검사보다 먼저 거른다 (거짓 K4 방지, e2e 결함 1)
         if ev.quantity <= 0 or ev.price <= 0:
             return self._anomaly(ev, "체결 수량·가격이 0 이하", order.account)
         filled = order.filled_quantity + ev.quantity

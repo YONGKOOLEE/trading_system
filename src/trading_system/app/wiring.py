@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import importlib
 from dataclasses import dataclass
 from datetime import time, timedelta
@@ -67,7 +69,8 @@ def build_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: BrokerAd
                  account: str, account_limits: AccountLimits, gate_settings: GateSettings, caps: CapabilityTable,
                  strategies: list[StrategyInput], kill_file: Path, clock_health: ClockHealth,
                  alert_thresholds: tuple[int, int] | None = None, fallback_log: Path | None = None,
-                 reconcile_every: timedelta = timedelta(minutes=1)) -> Engine:
+                 reconcile_every: timedelta = timedelta(minutes=1),
+                 requery_wait: Callable[[], None] | None = None) -> Engine:
     if mode not in BROKER_ENV:
         raise ConfigError(f"{mode.value}는 이 구현에서 실행할 수 없다 (실전 경로 없음)")
     existing = repo.account(account)
@@ -107,7 +110,8 @@ def build_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: BrokerAd
     registry.attach_halts(halts)
     store.halts, store.alerts, store.account = halts, alerts, account
     resolver = UnknownResolver(repo, broker, executor, clock, wait=lambda s: None)
-    reconciler = Reconciler(repo, broker, clock, halts, alerts, drain_events=executor.process_events)  # RV-24
+    reconciler = Reconciler(repo, broker, clock, halts, alerts, drain_events=executor.process_events,  # RV-24
+                            requery_wait=requery_wait)
     recovery = RecoveryChecker(repo, reconciler, halts, clock_health.clock_ok)
     # RECONCILE_RESOLVE는 대조 불일치 해소기(resolve(item_id, method, actor))로 — 결과 불명 해소기가 아님 (RV-01)
     ops = OpsProcessor(repo, gate, executor, halts, clock, reconciler=reconciler,

@@ -54,15 +54,23 @@ class RecoveryReport:
     halts: list[str] = field(default_factory=list)
 
 
+QUERY_FAILURES_TO_K5 = 3   # 연속 대조 조회 실패 → K5 (03 타임아웃 표 "최대 3회 → K5", e2e 결함 후보 2)
+
+
 class Reconciler:
     def __init__(self, repo: Repository, broker: BrokerAdapter, clock: Clock, halts: HaltControl | None,
-                 alerts: AlertSink, drain_events: Callable[[], object] | None = None) -> None:
+                 alerts: AlertSink, drain_events: Callable[[], object] | None = None,
+                 requery_wait: Callable[[], None] | None = None) -> None:
         self._repo = repo
         self._broker = broker
         self._clock = clock
         self._halts = halts
         self._alerts = alerts
         self._drain_events = drain_events   # 대기 중인 브로커 통보 반영 (실행기 process_events, RV-24)
+        self._failures: dict[str, int] = {}  # 계좌별 연속 조회 실패 수
+        # 재조회 전 대기: 01 "재조회 1회 (체결 반영 지연 확인)" — 실시간 체결 통보가 조회보다 늦게 오는 지연을 기다린다.
+        # 실운영은 main이 짧은 실제 대기를 넘긴다(판정·실행 스레드만 멈춤, 감시 스레드는 계속). 시험 기본은 대기 없음
+        self._requery_wait = requery_wait
 
     def run(self, account: str, trigger: str) -> ReconcileResult:
         if self._repo.in_transaction:
@@ -75,7 +83,14 @@ class Reconciler:
                 rid = self._repo.insert_reconciliation(account, trigger, "QUERY_FAILED",
                                                        {"error": err}, self._clock.now())
             self._alerts.alert("WARNING", f"대조 조회 실패 ({trigger}): {err}", rid)
+            n = self._failures.get(account, 0) + 1
+            self._failures[account] = n
+            if n >= QUERY_FAILURES_TO_K5 and self._halts is not None:
+                # 03 타임아웃 표 "일반 조회(대조·잔고) 최대 3회 → K5", 01 §2.7 "API 단절·연속 호출 실패 → K5".
+                # 조회 경로(link:rest) 끊김으로 기록 → 다음 대조 성공(조회 3종)이 경로 정상·reconciled를 보고해 자동 해제
+                self._halts.activate(HaltType.K5, "reconcile", f"대조 조회 연속 {n}회 실패: {err}", account)
             return ReconcileResult(rid, "QUERY_FAILED")
+        self._failures[account] = 0
 
         if self._halts is not None:
             # 조회 3종 성공 = 브로커 조회 경로 연결 증거 (RV-02). 실시간 경로는 따로 보고된다(끊긴 경로는 안 풀림)
@@ -88,6 +103,8 @@ class Reconciler:
             # 01 장애 정책 "잔고 불일치": 재조회 1회(체결 반영 지연 확인) 후에도 불일치면 K4 (RV-24).
             # 재조회는 이 호출 안에서(판정·실행 스레드) 끝나므로 그동안 이 계좌의 새 주문은 나가지 않는다.
             # 재조회가 실패하면 처음 결과로 판정한다(실패는 일치 증거가 아님)
+            if self._requery_wait is not None:
+                self._requery_wait()
             self._drain()
             try:
                 positions2, orders2, fills2 = self._query(account)

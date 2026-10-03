@@ -57,6 +57,9 @@ def record_fatal(path: Path, exc: BaseException) -> None:
     log_exception(path.parent, "main.fatal", exc)   # 운영 로그(storage/oplog)에도 — 예외를 내보내지 않음
 
 
+REQUERY_WAIT_SECONDS = 2.0   # 대조 불일치 재조회 전 대기 — 체결 통보 지연 확인 (01 장애 정책, 임시값 DP-37)
+
+
 def start_summary(engine: Engine, rep) -> str:  # type: ignore[no-untyped-def]
     """시작 콘솔 요약 (RV-16): 복구 실패 사유·결과 불명 건수·활성 정지·전략 상태. 비밀정보 없음(계좌는 별칭)."""
     lines = [f"  결과 불명 의도: {engine.start_unknown}건"]
@@ -191,7 +194,8 @@ def _run(root: Path, mode: Mode, base: Path, startup, app: AppSettings, gate_set
                                   caps=caps, strategies=strategies, kill_file=base / "KILL",
                                   clock_health=clock_monitor, alert_thresholds=alert_thresholds,
                                   fallback_log=base / "logs" / "alerts-fallback.log",
-                                  reconcile_every=_minutes(app.reconcile_minutes))
+                                  reconcile_every=_minutes(app.reconcile_minutes),
+                                  requery_wait=lambda: time.sleep(REQUERY_WAIT_SECONDS))
         except ConfigError as exc:
             print(f"시작 거부(주문 없음): {exc}")
             return 2
