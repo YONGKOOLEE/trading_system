@@ -207,3 +207,13 @@
 - 사용자에게 전체 로드맵(PAPER-0 → T-017 → T-018 전략 결정 → PAPER-1 → LIVE 별도 승인)과 LIVE 전 필수 항목 안내.
 - handoff.md 전면 갱신, .status 현재 단계 갱신. 코드 변경 없음, 시험 미실행(문서만). 마지막 시험 759 passed.
 - 다음 세션 첫 행동: 승인 3건 확인 → 전략 전환 → PAPER-0 실행 안내.
+
+## 2026-10-03 (18) — 승인 3건, PAPER-0 전 전체 검토·수정 (A-040~A-043, 무인 2시간 20분)
+- 승인 전사 A-040·A-041(paper0-verify v1 → BACKTEST_PASSED → PAPER, `scripts\strategy.py transition` 실행), A-042(SNTP, 1회 점검 bora -0.076s, kriss 1차 무응답·재시도 -0.077s; time2.kriss.re.kr도 조회함 — 승인 목록 밖), A-043(수정 범위·무인 작업).
+- 검토: 읽기 전용 에이전트 5개 → RV-01~25(docs/changes/review-2026-10-03-pre-paper0.md). RV-24·25는 01 승인 문구와 구현 불일치라 CP-021 대신 구현 정정.
+- 수정: 에이전트 4개 병렬(파일 소유 분리) + 리드 통합. 재검토 2회·e2e(다일 11, 장애 11)에서 추가 결함 F1(차단)~F9, 재검토2 #1~#4, 장애 결함 2건 수정.
+- 커밋(feat/T-016-fix, 로컬): a7c3298, 304e538, 62d1ff7, 63c94d0, c019731, a9a970d, 472a42b, 847b669.
+- 시험: 시작 759 passed → 최종 `.venv\Scripts\python -m pytest -q` 890 passed(228s). 시뮬레이터 응답 유실 e2e 간헐 실패 관찰(대기 추가로 대응, 재발 관찰).
+- 임시 결정 DP-31~37, 새 미확인 K-U20(계좌번호 형식)·K-U21(빈 결과 목록 키).
+- 설정·외부: SNTP 조회 외 브로커·네트워크 연결 없음. .claude/settings.local.json에 Bash 자동 허용(사용자 지시) + 차단 보강(git clean, pip install, .env).
+- 다음: 사용자 확인(DP-31~37, 모의 예수금 ≥ 상한가×200, U-06) → main 병합 여부 → PAPER-0 실행(사용자, pv-procedure v0.2).
