@@ -251,3 +251,12 @@ def test_r6_f1b_confirm_unknown_accepted_under_kill_cancels_buy(env: Env) -> Non
     n0 = _cancels(env)
     env.halts.confirm_unknown(unk.intent_id, True, "u", no)
     assert _cancels(env) == n0 + 1
+
+
+def test_r6_f4_account_resume_does_not_release_global_k1(env: Env) -> None:
+    """계좌 지정 RESUME K1은 전체 계좌 KILL 행을 풀지 않는다(다른 계좌의 KILL까지 사라짐 방지) — 전체 RESUME 필요."""
+    env.halts.activate(HaltType.K1, "LOCAL:u", "kill all", None)
+    r = env.halts.resume(HaltType.K1, ACCOUNT, "LOCAL", "u")
+    assert not r.ok and "전체" in r.reason
+    assert [h for h in env.repo.halt_rows(None) if h["halt_type"] == "K1"]
+    assert env.halts.resume(HaltType.K1, None, "LOCAL", "u").ok

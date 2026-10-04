@@ -246,6 +246,9 @@ class HaltManager:
             if halt_type is HaltType.K9:
                 rows = [r for r in rows if r["scope_owner"] == owner]
             veto = superseded() if superseded is not None else None
+            if not veto and halt_type is HaltType.K1 and account is not None and any(r["account"] is None for r in rows):
+                # 계좌 RESUME이 전체 계좌 KILL 행까지 풀면 다른 계좌의 KILL 의사가 사라진다 (6차 검토 F-4)
+                veto = "전체 계좌 K1이 걸려 있음 — 계좌 지정 없이(전체) 재개해야 함"
             result = ResumeResult(False, veto) if veto else self._check_resume(halt_type, rows, channel)
             if result.ok:
                 for row in rows:
