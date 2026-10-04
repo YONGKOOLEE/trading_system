@@ -159,10 +159,13 @@ class HaltManager:
             return None
         return self.activate(HaltType.K2, "monitor", f"일일 손실 {daily.loss_ratio} ≥ L4 {l4_ratio}", account)
 
-    def _cancel_open_buys(self, halt_id: str, account: str | None, owner: str | None, skip_tried: bool = False) -> None:
+    def _cancel_open_buys(self, halt_id: str, account: str | None, owner: str | None, skip_tried: bool = False,
+                          only: str | None = None) -> None:
         accounts = [account] if account else self._repo.accounts()
         for acct in accounts:
             for order in self._repo.open_orders(acct, Side.BUY.value):
+                if only is not None and order.order_key != only:
+                    continue
                 if skip_tried and self._repo.select(   # 브로커로 보낸 적 있는 취소만 제외 — 전송 전 막힌 것은 재시도 (5차 F-3)
                         "SELECT 1 FROM intent i JOIN attempt a ON a.intent_id=i.intent_id "
                         "WHERE i.request_type='CANCEL' AND i.target_order_key=? AND a.state<>'NOT_SENT' LIMIT 1",
@@ -263,16 +266,16 @@ class HaltManager:
             self._retry_after_release(f"재개 {halt_type.value}", auto=False)
         return result
 
-    def cancel_newly_open_buys(self, why: str) -> None:
+    def cancel_newly_open_buys(self, why: str, order_key: str | None) -> None:
         """결과 불명이던 매수가 접수로 확정됐을 때(해소기 FOUND·사람 확정) 판정·실행 스레드가 부른다 (6차 검토 F-1).
 
         정지 발동 시점엔 브로커 주문 행이 없어 취소 대상에서 빠졌던 매수를, 아직 취소를 보낸 적 없으면 한 번 취소한다
         (자동 해제 재시도와 같은 규칙 — 브로커 거부 취소는 다시 보내지 않음)."""
-        if not any(HaltType(r["halt_type"]) in CANCELS_OPEN_BUYS for r in self._repo.halt_rows(None)):
+        if order_key is None or not any(HaltType(r["halt_type"]) in CANCELS_OPEN_BUYS for r in self._repo.halt_rows(None)):
             return
-        self._retry_after_release(why, auto=True)
+        self._retry_after_release(why, auto=True, only=order_key)   # 확정된 그 주문만 (7차 F-3)
 
-    def _retry_after_release(self, why: str, auto: bool) -> None:
+    def _retry_after_release(self, why: str, auto: bool, only: str | None = None) -> None:
         if self.send_thread is not None and threading.get_ident() != self.send_thread:
             # 주문(취소)은 판정·실행 스레드에서만 (D-038, 4차 검토 F-B). 다른 스레드 해제는 다음 재개·해제 때 재시도
             self._alert("WARNING", f"{why}: 판정·실행 스레드가 아니라 막힌 매수 미체결 취소 재시도 보류", None)
@@ -281,9 +284,9 @@ class HaltManager:
             # 바깥 저장 단위 안에서는 보내지 않는다(INV-03 — 실행기도 거부). 다음 해제·재개 때 다시 시도된다
             self._alert("WARNING", f"{why}: 저장 단위 안이라 막힌 매수 미체결 취소 재시도 보류", None)
             return
-        self._retry_halt_cancels(auto=auto)   # 사용자 재개는 전부, 자동 해제는 미시도분만 (5차 검토 F-2)
+        self._retry_halt_cancels(auto=auto, only=only)   # 사용자 재개는 전부, 자동 해제는 미시도분만 (5차 검토 F-2)
 
-    def _retry_halt_cancels(self, auto: bool = False) -> None:
+    def _retry_halt_cancels(self, auto: bool = False, only: str | None = None) -> None:
         """한 정지가 풀리면 남은 정지의 매수 미체결 취소를 다시 시도한다 (다른 정지에 막혔던 취소, CP-018 R-10).
 
         auto(자동 해제 경로): 이미 취소 의도가 만들어진 주문(브로커에 보냈다가 거부·결과 불명 등)은 다시 보내지 않는다 —
@@ -293,7 +296,7 @@ class HaltManager:
             k = HaltType(row["halt_type"])
             if k in CANCELS_OPEN_BUYS:
                 self._cancel_open_buys(row["halt_id"], row["account"], row["scope_owner"] if k is HaltType.K9 else None,
-                                       skip_tried=auto)
+                                       skip_tried=auto, only=only)
 
     def _check_resume(self, halt_type: HaltType, rows: list[dict], channel: str) -> ResumeResult:
         if channel != Channel.LOCAL and halt_type not in REMOTE_RESUMABLE:
@@ -358,7 +361,10 @@ class HaltManager:
                 self._executor.close(intent, IntentState.NOT_ACCEPTED, f"사람 확정: 미접수 ({actor})")
             self._repo.audit(now, "UNKNOWN_CONFIRMED", actor, intent_id, {"accepted": accepted, "order_no": order_no})
         if accepted:
-            self.cancel_newly_open_buys(f"사람 확정 접수 {intent_id}")   # 정지 중 확정된 매수 취소 (6차 F-1, 사람 경로)
+            try:   # 정지 중 확정된 매수 취소 (6차 F-1 사람 경로). 확정은 이미 커밋됨 — 취소 실패가 확정을 FAILED로 만들지 않게 (7차 F-4)
+                self.cancel_newly_open_buys(f"사람 확정 접수 {intent_id}", self._repo.intent(intent_id).broker_order_key)
+            except Exception as exc:  # noqa: BLE001
+                self._alert("EMERGENCY", f"확정 뒤 정지 취소 실패 {type(exc).__name__} — 매수 미체결 확인 필요", intent_id)
         return intent_id
 
     # --- 조회 ----------------------------------------------------------------------

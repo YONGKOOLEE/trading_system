@@ -222,19 +222,24 @@ def test_r6_f3_exec_policy_cancel_retried_after_halt_and_no_row_flood(tmp_path) 
         w.resume_k8()
         w.at(9, 5)
         w.engine.tick()
-        w.engine.halts.activate(HaltType.K5, "recovery", "조회 실패", A)          # 취소를 막는 정지
-        w.at(9, 15, 1)
-        rows0 = len(w.repo.select("SELECT 1 FROM gate_decision WHERE request_type='CANCEL'"))
+        # 7차 F-2: 대조로 저절로 풀리지 않는 K8로 막는다(K5는 같은 tick 대조에서 자동 해제돼 막힘을 검증 못 했음)
+        w.engine.halts.activate(HaltType.K8, "monitor", "시험: 실행 중 K8", None)
+        cancels = lambda: w.repo.select(  # noqa: E731
+            "SELECT result, failed_check FROM gate_decision WHERE request_type='CANCEL' ORDER BY seq")
         for s in range(10):                                                     # 10초 동안 tick
             w.at(9, 15, 1 + s)
             w.engine.tick()
-        rows1 = len(w.repo.select("SELECT 1 FROM gate_decision WHERE request_type='CANCEL'"))
-        assert rows1 - rows0 <= 1                                              # 막힌 동안 행 폭주 없음
-        w.engine.halts.report_condition(HaltType.K5, A, "broker_connected", True, "x")
-        w.at(9, 16, 30)
-        w.engine.halts.report_condition(HaltType.K5, A, "reconciled", True, "y")
+        blocked = cancels()
+        assert len(blocked) == 1 and blocked[0]["result"] == "REJECTED", blocked   # 1분 안엔 한 번만
+        w.at(9, 16, 5)
         w.engine.tick()
-        assert any(i["request_type"] == "CANCEL" for i in w.intents()), w.intents()
+        assert len(cancels()) == 2                                              # 1분 뒤 새 키로 재판정
+        assert not any(i["request_type"] == "CANCEL" for i in w.intents())
+        w.engine.halts.report_condition(HaltType.K8, None, "recovery_ok", True, "시험")
+        assert w.engine.halts.resume(HaltType.K8, None, "LOCAL", "u").ok
+        w.at(9, 17, 10)
+        w.engine.tick()
+        assert any(i["request_type"] == "CANCEL" for i in w.intents()), (w.intents(), cancels())
     finally:
         w.close()
 
