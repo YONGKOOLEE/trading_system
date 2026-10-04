@@ -811,6 +811,20 @@ class Repository:
                      "PENDING", 0))
         return len(rows)
 
+    def skip_old_alerts_on_first_enable(self, channel: str = "telegram") -> int:
+        """알림 채널을 처음 켤 때(대기열 기록이 하나도 없을 때) 그 전의 감사 ALERT를 보내지 않도록 마지막 ALERT를
+        SKIPPED로 넣는다(enqueue_new_alerts는 최대 alert_seq 이후만 넣음). 건너뛴 수. 이미 기록이 있으면 0 —
+        연결 이후 밀린 알림은 그대로 보낸다(V-30)."""
+        if self._x("SELECT 1 FROM notification LIMIT 1").fetchone() is not None:
+            return 0
+        r = self._x("SELECT COUNT(*), MAX(seq) FROM audit_event WHERE kind='ALERT'").fetchone()
+        if not r[0]:
+            return 0
+        self._x("INSERT INTO notification(alert_seq, mode, level, message, channel, status, attempts) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (int(r[1]), self.mode.value, "INFO", f"채널 연결 이전 알림 {r[0]}건 건너뜀", channel, "SKIPPED", 0))
+        return int(r[0])
+
     def pending_notifications(self) -> list[dict]:
         return [dict(r) for r in self._x("SELECT * FROM notification WHERE status='PENDING' ORDER BY alert_seq")]
 

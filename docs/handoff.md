@@ -2,7 +2,7 @@
 
 - 갱신: 2026-10-04 오후 / 결정표 전부 처리(A-046~A-053), main 병합(71f4438까지) / **다음: (지시 시) main 재병합 → PAPER-0 실행(사용자)**
 - 브랜치(로컬만, push 없음): main = 71f4438 (A-047 병합). **feat/T-017-verify는 그 뒤 문서 커밋 4개 더 있음**(264340b·6609ee8·53b5294·승인 반영) — 병합은 지시 시
-- 테스트 `.venv\Scripts\python -m pytest -q` → **983 passed** (2026-10-04 21:32 실행, 757초 — 예수금 관찰 기록 A-054 포함). 빠른 확인은 `--ignore=tests/scenario/test_run_rehearsal.py --ignore=tests/scenario/test_run_rehearsal2.py` (969, 약 5.5분)
+- 테스트 `.venv\Scripts\python -m pytest -q` → **997 passed** (2026-10-04 밤, 757초 — 예수금 관찰 기록·검토 #1 수정·텔레그램 연결 포함). 빠른 확인은 `--ignore=tests/scenario/test_run_rehearsal.py --ignore=tests/scenario/test_run_rehearsal2.py` (969, 약 5.5분)
 - 권한: settings.local.json의 git merge 차단 규칙은 사용자가 삭제(2026-10-04)
 
 ## 현재 상태
@@ -12,7 +12,8 @@
 - LIVE 계좌: 모의는 현 계좌 유지, LIVE는 자동매매 전용 실계좌 추가(A-051).
 - PAPER-0 운영 방식(A-054): **10/6(화)부터 출근 전 시작**(06:45 preflight → run → K8 재개, 07:15 출발, 퇴근 후 확인) — pv-procedure §3.2. 예수금은 CASH_OBSERVED 자동 기록.
 - M2: 바이낸스 현물 유지(사용자 2026-10-04, 승인 범위 그대로). A-055: USDT 기준·환율 없음, 일일 기준 UTC 00:00, 한국 거주자 이용 가능(사용자 보고). 미결: PAPER 환경(테스트넷 권장/Demo), API 키 유형·리셋 처리(나중), 자동매매 전용 계정 분리(사용자 수동 매매 중 — A-051과 같은 문제). 숏·선물은 범위 밖 — 나중에 백테스트 근거 후 CP. 공식 문서 조사 초안 `docs/broker-specs/binance-spot.md`(작성 중/검토 필요).
-- 텔레그램: 모듈(ops/telegram.py)은 구현·시험됨, **run에 미연결**. PAPER-0 1일차 뒤 별도 브랜치에서 연결(봇 생성·토큰 입력은 사용자, 외부 연결 승인 필요).
+- 텔레그램(A-056): run 연결 구현(feat/T-013-telegram-run, app/telegram_run.py, 기본 꺼짐). 사용자 봇 생성·.env.paper 키 입력·`scripts/telegram-test.py` 전송 성공(2026-10-04). **켜기(app.paper.toml `[telegram] enabled = true`)는 사용자, 병합 뒤**. 미확인: run 중 알림 자동 전송·명령 수신 실측(10/5 예행연습). 남은 위험(낮음): 텔레그램 스레드는 감시 스레드 생존 감시 밖, 종료 시 최대 약 10초 지연.
+- `.env.example`에 TELEGRAM_* 자리표시자 추가 못 함(권한 차단) — 사용자 추가 필요.
 - 전략 paper0-verify v1 = PAPER (A-040·A-041), SNTP 연결 A-042. **실전 주문 코드·LIVE 승인 없음**.
 - PAPER 설정 완비(.env.paper는 사용자 작성·에이전트 읽기 금지, connection_approved=true, 005930, 시장가만).
 

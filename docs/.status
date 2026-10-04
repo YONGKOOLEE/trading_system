@@ -14,4 +14,4 @@ implementation_start: authorized   # A-022 (2026-10-01)
 live_order_code: not-authorized
 live_run: not-authorized    # 시장별: M1/M2/M3 모두 없음
 commit_policy: D-082 (A-017) + A-030   # 작업 완료·테스트 통과 시 로컬 커밋(문서 포함, A-030), push·main 병합은 지시 시
-last_updated: 2026-10-04   # 마지막 승인 A-055 (2026-10-04)
+last_updated: 2026-10-04   # 마지막 승인 A-056 (2026-10-04)

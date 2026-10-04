@@ -7,6 +7,9 @@
   sntp_servers                  ["host:port", ...] (2곳 권장, 03 §5.3)
 [paper]                         (PAPER만)
   connection_approved           키움 모의 접속 사용자 승인 여부. 기본 없음 = false. **사용자만 true로 바꾼다** (T-015, D-083)
+[telegram]                      (PAPER만, 선택)
+  enabled                       텔레그램 알림·원격 명령 연결 (true/false, 기본 false). true면 .env.paper에
+                                TELEGRAM_BOT_TOKEN·TELEGRAM_CHAT_ID가 있어야 시작 (03 D-052, 01 §2.9·§2.10)
 [[instruments]]  code, kind(STOCK|ETF|ETN), leverage(문자열, 부호), lot_size(문자열)
 [[strategies]]   module("패키지.모듈:클래스"), params(파라미터 파일 경로, 저장소 기준), eval_times(["HH:MM"] KST)
                  verification_approval (선택, PAPER만): PAPER-0 검증 전략 승인 A-ID (DP-24 a, A-037)
@@ -49,6 +52,7 @@ class AppSettings:
     instruments: dict[str, InstrumentInfo]
     strategies: tuple[StrategyDeploy, ...]
     paper_connection_approved: bool = False
+    telegram_enabled: bool = False
 
 
 def _dec(raw: object, name: str, problems: list[str]) -> Decimal | None:
@@ -68,7 +72,7 @@ def _dec(raw: object, name: str, problems: list[str]) -> Decimal | None:
 
 def parse_app_settings(raw: dict, mode: Mode, repo_root: Path) -> AppSettings:
     problems: list[str] = []
-    allowed = {"app", "instruments", "strategies"} | ({"paper"} if mode is Mode.PAPER else set())
+    allowed = {"app", "instruments", "strategies"} | ({"paper", "telegram"} if mode is Mode.PAPER else set())
     for k in raw:
         if k not in allowed:
             problems.append(f"{k}: 알 수 없는 키 (이 모드에서 허용: {', '.join(sorted(allowed))})")
@@ -111,6 +115,15 @@ def parse_app_settings(raw: dict, mode: Mode, repo_root: Path) -> AppSettings:
                 problems.append("paper.connection_approved: true/false")
             approved = ca is True
 
+    telegram = False
+    if mode is Mode.PAPER and "telegram" in raw:
+        tgr = raw["telegram"]
+        if not isinstance(tgr, dict) or any(k != "enabled" for k in tgr):
+            problems.append("[telegram]에는 enabled만 둔다 (토큰·채팅 ID는 .env.paper)")
+        elif not isinstance(tgr.get("enabled", False), bool):
+            problems.append("telegram.enabled: true/false")
+        else:
+            telegram = tgr.get("enabled", False) is True
     infos: dict[str, InstrumentInfo] = {}
     for i, it in enumerate(raw.get("instruments") or []):
         if not isinstance(it, dict) or set(it) != {"code", "kind", "leverage", "lot_size"}:
@@ -163,7 +176,8 @@ def parse_app_settings(raw: dict, mode: Mode, repo_root: Path) -> AppSettings:
                                          tuple(sorted(time(int(t[:2]), int(t[3:])) for t in set(times))), va))
     if problems:
         raise ConfigError(problems)
-    return AppSettings(account, loop, rec, tuple(servers), infos, tuple(strategies), approved)  # type: ignore[arg-type]
+    return AppSettings(account, loop, rec, tuple(servers), infos, tuple(strategies), approved,  # type: ignore[arg-type]
+                       telegram)
 
 
 def load_app_settings(path: Path, mode: Mode, repo_root: Path) -> AppSettings:

@@ -157,6 +157,9 @@ def run_main(root: Path, environ: dict[str, str] | None = None, max_seconds: flo
             raise ConfigError("배포 설정의 계좌 별칭과 한도 파일의 계좌가 다르다")
         gate_settings, alert_thresholds, calendar, ticks, caps = _load_common(root, mode)
         strategies = _strategies(app)
+        if app.telegram_enabled:
+            from .telegram_run import check_telegram_secrets
+            check_telegram_secrets(startup.secrets)      # 브로커 접속 전에 확인
         if mode is Mode.PAPER and not app.paper_connection_approved:
             raise ConfigError("키움 모의 접속 승인 전 (config/app.paper.toml [paper] connection_approved = true는 "
                               "사용자가 T-015 승인 후 직접 설정)")
@@ -224,6 +227,9 @@ def _run(root: Path, mode: Mode, base: Path, startup, app: AppSettings, gate_set
         clock_monitor.check()                         # 시작 점검은 판정·실행 스레드(이 스레드)에서 직접
         clock_monitor._halts = QueuedHalts(engine)    # noqa: SLF001 — 이후 점검은 감시 스레드 → 정지는 큐로 (RV-22)
         io_threads = extra(engine, stop, closers) if extra is not None else []
+        from .telegram_run import telegram_threads
+        io_threads += telegram_threads(engine, repo, app.telegram_enabled, startup.secrets, clock, base / "KILL",
+                                       stop, log_dir=base / "logs")   # 03 D-052: 알림·원격 명령 (기본 꺼짐)
         # 시작 일봉(extra 안, 이 스레드) 뒤로는 시세 스레드가 K10을 걸므로 큐 경유 (3차 검토 F-5, RV-22)
         store.halts = QueuedHalts(engine)
         watched: list = [(t, "시세 조회") for t in io_threads if t.name == "market-poller"]

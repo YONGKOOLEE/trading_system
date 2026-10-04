@@ -11,6 +11,11 @@ sntp_servers = ["<host:123>", "<host:123>"]   # 2곳 권장 (03 §5.3)
 # [paper]
 # connection_approved = false
 
+# PAPER 모드에서만, 선택. 텔레그램 알림·원격 명령(03 D-052). true면 .env.paper에 TELEGRAM_BOT_TOKEN·TELEGRAM_CHAT_ID 필요.
+# 사용자가 scripts/telegram-test.py 성공을 확인한 뒤 직접 켠다. 켜면 알림 연속 실패 3회 → K11(신규·증액 차단).
+# [telegram]
+# enabled = false
+
 [[instruments]]
 code = "<6자리 종목코드>"
 kind = "<STOCK|ETF|ETN>"
