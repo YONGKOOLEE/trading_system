@@ -237,3 +237,17 @@ def test_r6_f3_exec_policy_cancel_retried_after_halt_and_no_row_flood(tmp_path) 
         assert any(i["request_type"] == "CANCEL" for i in w.intents()), w.intents()
     finally:
         w.close()
+
+
+def test_r6_f1b_confirm_unknown_accepted_under_kill_cancels_buy(env: Env) -> None:
+    """사람이 결과 불명 매수를 접수로 확정했을 때도 K1 중이면 그 주문을 한 번 취소한다."""
+    from trading_system.domain.enums import IntentState
+    env.broker.behavior = FakeBehavior.LOST_ACCEPT
+    _limit_buy(env, "TST-B", "ob")
+    [unk] = env.repo.intents_in_state(IntentState.UNKNOWN)
+    env.broker.behavior = FakeBehavior.ACCEPT_ONLY
+    env.halts.activate(HaltType.K1, "LOCAL:u", "kill", None)
+    [no] = env.broker.open_order_nos()
+    n0 = _cancels(env)
+    env.halts.confirm_unknown(unk.intent_id, True, "u", no)
+    assert _cancels(env) == n0 + 1

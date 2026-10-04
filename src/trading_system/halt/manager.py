@@ -354,6 +354,8 @@ class HaltManager:
             else:
                 self._executor.close(intent, IntentState.NOT_ACCEPTED, f"사람 확정: 미접수 ({actor})")
             self._repo.audit(now, "UNKNOWN_CONFIRMED", actor, intent_id, {"accepted": accepted, "order_no": order_no})
+        if accepted:
+            self.cancel_newly_open_buys(f"사람 확정 접수 {intent_id}")   # 정지 중 확정된 매수 취소 (6차 F-1, 사람 경로)
         return intent_id
 
     # --- 조회 ----------------------------------------------------------------------
