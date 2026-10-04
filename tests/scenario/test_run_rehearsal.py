@@ -114,7 +114,8 @@ def make_root(tmp: Path, sntp_port: int) -> Path:
     shutil.copytree(REPO / "config" / "calendar", root / "config" / "calendar")
     app = (REPO / "config" / "app.paper.toml").read_text(encoding="utf-8")
     lines = [f'sntp_servers = ["127.0.0.1:{sntp_port}"]' if ln.startswith("sntp_servers") else ln
-             for ln in app.splitlines()]
+             for ln in app.splitlines()
+             if ln.strip() not in ("[telegram]", "enabled = true", "enabled = false")]  # 텔레그램은 test_telegram_run에서
     assert any(ln.startswith("sntp_servers = [\"127.0.0.1") for ln in lines)
     assert "connection_approved = true" in app   # 실제 설정 그대로 (사용자 승인 A-035로 true)
     (root / "config" / "app.paper.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")

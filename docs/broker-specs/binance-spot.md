@@ -1,7 +1,7 @@
 # 바이낸스 Spot API — 크립토 현물 (M2) 확인 기록
 
 - 문서명: binance-spot.md (브로커 API 확인 기록)
-- 버전: v0.1
+- 버전: v0.2
 - 상태: draft
 - 작성: 2026-10-04 (에이전트)
 - 근거: 사용자 지시(2026-10-04 "바이낸스로 진행", 공개 문서 조사)
@@ -10,6 +10,8 @@
 - 증거 기준: 바이낸스 공식 문서(developers.binance.com, github.com/binance, binance.com 지원·공지)만 근거로 쓴다. 제3자 블로그·라이브러리 이슈·Binance Square 게시물은 근거로 쓰지 않는다.
 - 인용 주의: 원문은 웹 조회 도구로 읽었다. 도구가 요약해서 돌려준 경우가 있어, 따옴표 문구라도 **주문 안전에 직접 영향을 주는 문구(§5 표시 ★)는 구현 착수 전에 사람이 원문과 대조**한다. 요약끼리 어긋난 항목은 미확인으로 둔다.
 - 상태 표기: **확인** / **미확인**. 차단 표기는 M2 구현 착수 기준.
+- ★ 인용 원문 대조: 2026-10-04 (결과 §5 표시). raw GitHub markdown(rest-api.md, web-socket-api.md, errors.md, CHANGELOG.md, user-data-stream.md, master)을 내려받아 문자열 대조. ★ 6행 모두 ✔(일치·의미 일치). 단 "같은 ID 재사용"은 REST·WS API 문서 간 범위가 달라 B-U2 미확인 유지.
+- 변경 이력: v0.1 (2026-10-04) 최초 작성 / v0.2 (2026-10-04) §5 ★ 인용 원문 대조 — 원문 문장으로 교체, WS API의 "filled or expired"·취소 ID 재사용 문구 추가, -1000 결과 불명 분류를 설계 판단으로 명시, cancelReplace 409 양방향 주석, listenKey 폐지일 CHANGELOG 대조.
 
 ## 1. 출처
 | ID | 출처 | URL | 버전·일자 |
@@ -109,25 +111,25 @@
 | 주문 유형 | LIMIT, MARKET, STOP_LOSS, STOP_LOSS_LIMIT, TAKE_PROFIT, TAKE_PROFIT_LIMIT, LIMIT_MAKER | S7 enums | 확인 |
 | 필수 파라미터 | LIMIT: timeInForce·quantity·price / MARKET: quantity 또는 quoteOrderQty / LIMIT_MAKER: quantity·price | S7 rest-api | 확인 |
 | timeInForce | GTC, IOC, FOK | S7 enums | 확인 |
-| ★ newClientOrderId 설명 | 파라미터 설명: "A unique id among open orders. Automatically generated if not sent." | S7 rest-api | 확인 |
-| ★ 같은 ID 재사용 | 다른 문구: "Orders with the same `newClientOrderID` can be accepted only when the previous one is filled, otherwise the order will be rejected." → **체결된 주문의 ID는 재사용이 받아들여진다.** 취소·만료 주문 ID 재사용, 판정 보존 기간은 문구 간 범위가 달라 확정 못 함 | S4, S7 | 일부 확인. 범위 **미확인** B-U2 |
-| ★ 중복 거부 메시지 | -2010 NEW_ORDER_REJECTED "Duplicate order sent." (설명: clOrdId already in use) | S7 errors.md | 확인 |
-| 멱등성 결론 | 서버 중복 거부는 **열린 주문 범위**의 보호일 뿐, 체결 후 같은 ID 재전송은 새 주문이 될 수 있음 → **브로커 멱등성으로 간주하지 않는다** (CLAUDE.md §8-5) | S4, S7 | 확인된 사실에서 도출 |
+| ✔ newClientOrderId 설명 | REST `POST /api/v3/order` 파라미터 설명: "A unique id among open orders. Automatically generated if not sent." (원문 대조 2026-10-04, https://raw.githubusercontent.com/binance/binance-spot-api-docs/master/rest-api.md — "New order (TRADE)" 표, SOR 주문 표도 같은 문구). WS API `order.place`는 "Arbitrary unique ID among open orders. Automatically generated if not sent" | S7 rest-api, web-socket-api | 확인 (일치) |
+| ✔ 같은 ID 재사용 | REST 같은 칸 원문: "Orders with the same `newClientOrderID` can be accepted only when the previous one is filled, otherwise the order will be rejected." (원문 대조 2026-10-04, https://raw.githubusercontent.com/binance/binance-spot-api-docs/master/rest-api.md). **문서 간 차이**: WS API `order.place`·`order.cancelReplace` Notes는 "A new order with the same `clientOrderId` is accepted only when the previous one is filled or expired." (만료 포함), cancelReplace Notes는 "The new order can reuse old `clientOrderId` of the canceled order.", 취소 Notes는 "`newClientOrderId` will replace `clientOrderId` of the canceled order, freeing it up for new orders." (원문 대조 2026-10-04, https://raw.githubusercontent.com/binance/binance-spot-api-docs/master/web-socket-api.md) → **체결·만료·취소된 주문의 ID는 재사용이 받아들여질 수 있다**(REST 문구는 "filled"만 언급, WS 문구가 더 넓음). 판정 보존 기간 문구 없음. 취소된 주문의 `clientOrderId`가 취소 요청의 새 ID로 바뀐다는 점 — 취소 후 원래 ID로 조회되는지는 **미확인** | S7 rest-api, web-socket-api | 재사용 허용 범위 문서 간 불일치 → **미확인** B-U2 (설계 결론은 아래 "멱등성 결론" 유지·강화) |
+| ✔ 중복 거부 메시지 | errors.md "-2010 NEW_ORDER_REJECTED" 계열 메시지 표 원문: "Duplicate order sent." \| "The `clOrdId` is already in use." (원문 대조 2026-10-04, https://raw.githubusercontent.com/binance/binance-spot-api-docs/master/errors.md). 표 제목은 "Messages for -1010 ERROR_MSG_RECEIVED, -2010 NEW_ORDER_REJECTED, -2011 CANCEL_REJECTED, and -2038 ORDER_AMEND_REJECTED" — 메시지별 코드 매핑은 표에 없음 | S7 errors.md | 확인 (의미 일치) |
+| 멱등성 결론 | 서버 중복 거부는 **열린 주문 범위**의 보호일 뿐, 체결 후(WS 문서 기준 만료·취소 후 포함) 같은 ID 재전송은 새 주문이 될 수 있음 → **브로커 멱등성으로 간주하지 않는다** (CLAUDE.md §8-5) | S4, S7 | 확인된 사실에서 도출 |
 | newOrderRespType | ACK / RESULT / FULL. MARKET·LIMIT 기본 FULL, 그 외 기본 ACK. FULL은 `fills`(price, qty, commission, commissionAsset, tradeId) 포함 | S4, S7 | 확인 |
 | 주문 상태 | NEW("accepted by the engine"), PENDING_NEW(주문 목록의 working order 체결 대기), PARTIALLY_FILLED, FILLED, CANCELED("canceled by the user"), PENDING_CANCEL("Currently unused"), REJECTED("not accepted by the engine and not processed"), EXPIRED(주문 규칙 또는 거래소에 의해 취소 — 예: FOK 미체결, IOC·MARKET 부분 체결, 유지보수 중 취소), EXPIRED_IN_MATCH(STP로 만료) | S7 enums | 확인 |
 | 만료 사유 | 만료 주문 조회 응답에 `expiryReason` 필드가 붙을 수 있음 | S8 (2026-05-06) | 확인 |
 | 실행 유형(executionReport x) | NEW, CANCELED, REPLACED, REJECTED, TRADE, EXPIRED, TRADE_PREVENTION | S7 enums | 확인 |
 | STP 모드 | NONE, EXPIRE_MAKER, EXPIRE_TAKER, EXPIRE_BOTH, DECREMENT, TRANSFER. 2026-04-02부터 TRANSFER 전 심볼 적용. 심볼별 기본값 `defaultSelfTradePreventionMode` | S7, S8 | 확인 |
-| ★ 5XX | "It is important to **NOT** treat this as a failure operation; the execution status is **UNKNOWN** and could have been a success." | S1 | 확인 |
-| ★ WebSocket API 5xx | "If a response contains 5xx status code, it does **not** necessarily mean that your request has failed. Execution status is _unknown_ and the request might have actually succeeded." | S12 | 확인 |
-| ★ 타임아웃 | -1007 TIMEOUT "Timeout waiting for response from backend server. Send status unknown; execution status unknown." / -1006 UNEXPECTED_RESP "... Execution status unknown." / -1000 UNKNOWN | S1, S7 | 확인 → 모두 **결과 불명** |
+| ✔ 5XX | "HTTP `5XX` return codes are used for internal errors; the issue is on Binance's side. It is important to **NOT** treat this as a failure operation; the execution status is **UNKNOWN** and could have been a success." (원문 대조 2026-10-04, https://raw.githubusercontent.com/binance/binance-spot-api-docs/master/rest-api.md "HTTP Return Codes") | S1 | 확인 (일치) |
+| ✔ WebSocket API 5xx | "**Important:** If a response contains 5xx status code, it **does not** necessarily mean that your request has failed. Execution status is _unknown_ and the request might have actually succeeded. Please use query methods to confirm the status. You might also want to establish a new WebSocket connection for that." (원문 대조 2026-10-04, https://raw.githubusercontent.com/binance/binance-spot-api-docs/master/web-socket-api.md) | S12 | 확인 (의미 일치 — v0.1 인용은 강조 위치만 다름. 원문은 조회로 확인하라고 명시) |
+| ✔ 타임아웃 | -1007 TIMEOUT "Timeout waiting for response from backend server. Send status unknown; execution status unknown." / -1006 UNEXPECTED_RESP "An unexpected response was received from the message bus. Execution status unknown." / -1000 UNKNOWN "An unknown error occurred while processing the request." (원문 대조 2026-10-04, https://raw.githubusercontent.com/binance/binance-spot-api-docs/master/errors.md). rest-api.md "APIs have a timeout of 10 seconds ..." 문장에도 -1007 문구 동일 | S1, S7 | -1007·-1006 확인 (일치) → **결과 불명**. -1000 원문은 실행 상태를 언급하지 않음 → 결과 불명 처리는 **설계 판단**(보수적 분류) |
 | 매칭엔진 미도달 | -1013 INVALID_MESSAGE "The request is rejected by the API. (i.e. The request didn't reach the Matching Engine.)" → 명시 거부 | S7 | 확인 |
 | 주문 조회 | `GET /api/v3/order` (weight 4). "Either `orderId` or `origClientOrderId` must be sent." 둘 다 보내면 orderId 우선 검색 후 origClientOrderId 검증 | S5, S7 | 확인 |
 | 조회 없음 | -2013 NO_SUCH_ORDER "Order does not exist." / "Unknown order sent." | S7 | 확인. 접수 직후 조회 시 "없음"이 확정인지(데이터 소스 지연)는 **미확인** B-U3 |
 | 보관 | -2026 ORDER_ARCHIVED: 체결 수량 없이 취소·만료된 지 90일 넘은 주문은 보관 처리 | S7 | 확인 |
 | 데이터 소스 | 엔드포인트마다 Matching Engine / Memory / Database 중 하나(지연 순) | S1 | 확인. 엔드포인트별 값은 구현 시 표기 확인 |
 | 취소 | `DELETE /api/v3/order`, orderId 또는 origClientOrderId. `cancelRestrictions`: ONLY_NEW / ONLY_PARTIALLY_FILLED | S4 | 확인 |
-| 취소 후 신규 | `POST /api/v3/order/cancelReplace`. cancelReplaceMode STOP_ON_FAILURE(취소 실패 시 신규 시도 안 함) / ALLOW_FAILURE(취소 실패해도 신규 시도). HTTP 200 둘 다 성공, 400 취소 실패·신규 미시도, 409 한쪽만 성공, 429 한도. 미시도 신규도 미체결 주문 수 +1 | S4, S7 | 확인. 원자성 보장 문구는 확인 못 함 → 원자적이라고 가정하지 않음 |
+| 취소 후 신규 | `POST /api/v3/order/cancelReplace`. cancelReplaceMode STOP_ON_FAILURE(취소 실패 시 신규 시도 안 함) / ALLOW_FAILURE(취소 실패해도 신규 시도). HTTP 200 둘 다 성공, 400 취소 실패·신규 미시도, 409 한쪽만 성공, 429 한도. 미시도 신규도 미체결 주문 수 +1. (원문 대조 2026-10-04: 일반 정보 문장은 "HTTP `409` return code is used when a cancelReplace order partially succeeds. (i.e. if the cancellation of the order fails but the new order placement succeeds.)"로 한 방향만 예시하나, cancelReplace 응답 표는 취소 성공·신규 실패도 409 — https://raw.githubusercontent.com/binance/binance-spot-api-docs/master/rest-api.md. 409 수신 시 cancelResult·newOrderResult로 어느 쪽인지 판별 필요) | S4, S7 | 확인. 원자성 보장 문구는 확인 못 함 → 원자적이라고 가정하지 않음 |
 | 수량 감소 정정 | `PUT /api/v3/order/amend/keepPriority`(weight 4), newQty < 원수량, 대기 순서 유지 | S4 | 확인 |
 | 주문 테스트 | `POST /api/v3/order/test` 존재(매칭엔진 미전송) | S4 | 확인(이름만). 상세 미열람 |
 | 주문 거부 사유 예 | "Account has insufficient balance for requested action.", "Order would immediately match and take."(LIMIT_MAKER), "Market is closed.", "This action is disabled on this account." 등 | S7 | 확인 |
@@ -156,8 +158,8 @@
 | 열린 주문 | `GET /api/v3/openOrders` weight 6(심볼 지정) / 80(심볼 생략) | S5 | 확인 |
 | 전체 주문 | `GET /api/v3/allOrders` weight 20 | S5 | 확인 |
 | 수수료율 | `GET /api/v3/account/commission` weight 20 | S5 | 확인 |
-| **사용자 데이터 스트림 (현행)** | "Subscribe via the WebSocket API using an API Key." → WebSocket API `userDataStream.subscribe`(session.logon 후, Ed25519 인증 세션) 또는 `userDataStream.subscribe.signature`(로그온 없이 서명 요청). 각 weight 2. `userDataStream.unsubscribe`, `session.subscriptions` | S13, S14, S8 | 확인. signature 방식의 지원 키 유형 문구는 요약 간 상충 → **미확인** B-U9 |
-| listenKey (폐지) | listenKey 방식 deprecated(2025-04-07, 2025-10-24). 2026-01-21 공지: **2026-02-20 07:00 UTC부터** `POST/PUT/DELETE /api/v3/userDataStream`, WS API `userDataStream.start/ping/stop` 사용 불가 | S8, S15 | 확인 → 설계에서 listenKey 사용 금지 |
+| **사용자 데이터 스트림 (현행)** | "Subscribe via the WebSocket API using an API Key." → WebSocket API `userDataStream.subscribe`(session.logon 후, Ed25519 인증 세션) 또는 `userDataStream.subscribe.signature`(로그온 없이 서명 요청). 각 weight 2. `userDataStream.unsubscribe`, `session.subscriptions` | S13, S14, S8 | 확인 (메서드명 원문 대조 2026-10-04: `userDataStream.subscribe`·`userDataStream.unsubscribe`는 CHANGELOG 2024-12-09, `userDataStream.subscribe.signature`·`session.subscriptions`는 2025-08-12). signature 방식 키 유형: CHANGELOG 2025-08-12 원문 "This also doesn’t require an Ed25519 API Key, and can work with any API Key type." (https://raw.githubusercontent.com/binance/binance-spot-api-docs/master/CHANGELOG.md) — B-U9 해소 후보(현행 web-socket-api.md 본문 문구는 미대조) |
+| listenKey (폐지) | listenKey 방식 deprecated(2025-04-07, 2025-10-24). 2026-01-21 공지: **2026-02-20 07:00 UTC부터** `POST/PUT/DELETE /api/v3/userDataStream`, WS API `userDataStream.start/ping/stop` 사용 불가 | S8, S15 | 확인 (CHANGELOG 2026-01-21 항목 원문 "will no longer be available starting from **2026-02-20,07:00 UTC**" 대조 2026-10-04, https://raw.githubusercontent.com/binance/binance-spot-api-docs/master/CHANGELOG.md) → 설계에서 listenKey 사용 금지 |
 | 이벤트 | outboundAccountPosition(잔고 변경), balanceUpdate(입출금·이체), executionReport(주문), listStatus(주문 목록), eventStreamTerminated(구독 종료), externalLockUpdate | S14 | 확인 |
 | executionReport 필드 | s 심볼, c clientOrderId, C 원 clientOrderId(취소 대상), S side, o 유형, f TIF, q 수량, p 가격, x 실행 유형, X 주문 상태, r 거부 사유, i orderId, **l 이번 체결 수량, z 누적 체결 수량, L 이번 체결 가격, n 수수료, N 수수료 자산, t 체결 ID**, I 실행 ID, T 거래 시각, O 생성 시각, Z 누적 체결 금액(quote), Y 이번 체결 금액, m maker 여부, v STP 시 prevented match id | S7 user-data-stream.md | 확인 (평균가 = Z / z) |
 | 전달 보장·순서·재연결 시 재전송 | 문서에서 확인 못 함 | — | **미확인** B-U8 |
@@ -187,7 +189,7 @@
 | # | 항목 | 확인 경로 | 차단 (M2 구현 착수) |
 |---|---|---|---|
 | B-U1 | 실제 rateLimits 값(실전·테스트넷). 문서 예시끼리 다름 | ② 시작 점검에서 exchangeInfo 조회 | 비차단 (시작 시 exchangeInfo 값을 읽어 적용, 보수값 하한) |
-| B-U2 | newClientOrderId 중복 판정 범위(취소·만료 주문 ID 재사용 허용 여부, 판정 보존 기간) | ① 원문 대조 → ② | 비차단 (ID는 의도별 고유 생성·재사용 금지, 서버 중복 거부를 멱등성으로 보지 않음) |
+| B-U2 | newClientOrderId 중복 판정 범위(취소·만료 주문 ID 재사용 허용 여부, 판정 보존 기간). 원문 대조 2026-10-04: REST "filled"만, WS API "filled or expired"·취소 ID 재사용 가능 — 문서 간 불일치, 보존 기간 문구 없음 | ① 원문 대조(완료) → ② | 비차단 (ID는 의도별 고유 생성·재사용 금지, 서버 중복 거부를 멱등성으로 보지 않음) |
 | B-U3 | 접수 직후 origClientOrderId 조회의 데이터 소스 지연(-2013이 "미접수" 확정인지) | ① 엔드포인트별 Data Source 표기 → ② | 비차단 (결과 불명 해소 시 openOrders·myTrades와 교차, 제한 횟수 후 사람 확인) |
 | B-U4 | 테스트넷 거래 가능 심볼·호가 유동성·체결 품질 | ② exchangeInfo·관찰 | 비차단 (PAPER 한계로 기록) |
 | B-U5 | 테스트넷 키 권한 설정·IP 제한 지원 여부 | ④ 사용자가 사이트 화면 확인 | 비차단 |

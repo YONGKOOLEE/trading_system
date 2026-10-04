@@ -14,8 +14,8 @@ connection_approved = true
 
 # 텔레그램 알림·원격 명령 (03 D-052, 기본 꺼짐). scripts/telegram-test.py 성공 후 **사용자가 직접** 아래 두 줄의 #을 지운다.
 # 켜면 알림 연속 실패 3회 → K11(신규·증액 차단, 전송 성공 시 자동 해제).
-# [telegram]
-# enabled = true
+[telegram]
+enabled = true
 
 # PAPER-0 종목: 사용자 결정 A-037 (삼성전자 1종목).
 [[instruments]]
