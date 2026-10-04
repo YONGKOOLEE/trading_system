@@ -104,11 +104,11 @@ def test_unknown_ambiguous_candidates_k3_then_confirm_accepted_with_order_no(wor
     w.broker.fill(mine)                                          # 이후 체결 → 실시간 통보로 반영
     w.run_until(kst(D0, 10, 3))
     assert w.intents()[-1]["state"] == "FILLED" and w.position() == 1, w.intents()
-    # 대조: K3 확정 전에는 두 주문 모두 미확인 브로커 주문 → K4 (열린 항목은 사람이 해소할 때까지 남는다)
+    # 대조: 결과 불명 중에는 같은 조건의 두 주문 모두 해소기에 맡겨지고(3차 검토 F-3), 확정 뒤 우리 주문은
+    # 알려진 주문이 된다 → 외부 주문만 미확인 브로커 주문 → K4
     assert "K4" in w.active()
     items = w.repo.open_recon_items(ACCOUNT)
-    assert sorted((i["kind"], i["ref"]) for i in items) == [("UNKNOWN_BROKER_ORDER", mine),
-                                                             ("UNKNOWN_BROKER_ORDER", ext)], items
+    assert sorted((i["kind"], i["ref"]) for i in items) == [("UNKNOWN_BROKER_ORDER", ext)], items
     for it in items:
         r = run_command(w, "RECONCILE_RESOLVE", {"item_id": it["item_id"], "method": "EXTERNAL"})
         assert r["status"] == "DONE", r
@@ -341,10 +341,6 @@ def test_partial_fill_remainder_system_default_policy_over_day(tmp_path: Path, m
         w.close()
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "결함 후보(03 §6.4 '마감 후 대조에서 미체결이 남아 있지 않으면 해당 의도를 만료 종결'): 브로커가 잔량을 통보 없이 "
-    "소멸시키면 마감 후 대조(reconciler._compare)가 STATE_MISMATCH 항목을 만들고 K4를 건다 — 만료 종결 경로가 "
-    "src에 없음(grep '6.4'·'소멸' 결과 fake 브로커·executor 문구뿐). 키움 마감 소멸 통보 여부는 PV-03 미확인(K-U3)."))
 def test_partial_fill_remainder_silently_expired_at_close_closes_intent_without_k4(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(days, "make_root", make_root_qty(3))
@@ -367,10 +363,6 @@ def test_partial_fill_remainder_silently_expired_at_close_closes_intent_without_
         w.close()
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "결함 후보(03 §6.4 둘째 줄 '남아 있으면(소멸하지 않는 경우) 알림하고 다음 거래일 시작 전 사용자 확인 대상'): 마감 후 "
-    "대조(engine._reconcile_if_due after_close)에서 브로커에 잔량이 열려 있어도 결과가 MATCH라 알림이 없다 — 마감 후 "
-    "열린 주문을 따로 검사·알림하는 코드가 src에 없음. 사용자는 다음 날 09:00 장중 대조의 STALE_ORDER K4로 처음 알게 된다."))
 def test_partial_fill_remainder_still_open_after_close_alerts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(days, "make_root", make_root_qty(3))
     w = PaperWorld(tmp_path)

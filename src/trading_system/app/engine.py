@@ -35,7 +35,7 @@ from trading_system.config.strategy_registry import StrategyRegistry
 from trading_system.domain.clock import KST, Clock, from_iso, last_kst_time_at_or_before
 from trading_system.domain.enums import GateResult, HaltType, IntentState, RequestSource, RequestType, Side
 from trading_system.domain.limits import AccountLimits
-from trading_system.domain.models import GateRequest
+from trading_system.domain.models import GateRequest, OrderEvent
 from trading_system.domain.sinks import AlertSink
 from trading_system.domain.strategy import PositionView, evaluation_id_of
 from trading_system.evaluation.runner import run_evaluation
@@ -46,10 +46,12 @@ from trading_system.halt.manager import K5_LINK_THREAD, HaltManager
 from trading_system.marketdata.store import MarketDataStore
 from trading_system.monitoring.watchers import AlertWatcher, DailyRiskTracker
 from trading_system.ops.commands import OpsProcessor
-from trading_system.reconciliation.reconciler import Reconciler, RecoveryChecker, RecoveryReport
+from trading_system.reconciliation.reconciler import (
+    CLOSE_TRIGGER, ReconcileResult, Reconciler, RecoveryChecker, RecoveryReport,
+)
 from trading_system.reporting.daily import DailyReporter
 from trading_system.storage.oplog import log_exception
-from trading_system.storage.repository import Repository
+from trading_system.storage.repository import BrokerOrderRow, Repository
 from trading_system.strategy.base import Strategy
 
 EVAL_GRACE = timedelta(minutes=5)       # 예정 시각을 이만큼 넘기면 그 판정은 건너뛴다(늦은 판정 금지, DP-21)
@@ -138,6 +140,25 @@ class Engine:
 
     def __post_init__(self) -> None:
         self.last_progress = self.mono()
+        # 대조 뒤 실행 중 K8 복구 판정 (3차 검토 #1) — 주기·요청·마감 후·운영 명령(MANUAL) 대조 모두
+        self.reconciler.listeners.append(self._after_reconcile)
+        # 마감 후 대조의 만료 종결은 실행기의 소멸 통보 반영 경로로 (03 §6.4, 원장 변경은 실행기만)
+        self.reconciler.expire_order = self._expire_order
+
+    def _after_reconcile(self, account: str, trigger: str, r: ReconcileResult) -> None:
+        """실행 중 K8(D-064 루프 지연·시계 점프, 엔진 단계 오류)이 해제되지 않았으면 방금 대조로 복구 조건을 다시
+        판정해 recovery_ok를 보고한다 — 사용자 재개(RESUME K8)가 가능해진다. 자동 해제는 하지 않는다.
+        시작 대조(STARTUP)는 RecoveryChecker.check가 직접 판정한다. tick마다가 아니라 대조마다 한 번."""
+        if trigger == "STARTUP" or account != self.account:
+            return
+        if not any(row["halt_type"] == HaltType.K8.value for row in self.repo.halt_rows(self.account)):
+            return
+        self.recovery.evaluate(self.account, r)
+
+    def _expire_order(self, order: BrokerOrderRow, trade_date: str) -> None:
+        with self.repo.tx():
+            self.executor.apply_event(OrderEvent(kind="EXPIRED", order_no=order.order_no, account=order.account,
+                                                 trade_date=trade_date))
 
     # --- 시작 -------------------------------------------------------------------------
     def start(self) -> RecoveryReport:
@@ -363,10 +384,11 @@ class Engine:
             return
         self._reconcile_requested.clear()
         self._last_reconcile = now
-        if after_close:
+        if closing:
             self._closed_reconciled = today
         self._refresh_cash()
-        self.reconciler.run(self.account, "PERIODIC")
+        # 장 마감 후 1회 대조는 CLOSE: 소멸한 오늘 잔량 만료 종결·남은 미체결 알림 (03 §6.4)
+        self.reconciler.run(self.account, CLOSE_TRIGGER if closing else "PERIODIC")
 
     # 판정 ---------------------------------------------------------------------------
     def _blocked_globally(self) -> bool:

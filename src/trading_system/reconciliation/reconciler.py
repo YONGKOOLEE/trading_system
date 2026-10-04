@@ -8,6 +8,15 @@
 - 재시작 복구(01 §2.11): 모드·환경, 저장 무결성, 시계, 브로커 조회, 대조 일치·결과 불명 없음을 모두 확인한다.
   하나라도 실패하면 해당 정지(K7·K6·K5·K4·K3)를 발동하고, 모두 충족하면 K8 `recovery_ok`를 보고한다.
   K8 해제는 사용자 재개로만 한다.
+- 실행 중 K8(D-064 루프 지연·시계 점프, 엔진 단계 오류): 대조가 끝날 때마다(tick마다가 아님) 같은 조건을 다시 판정해
+  `recovery_ok`를 보고한다(RecoveryChecker.evaluate, 3차 검토 #1). 정지는 새로 걸지 않는다(각 조건의 정지는 해당
+  경로가 이미 건다). 자동 해제 없음 — 사용자 재개.
+- 결과 불명 의도와 조건이 같은 브로커 주문(계좌·종목·방향·수량·주문 종류, 전송 시도가 같은 거래일)은 그 의도가
+  결과 불명인 동안 '미확인 브로커 주문'으로 잡지 않는다 — 결과 불명 해소(해소기, 모호하면 K3)에 맡긴다(3차 검토 #2).
+  해소기가 채택하면 알려진 주문이 되고, 그전에 열린 같은 주문의 '미확인 브로커 주문' 항목은 다음 대조에서 자동 종결한다.
+- 장 마감 후 대조(trigger CLOSE, 03 §6.4): 오늘 주문 중 내부는 열려 있으나 브로커가 소멸(EXPIRED)·미표시이고
+  체결 수량이 같으면 실행기 경로로 만료 종결(예약 해제)한다 — 상태 차이(K4)로 보지 않는다.
+  브로커에 열린 채 남은 오늘 주문은 경고 알림(마감 후 대조는 하루 1회).
 """
 
 from __future__ import annotations
@@ -24,9 +33,11 @@ from trading_system.domain.clock import Clock
 from trading_system.domain.enums import HaltType, IntentState, Mode
 from trading_system.domain.sinks import AlertSink, HaltControl
 from trading_system.storage.jsonlog import Masker
-from trading_system.storage.repository import Repository
+from trading_system.storage.repository import BrokerOrderRow, Repository
 
 OPEN = ("ACCEPTED", "PARTIAL")
+CLOSE_TRIGGER = "CLOSE"   # 장 마감 후 1회 대조 (03 §6.3 "마감 후", §6.4) — 엔진이 이 trigger로 부른다
+_INTENT_KIND = {"CANCEL": "CANCEL", "MODIFY": "MODIFY"}   # 의도 요청 유형 → 브로커 주문 종류 (resolver._KIND와 같음)
 K5_LINK_REST = "link:rest"   # halt/manager.py K5_LINK_REST와 같은 값 (K5 조회 경로, RV-02)
 _ALLOWED_ENV = {Mode.BACKTEST: {"fake"}, Mode.PAPER: {"mock"}, Mode.LIVE: {"real"}}
 
@@ -45,6 +56,15 @@ class ReconcileResult:
     recon_id: str
     result: str                 # MATCH / MISMATCH / QUERY_FAILED
     items: tuple[str, ...] = ()  # 불일치 항목 ID
+
+
+@dataclass
+class _Comparison:
+    found: list[tuple[str, str | None, str | None, str | None, str | None, dict]]
+    broker_pos: dict[str, Decimal]
+    expirable: list[BrokerOrderRow] = field(default_factory=list)   # 마감 후: 만료 종결할 내부 주문 (§6.4)
+    open_after_close: list[str] = field(default_factory=list)        # 마감 후: 브로커에 열린 채 남은 주문번호
+    deferred: list[str] = field(default_factory=list)                # 결과 불명 해소에 맡긴 브로커 주문번호
 
 
 @dataclass
@@ -71,6 +91,11 @@ class Reconciler:
         # 재조회 전 대기: 01 "재조회 1회 (체결 반영 지연 확인)" — 실시간 체결 통보가 조회보다 늦게 오는 지연을 기다린다.
         # 실운영은 main이 짧은 실제 대기를 넘긴다(판정·실행 스레드만 멈춤, 감시 스레드는 계속). 시험 기본은 대기 없음
         self._requery_wait = requery_wait
+        # 마감 후 만료 종결 (03 §6.4): (내부 주문, 거래일) → 실행기의 소멸 통보 반영 경로. 엔진이 연결한다(실행기 소유).
+        # 없으면 만료 종결하지 않고 종전대로 상태 차이로 기록한다(보수적)
+        self.expire_order: Callable[[BrokerOrderRow, str], None] | None = None
+        # 대조 뒤 알림 (엔진: 실행 중 K8 복구 판정). 시작 대조(STARTUP)에도 불린다 — 받는 쪽이 거른다
+        self.listeners: list[Callable[[str, str, ReconcileResult], None]] = []
 
     def run(self, account: str, trigger: str) -> ReconcileResult:
         if self._repo.in_transaction:
@@ -97,9 +122,10 @@ class Reconciler:
             self._halts.report_condition(HaltType.K5, account, K5_LINK_REST, True, f"대조 조회 성공 ({trigger})")
         self._drain()  # 조회 중 도착한 통보를 먼저 반영 (RV-24, A-043 (4))
         now = self._clock.now()
-        found, broker_pos = self._compare(account, positions, orders, fills, now)
+        closing = trigger == CLOSE_TRIGGER
+        cmp = self._compare(account, positions, orders, fills, now, closing)
         requeried = False
-        if found:
+        if cmp.found:
             # 01 장애 정책 "잔고 불일치": 재조회 1회(체결 반영 지연 확인) 후에도 불일치면 K4 (RV-24).
             # 재조회는 이 호출 안에서(판정·실행 스레드) 끝나므로 그동안 이 계좌의 새 주문은 나가지 않는다.
             # 재조회가 실패하면 처음 결과로 판정한다(실패는 일치 증거가 아님)
@@ -115,17 +141,22 @@ class Reconciler:
                 self._drain()
                 positions, orders, fills = positions2, orders2, fills2
                 now = self._clock.now()
-                found, broker_pos = self._compare(account, positions, orders, fills, now)
+                cmp = self._compare(account, positions, orders, fills, now, closing)
+        expired = self._expire_at_close(account, cmp, now)
+        found, broker_pos = cmp.found, cmp.broker_pos
 
         with self._repo.tx():
             # 같은 내용의 열린 항목은 다시 만들지 않는다. 이번에 안 보여도 열린 항목은 사람이 해소하기 전까지 남는다
             # (예: 외부 주문이 다음 날 조회에서 사라짐) — 열린 항목이 있으면 일치로 보지 않는다
+            auto_closed = self._close_known_order_items(account, now)
             open_before = {(i["kind"], i["instrument"], i["ref"], i["internal_value"], i["broker_value"]): i["item_id"]
                            for i in self._repo.open_recon_items(account)}
             result = "MISMATCH" if found or open_before else "MATCH"
             rid = self._repo.insert_reconciliation(account, trigger, result, {
                 "positions": {k: str(v) for k, v in broker_pos.items()}, "orders": len(orders), "fills": len(fills),
-                "items": len(found), "open_items_before": len(open_before), "requeried": requeried}, now)
+                "items": len(found), "open_items_before": len(open_before), "requeried": requeried,
+                "deferred_unknown": cmp.deferred, "expired_at_close": expired, "auto_closed_items": auto_closed,
+                "open_after_close": cmp.open_after_close}, now)
             ids = tuple(open_before.get((kind, inst, ref, iv, bv)) or
                         self._repo.insert_recon_item(rid, account, kind, inst, ref, iv, bv, json.dumps(detail))
                         for kind, inst, ref, iv, bv, detail in found)
@@ -140,7 +171,58 @@ class Reconciler:
         elif self._halts is not None:
             for k in (HaltType.K3, HaltType.K4, HaltType.K5):
                 self._halts.report_condition(k, account, "reconciled", True, rid)
-        return ReconcileResult(rid, result, ids)
+        if cmp.open_after_close:
+            # 03 §6.4 "남아 있으면 알림하고 다음 거래일 시작 전 사용자 확인 대상" (마감 후 대조는 하루 1회 → 알림 1회)
+            self._alerts.alert("WARNING", f"장 마감 후 미체결 {len(cmp.open_after_close)}건이 브로커에 남아 있음 "
+                                          f"(주문번호 {', '.join(cmp.open_after_close)}) — 다음 거래일 시작 전 사용자 확인",
+                               rid)
+        res = ReconcileResult(rid, result, ids)
+        for fn in list(self.listeners):
+            fn(account, trigger, res)
+        return res
+
+    def _expire_at_close(self, account: str, cmp: _Comparison, now: datetime) -> list[str]:
+        """마감 후 대조: 브로커에서 소멸한 오늘 주문을 실행기 경로(소멸 통보 반영)로 만료 종결한다 (03 §6.4)."""
+        if not cmp.expirable:
+            return []
+        today = self._repo.trade_date_of(now)
+        done: list[str] = []
+        for io in cmp.expirable:
+            if self.expire_order is not None:
+                self.expire_order(io, today)
+            after = self._repo.broker_order(io.order_key)
+            if after is not None and after.state not in OPEN:
+                done.append(io.order_no)
+            else:   # 만료 경로가 없거나 반영되지 않았으면 종전대로 상태 차이 (보수적)
+                cmp.found.append((ItemKind.STATE_MISMATCH, io.instrument, io.order_no, io.state, "EXPIRED",
+                                  {"order_key": io.order_key, "broker_state": "마감 후 소멸·미표시"}))
+        if done:
+            with self._repo.tx():
+                self._repo.audit(now, "EXPIRED_AT_CLOSE", "reconciler", account,
+                                 {"order_nos": done, "basis": "03 §6.4 마감 후 대조 — 브로커 미체결 없음"})
+        return done
+
+    def _close_known_order_items(self, account: str, now: datetime) -> list[str]:
+        """열린 '미확인 브로커 주문' 항목 중 그 뒤 의도에 연결된(결과 불명 해소기가 채택한) 주문은 자동 종결한다.
+        원장은 바꾸지 않는다 — 항목 상태만. 항목의 거래일 기준으로 찾는다(주문번호 유일 범위 = 거래일, D-046)."""
+        closed: list[str] = []
+        for item in self._repo.open_recon_items(account):
+            if item["kind"] != ItemKind.UNKNOWN_BROKER_ORDER or not item["ref"]:
+                continue
+            try:
+                trade_date = json.loads(item["detail"] or "{}").get("trade_date")
+            except ValueError:
+                continue
+            if not trade_date:
+                continue
+            order = self._repo.broker_order_by_no(item["ref"], trade_date, account)
+            if order is None or order.intent_id is None:
+                continue
+            self._repo.resolve_recon_item(item["item_id"], "AUTO_ADOPTED", "reconciler", now)
+            self._repo.audit(now, "RECON_ITEM_AUTO_RESOLVED", "reconciler", item["item_id"],
+                             {"order_no": item["ref"], "intent_id": order.intent_id, "trade_date": trade_date})
+            closed.append(item["item_id"])
+        return closed
 
     def _drain(self) -> None:
         if self._drain_events is not None:
@@ -151,9 +233,26 @@ class Reconciler:
             return (self._broker.query_positions(account), self._broker.query_orders(account),
                     self._broker.query_fills(account))
 
+    def _unknown_intent_terms(self, account: str, today: str) -> set[tuple[str, str, str, Decimal, str | None]]:
+        """결과 불명 의도의 (주문 종류, 종목, 방향, 수량, 대상 원주문번호). 전송 시도가 오늘 거래일인 것만.
+        브로커 조회 주문에는 시각이 없어 '시도 이후'는 같은 거래일로만 좁힌다."""
+        terms: set[tuple[str, str, str, Decimal, str | None]] = set()
+        for i in self._repo.intents_in_state(IntentState.UNKNOWN):
+            if i.account != account:
+                continue
+            attempt = self._repo.attempt_for(i.intent_id)
+            if attempt is None or self._repo.trade_date_of(datetime.fromisoformat(attempt["created_at"])) != today:
+                continue
+            kind = _INTENT_KIND.get(i.request_type, "NEW")
+            target_no = None
+            if kind != "NEW":
+                target = self._repo.broker_order(i.target_order_key or "")
+                target_no = target.order_no if target else None
+            terms.add((kind, i.instrument, i.side, i.quantity, target_no))
+        return terms
+
     def _compare(self, account: str, positions: list, orders: list, fills: list,  # type: ignore[type-arg]
-                 now: datetime) -> tuple[list[tuple[str, str | None, str | None, str | None, str | None, dict]],
-                                         dict[str, Decimal]]:
+                 now: datetime, closing: bool = False) -> _Comparison:
         today = self._repo.trade_date_of(now)
         found: list[tuple[str, str | None, str | None, str | None, str | None, dict]] = []
 
@@ -166,8 +265,15 @@ class Reconciler:
 
         known = self._repo.known_order_nos(account, today)
         by_no = {o.order_no: o for o in orders}
+        unknown_terms = self._unknown_intent_terms(account, today)
+        cmp = _Comparison(found, broker_pos)
         for o in orders:
             if o.order_no not in known and o.kind != "CANCEL":
+                if (o.kind, o.instrument, o.side, o.quantity,
+                        o.original_order_no if o.kind != "NEW" else None) in unknown_terms:
+                    # 결과 불명 의도의 주문일 수 있다 → 해소기(조회 → 채택, 모호하면 K3)에 맡긴다 (CLAUDE.md §8-6)
+                    cmp.deferred.append(o.order_no)
+                    continue
                 found.append((ItemKind.UNKNOWN_BROKER_ORDER, o.instrument, o.order_no, None,
                               f"{o.side} {o.quantity} {o.state}",
                               {"side": o.side, "quantity": str(o.quantity), "trade_date": today,
@@ -179,6 +285,9 @@ class Reconciler:
                               {"order_key": io.order_key}))
                 continue
             b = by_no.get(io.order_no)
+            if closing and self._expired_at_close(io, b, fills):
+                cmp.expirable.append(io)
+                continue
             if b is None:
                 found.append((ItemKind.INTERNAL_ONLY_ORDER, io.instrument, io.order_no, io.state, None,
                               {"order_key": io.order_key}))
@@ -194,7 +303,29 @@ class Reconciler:
                 found.append((ItemKind.MISSING_FILL, order.instrument, f.order_no, None, f"{f.quantity}@{f.price}",
                               {"order_key": order.order_key, "fill_id": f.fill_id, "quantity": str(f.quantity),
                                "price": str(f.price), "at": f.at.isoformat()}))
-        return found, broker_pos
+        if closing:
+            # 누락 체결이 있는 주문, 보유 수량이 다른 종목의 주문은 만료 종결하지 않는다 — 상태 차이로 사람 확인
+            missing = {f[2] for f in found if f[0] == ItemKind.MISSING_FILL}
+            qty_diff = {f[1] for f in found if f[0] == ItemKind.QTY_MISMATCH}
+            for io in [io for io in cmp.expirable if io.order_no in missing or io.instrument in qty_diff]:
+                cmp.expirable.remove(io)
+                found.append((ItemKind.STATE_MISMATCH, io.instrument, io.order_no, io.state, "EXPIRED",
+                              {"order_key": io.order_key, "broker_state": "마감 후 소멸·미표시 + 누락 체결"}))
+            for io in self._repo.open_orders(account):
+                b = by_no.get(io.order_no)
+                if io.order_key.split("|")[1] == today and b is not None and b.state in OPEN:
+                    cmp.open_after_close.append(io.order_no)
+        return cmp
+
+    @staticmethod
+    def _expired_at_close(io: BrokerOrderRow, b: object, fills: list) -> bool:  # type: ignore[type-arg]
+        """마감 후: 내부는 열림, 브로커는 소멸(EXPIRED) 또는 미표시이고 체결 수량이 같으면 만료 종결 대상.
+        체결·취소·정정 등 다른 종결 상태나 체결 수량 차이는 종전대로 상태 차이(사람 확인)."""
+        if b is None:
+            # 미표시: 조회 체결 합이 내부 체결 수량과 같을 때만
+            q = sum((f.quantity for f in fills if f.order_no == io.order_no), Decimal("0"))
+            return q == io.filled_quantity
+        return getattr(b, "state", None) == "EXPIRED" and getattr(b, "filled_quantity", None) == io.filled_quantity
 
 
 class RecoveryChecker:
@@ -248,4 +379,39 @@ class RecoveryChecker:
             self._halts.report_condition(HaltType.K8, None, "recovery_ok", True, f"대조 {r.recon_id}")
         else:
             self._halts.report_condition(HaltType.K8, None, "recovery_ok", False, "; ".join(rep.failures))
+        return rep
+
+    def evaluate(self, account: str, r: ReconcileResult) -> RecoveryReport:
+        """실행 중 K8(D-064·엔진 단계 오류)의 복구 판정 (3차 검토 #1): 방금 끝난 대조 결과로 01 §2.11 조건을 다시 본다.
+
+        대조를 다시 하지 않는다(호출자가 대조 직후에 부른다). 정지는 새로 걸지 않는다 — 실패 조건의 정지(K4·K5·K3·
+        K6·K7)는 해당 경로(대조기·해소기·시계 감시·실행기)가 이미 건다. 같은 정지를 여기서 다시 발동하면 재개 대기 중인
+        정지의 조건이 지워진다. K8은 풀지 않는다 — `recovery_ok`만 보고하고 해제는 사용자 재개.
+        """
+        rep = RecoveryReport(ok=True)
+
+        def fail(why: str) -> None:
+            rep.ok = False
+            rep.failures.append(why)
+
+        acct = self._repo.account(account)
+        if acct is None or acct.mode is not self._repo.mode or acct.broker_env not in _ALLOWED_ENV[self._repo.mode]:
+            fail("1. 모드·브로커 환경 불일치 (R-01)")
+        if not self._repo.integrity_ok():
+            fail("2. 저장 상태 무결성 실패 (R-25)")
+        if self._clock_ok() is not True:
+            fail("3. 시계 오차 정상 아님 (R-24)")
+        if r.result == "QUERY_FAILED":
+            fail("4. 브로커 미체결·체결·잔고 조회 실패")
+        elif r.result != "MATCH":
+            fail(f"5. 대조 불일치 {len(r.items)}건")
+        unknown = [i for i in self._repo.intents_in_state(IntentState.UNKNOWN) if i.account == account]
+        if unknown:
+            fail(f"5. 결과 불명 의도 {len(unknown)}건 미해소")
+        unsettled = [i for st in (IntentState.SENT, IntentState.PENDING_SEND)
+                     for i in self._repo.intents_in_state(st) if i.account == account]
+        if unsettled:
+            fail(f"5. 전송 대기·응답 대기 의도 {len(unsettled)}건")
+        self._halts.report_condition(HaltType.K8, None, "recovery_ok", rep.ok,
+                                     f"실행 중 복구 판정, 대조 {r.recon_id}" if rep.ok else "; ".join(rep.failures))
         return rep

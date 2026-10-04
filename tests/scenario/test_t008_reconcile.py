@@ -301,6 +301,9 @@ def test_broker_query_error_type_is_exposed() -> None:
 def test_unknown_broker_order_cannot_be_called_external_while_our_order_is_unknown(env: Env) -> None:
     env.broker.behavior = FakeBehavior.LOST_ACCEPT  # 우리 주문이 접수됐지만 응답 유실
     enter(env, "TST-A", "10")
+    # 3차 검토 F-3 이후: 결과 불명 의도와 같은 조건의 주문은 대조가 K4 항목으로 잡지 않고 해소기에 맡긴다.
+    # 보호 의도(결과 불명 중 같은 종목·방향 주문을 EXTERNAL로 처리 금지)를 계속 시험하려고 수량이 다른 외부 주문을 둔다
+    env.broker.add_external_order(ACCOUNT, "TST-A", "BUY", Decimal("3"))
     rec(env).run(ACCOUNT, "PERIODIC")
     it = item(env, ItemKind.UNKNOWN_BROKER_ORDER)
     with pytest.raises(ResolveError, match="결과 불명"):
