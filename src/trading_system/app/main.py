@@ -75,6 +75,25 @@ def start_summary(engine: Engine, rep) -> str:  # type: ignore[no-untyped-def]
     return "\n".join(lines)
 
 
+class _WsThreadRef:
+    """감시 스레드용: KiwoomRealtime 내부 수신 스레드(kiwoom-ws)를 Thread처럼 본다. 시작 전이면 ident None(감시 안 함)."""
+
+    def __init__(self, rt: object) -> None:
+        self._rt = rt
+
+    def _t(self) -> threading.Thread | None:
+        return getattr(self._rt, "_thread", None)
+
+    def is_alive(self) -> bool:
+        t = self._t()
+        return t is None or t.is_alive()
+
+    @property
+    def ident(self) -> int | None:
+        t = self._t()
+        return None if t is None else t.ident
+
+
 def ws_state_handler(engine: Engine, account: str):  # type: ignore[no-untyped-def]
     """실시간 연결 상태 → K5 재개 조건 broker_connected (RV-02, 01 K5). 판정·실행 스레드로 넘긴다(QueuedHalts).
 
@@ -205,10 +224,15 @@ def _run(root: Path, mode: Mode, base: Path, startup, app: AppSettings, gate_set
         clock_monitor.check()                         # 시작 점검은 판정·실행 스레드(이 스레드)에서 직접
         clock_monitor._halts = QueuedHalts(engine)    # noqa: SLF001 — 이후 점검은 감시 스레드 → 정지는 큐로 (RV-22)
         io_threads = extra(engine, stop, closers) if extra is not None else []
+        # 시작 일봉(extra 안, 이 스레드) 뒤로는 시세 스레드가 K10을 걸므로 큐 경유 (3차 검토 F-5, RV-22)
+        store.halts = QueuedHalts(engine)
+        watched: list = [(t, "시세 조회") for t in io_threads if t.name == "market-poller"]
+        rt = getattr(extra, "rt", None)
+        if rt is not None:
+            watched.append((_WsThreadRef(rt), "실시간 수신"))   # 3차 검토 낮음: WS 스레드 생존
         # 감시 스레드 (RV-22, D-038): KILL 즉시 반영·하트비트·루프 감시·SNTP·입출력 스레드 생존. 주문은 하지 않는다
         sup = Supervisor(engine, heartbeat=base / "heartbeat", fallback=engine.fallback_file,
-                         clock_monitor=clock_monitor,
-                         watched=[(t, "시세 조회") for t in io_threads if t.name == "market-poller"])
+                         clock_monitor=clock_monitor, watched=watched)
         sup_thread = threading.Thread(target=sup.run, args=(stop,), name="supervisor", daemon=True)
         sup_thread.start()
         threads.append(sup_thread)
@@ -283,6 +307,7 @@ def _paper_broker(startup, app: AppSettings, clock, store: MarketDataStore):  # 
         rt = KiwoomRealtime(adapter.cfg.ws_url, adapter.tokens, clock,
                             registrations=[("00", []), ("04", [])] + feed.registrations(), handlers=handlers,
                             on_state=on_state, on_critical=lambda k, m: critical(k, m, "realtime"))
+        extra.rt = rt  # type: ignore[attr-defined]   # 감시 스레드가 WS 수신 스레드 생존을 본다
         poller = MarketPoller(feed, alerts=engine.alerts)
         closers.extend([rt.stop, adapter.close])
         poller.refresh_daily_if_due()   # 시작 시 1회 (이후 확정일이 바뀌면 시세 스레드가 다시 받음, RV-04)

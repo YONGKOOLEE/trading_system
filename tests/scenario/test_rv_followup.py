@@ -239,3 +239,22 @@ def test_daily_refresh_unexpected_exception_counts_as_failure_and_quotes_continu
     clock.advance(DAILY_RETRY)
     p.poll_once()
     assert len(f.calls) == 2
+
+
+# --- 3차 검토 낮음: WS 수신 스레드 생존 감시 참조 ----------------------------------------------------------
+
+def test_ws_thread_ref_reports_dead_thread_only_after_start() -> None:
+    import threading
+
+    from trading_system.app.main import _WsThreadRef
+
+    class Rt:
+        _thread = None
+    rt = Rt()
+    ref = _WsThreadRef(rt)
+    assert ref.is_alive() and ref.ident is None              # 시작 전: 감시 안 함
+    t = threading.Thread(target=lambda: None)
+    t.start()
+    t.join()
+    rt._thread = t                                          # type: ignore[assignment]
+    assert not ref.is_alive() and ref.ident is not None    # 죽은 수신 스레드 → 감시 스레드가 K5
