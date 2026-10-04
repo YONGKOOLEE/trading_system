@@ -1,7 +1,7 @@
 # 04 — 검증 계획
 
 - 버전: v0.6
-- 상태: approved (2026-10-03 사용자 승인, A-033. CP-019 반영. 이전 승인본 v0.5 → [archive/04-validation-v0.5.md](archive/04-validation-v0.5.md))
+- 상태: superseded (2026-10-04, A-053로 대체). 당시: approved (2026-10-03 사용자 승인, A-033. CP-019 반영. 이전 승인본 v0.5 → [archive/04-validation-v0.5.md](archive/04-validation-v0.5.md))
 - 작성일 / 최종 수정일: 2026-10-01 / 2026-10-03
 - 단계 / 게이트: 4단계 / validation:approved
 - 인도 차수: 공통 본문 + M1 부록

@@ -234,3 +234,11 @@
 - 시험: 시작 902 → 최종(64b7a8a) 리허설 포함 `pytest -q` 978 passed (746s), 직전 코드에서도 978 passed (787s).
 - 안정성 재실행: 리허설 2파일 + e2e 3파일 44 passed (638s) — 간헐 실패 재발 없음.
 - 다음: 결정표(decision-sheet, DP-28~43) 답 → main 병합 → PAPER-0(사용자). 지시대로 끝나면 PC 종료(10:48 예약).
+
+## 2026-10-04 (21) — 결정표 처리 세션 (대화형)
+- 사용자 결정 전사: A-046(Q-1 예수금 확인, Q-2 U-06 이용 제한 없음·조회 제한 조건), A-047(main 병합), A-048(DP-43), A-049(DP-28~38·40~42 권장안, DP-31 1일차 후 재검토), A-050(CP-021), A-051(모의 계좌 유지·LIVE 전용 실계좌 추가), A-052(CP-022 = DP-39, W-1 운영 규칙 C-4), A-053(01 v0.7·03 v0.8·04 v0.7).
+- 작성: CP-022, 01 v0.7(§2.5 취소 정지 중, §2.7 잔고 불일치 예외·수동 주문 규칙), 03 v0.8(§6.3 보류·자동 종결), 04 v0.7(V-125·V-126), pv-procedure §3.1 수동 주문 주의, kiwoom-kr §2 U-06 행, 승인본 archive 3개.
+- 병합: main ← feat/T-017-verify fast-forward(71f4438). 처음 2회는 settings 차단으로 거부 → 사용자 규칙 삭제 후 실행.
+- 시험: `pytest -q tests/scenario/test_review3_reconcile.py -k "unknown or candidate or adoption"` → 5 passed. 전체 시험은 미실행(코드 변경 없음).
+- 미확인: 일일 호출 상한(40,000)의 모의 적용 여부(PAPER-0 관찰), LIVE 추가 계좌 개설·앱키/IP 단위.
+- 다음: main 재병합(지시 시) → PAPER-0 실행(사용자, pv-procedure).

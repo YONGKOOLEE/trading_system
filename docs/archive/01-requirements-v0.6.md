@@ -1,7 +1,7 @@
 # 01 — 요구사항과 리스크 정책
 
 - 버전: v0.6
-- 상태: approved (2026-10-03 사용자 승인, A-036. CP-020 반영. 이전 승인본 v0.5 → [archive/01-requirements-v0.5.md](archive/01-requirements-v0.5.md))
+- 상태: superseded (2026-10-04, A-053로 대체). 당시: approved (2026-10-03 사용자 승인, A-036. CP-020 반영. 이전 승인본 v0.5 → [archive/01-requirements-v0.5.md](archive/01-requirements-v0.5.md))
 - 작성일 / 최종 수정일: 2026-10-01 / 2026-10-03
 - 단계 / 게이트: 1단계 / requirements:approved
 - 인도 차수: 공통 본문 + M1 부록 (M2·M3는 알려진 차이만)
