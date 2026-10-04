@@ -2,7 +2,21 @@
 
 - 실운영과 같은 전략·판정 실행기·게이트·실행기·정지 관리를 쓰고, 브로커만 체결 모델(BacktestBroker)로 바꾼다 (D-071).
 - 실행마다 `var/backtest/<실행ID>/trading.db` (모드 BACKTEST). 같은 DB를 다른 실행과 섞지 않는다 (A-5).
-- 거래일마다: 판정 시각(기본 09:05 KST)에 판정 → 게이트 → 전송 → 그날 봉으로 체결(다음 봉 시가 원칙) → 마감 만료 → 평가.
+- 거래일마다: 판정 시각(기본 09:05 KST, 여러 개 가능)에 판정 → 게이트 → 전송 → 그날 봉으로 체결(다음 봉 시가 원칙)
+  → 마감 만료 → 평가.
+- 하루 여러 판정(제안 가정, 일봉만 있을 때 — 승인 전 기록용):
+  * 첫 판정의 주문은 그날 시가(+슬리피지)로 체결한다(DP-7). 그 체결은 다음 판정 전에 반영된다.
+  * 둘째 이후 판정의 주문은 그날 **종가**(+불리한 슬리피지)로, 그날 마지막 판정 뒤에 체결한다. 일봉에서 판정 시각
+    이후 가격으로 확정된 것은 종가뿐이기 때문이다(시가 체결 = 판정 전 가격으로 체결하는 불가능한 가정, 종가 = 판정 후
+    가격). 이 체결은 마지막 판정 뒤에 반영하므로 같은 날 뒤 판정이 종가 체결가(미래)를 보지 않는다.
+    지정가는 종가가 관통할 때만 체결(봉을 종가 한 점으로 본다 — 장중 고가·저가는 판정 전 가격일 수 있어 쓰지 않음).
+  * 모든 판정의 시세(last_price)는 그날 시가다: 일봉만으로는 장중 가격을 알 수 없고 종가는 미래(룩어헤드)다.
+    당일 일봉은 DP-5(마감과 20:00 중 늦은 쪽) 전에는 보이지 않는다(14:30 판정도 전일 봉까지).
+  * 체결 시각은 체결을 일으킨 판정 시각으로 기록한다(첫 판정 = 그 판정 시각, 이후 = 그날 마지막 판정 시각).
+    주문 생성 시각보다 앞서지 않게 해 감사 순서 역전을 막는다(이전: 09:00 기록).
+  * 일일 손실(K2) 검사는 첫 판정에서만(DP-6 유지).
+- 상·하한가 = 기준가(전일 종가) × (1 ± 비율)을 호가 단위로 상한은 내림, 하한은 올림. 호가 표가 없으면(X-U1)
+  `slippage_tick`을 1틱으로 대체한다(보고서 한계에 기록).
 - K2(일일 손실)는 실운영처럼 발동하되, 백테스트에서는 다음 거래일 시작에 사용자가 재개했다고 가정한다(DP-6, 보고서에 횟수 기록).
 - 재현성(D-074): 결과 지문 = 체결·평가액·신호 ID의 해시. 같은 입력이면 같은 지문.
 - 최종 평가 구간(D-075)은 전략 버전당 한 번만: 사용 장부(JSONL)에 기록하고 두 번째 사용은 거부한다.
@@ -14,8 +28,11 @@ import hashlib
 import json
 from collections import Counter
 from dataclasses import dataclass, field
+import tempfile
+from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from pathlib import Path
 
 from trading_system.broker.fake.fill_model import BacktestBroker, BarFacts
@@ -42,6 +59,7 @@ from trading_system.strategy.base import Strategy
 ACCOUNT = "KR-BT-01"
 SEGMENTS = ("ALL", "TRAIN", "VALIDATION", "FINAL")
 SPLIT = (Decimal("0.6"), Decimal("0.2"), Decimal("0.2"))  # D-075 기본 60/20/20
+SESSION_FIRST, SESSION_END = time(9, 0), time(15, 20)       # 판정 시각 허용 범위 [09:00, 15:20) — 종가 동시호가 전
 
 
 class BacktestError(RuntimeError):
@@ -66,6 +84,7 @@ class BacktestConfig:
     initial_cash: Decimal
     out_dir: Path
     eval_time: time = time(9, 5)
+    eval_times: tuple[time, ...] = ()   # 비어 있으면 (eval_time,). 있으면 이것을 쓴다 (오름차순·중복 없음)
     slippage_ticks: int = 1
     volume_cap: Decimal = Decimal("0.10")
     data_version: str = ""
@@ -100,6 +119,7 @@ class BacktestResult:
     k2_resumes: int = 0
     costs: Decimal = Decimal("0")
     quality_failures: dict[str, list[str]] = field(default_factory=dict)
+    signals_by_eval: dict[str, list[tuple]] = field(default_factory=dict)  # "YYYY-MM-DDTHH:MM" → 신호 요약
 
 
 def segment_days(days: list[date], segment: str) -> list[date]:
@@ -111,6 +131,40 @@ def segment_days(days: list[date], segment: str) -> list[date]:
     a = int((Decimal(n) * SPLIT[0]).to_integral_value())
     b = a + int((Decimal(n) * SPLIT[1]).to_integral_value())
     return {"TRAIN": days[:a], "VALIDATION": days[a:b], "FINAL": days[b:]}[segment]
+
+
+def eval_times_of(cfg: BacktestConfig) -> tuple[time, ...]:
+    times = tuple(cfg.eval_times) or (cfg.eval_time,)
+    if list(times) != sorted(set(times)):
+        raise BacktestError(f"판정 시각은 오름차순·중복 없음이어야 함: {[t.strftime('%H:%M') for t in times]}")
+    for t in times:
+        if not (SESSION_FIRST <= t < SESSION_END):
+            raise BacktestError(f"판정 시각 {t:%H:%M}은 09:00 이상 15:20 미만이어야 함 (일봉 체결 가정 범위)")
+    return times
+
+
+def price_limits(ref: Decimal, ratio: Decimal, tick: Callable[[Decimal], Decimal]) -> tuple[Decimal, Decimal]:
+    """상한가 = 기준가×(1+비율)을 호가 단위로 내림, 하한가 = 기준가×(1−비율)을 올림 (계산값 그대로 비교하지 않음).
+
+    호가 단위는 계산값이 속한 가격대 기준(tick(계산값)). 가격대 경계에서 내림 결과가 아래 가격대로 넘어가는 경우의
+    세부 규칙은 공식 근거 미확인(X-U1)."""
+    raw_u, raw_l = ref * (1 + ratio), ref * (1 - ratio)
+    tu, tl = tick(raw_u), tick(raw_l)
+    upper = (raw_u / tu).to_integral_value(rounding=ROUND_FLOOR) * tu
+    lower = (raw_l / tl).to_integral_value(rounding=ROUND_CEILING) * tl
+    return upper, lower
+
+
+def _run_days(cfg: BacktestConfig) -> list[date]:
+    all_days = []
+    d = cfg.start
+    while d <= cfg.end:
+        if cfg.calendar.is_trading_day(d) is None:
+            raise BacktestError(f"{d.year}년 달력 없음 — 백테스트 불가 (X-U3)")
+        if cfg.calendar.is_trading_day(d):
+            all_days.append(d)
+        d += timedelta(days=1)
+    return segment_days(all_days, cfg.segment)
 
 
 def _claim_final(cfg: BacktestConfig) -> None:
@@ -160,22 +214,15 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
     run_dir = cfg.out_dir / cfg.run_id
     if (run_dir / "trading.db").exists():
         raise BacktestError(f"같은 실행 ID의 DB가 이미 있음: {run_dir} (실행마다 새 ID)")
-    all_days = []
-    d = cfg.start
-    while d <= cfg.end:
-        if cfg.calendar.is_trading_day(d) is None:
-            raise BacktestError(f"{d.year}년 달력 없음 — 백테스트 불가 (X-U3)")
-        if cfg.calendar.is_trading_day(d):
-            all_days.append(d)
-        d += timedelta(days=1)
-    days = segment_days(all_days, cfg.segment)
+    times = eval_times_of(cfg)
+    days = _run_days(cfg)
     if not days:
         raise BacktestError("구간에 거래일이 없음")
     _claim_final(cfg)
 
     repo = Repository(run_dir / "trading.db", Mode.BACKTEST)
     repo.register_account(Account(ACCOUNT, Mode.BACKTEST, "fake"))
-    clock = FixedClock(datetime.combine(days[0], cfg.eval_time, tzinfo=KST))
+    clock = FixedClock(datetime.combine(days[0], times[0], tzinfo=KST))
     store = MarketDataStore(cfg.calendar, cfg.ticks, account=ACCOUNT)
     acct = _AccountFacts()
     policy = GatePolicy.from_settings(cfg.gate_settings)
@@ -226,65 +273,11 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
         if before:
             prev_close[inst] = max(before, key=lambda r: r.day).close
 
-    for i, day in enumerate(days):
-        clock._now = datetime.combine(day, cfg.eval_time, tzinfo=KST).astimezone(UTC)  # noqa: SLF001
-        if HaltType.K2.value in repo.active_halts(ACCOUNT):
-            if halts.resume(HaltType.K2, ACCOUNT, Channel.LOCAL, "backtest").ok:
-                k2_resumes += 1
-        positions = {k: v for k, v in repo.positions(ACCOUNT).items() if v.quantity > 0}
-        base = cash + sum((p.quantity * prev_close.get(k, p.avg_price) for k, p in positions.items()), Decimal("0"))
-        for inst, by_day in bars.items():
-            bar = by_day.get(day)
-            if bar is None:
-                continue
-            ref = prev_close.get(inst)
-            upper = None if ref is None else ref * (1 + cfg.gate_settings.price_limit_ratio)
-            store.update_quote(Quote(inst, bar.open, clock.now(), upper_limit=upper))
-        equity_open = cash + sum((p.quantity * bars[k][day].open if day in bars.get(k, {}) else
-                                  p.quantity * prev_close.get(k, p.avg_price)) for k, p in positions.items())
-        acct.daily = DailyRisk(base, Decimal("0"), equity_open - base, Decimal("0"))
-        reserved = sum((r.cash_remaining for r in repo.active_reservations(ACCOUNT)), Decimal("0"))
-        acct.cash_view = CashView(cash, cash - reserved)
-        halts.check_daily_loss(ACCOUNT, acct.daily, cfg.account_limits.l4_daily_loss_ratio)
+    signals_by_eval: dict[str, list[tuple]] = {}
+    ratio = cfg.gate_settings.price_limit_ratio
 
-        next_eval = (datetime.combine(days[i + 1], cfg.eval_time, tzinfo=KST) if i + 1 < len(days)
-                     else datetime.combine(day + timedelta(days=1), cfg.eval_time, tzinfo=KST))
-        ev_id = evaluation_id_of(spec.strategy_id, spec.version, "M1", f"{day.isoformat()}T{cfg.eval_time:%H:%M}")
-
-        def pos_view(inst: str) -> PositionView | None:
-            p = repo.position(ACCOUNT, inst)
-            if p.quantity <= 0:
-                return None
-            own = repo.active_ownership(ACCOUNT, inst)
-            return PositionView(p.quantity, p.avg_price, 0, own is not None and own.owner == spec.owner)
-
-        def pending(inst: str) -> bool:
-            return bool(repo.active_new_intents(ACCOUNT, inst, Side.BUY.value)
-                        or repo.active_new_intents(ACCOUNT, inst, Side.SELL.value))
-
-        snap = store.snapshot(ev_id, "M1", ACCOUNT, clock.now(), base, sorted(cfg.data), pos_view, pending,
-                              next_eval, history=lambda inst: repo.strategy_history(ACCOUNT, spec.owner, inst))
-        result = run_evaluation(cfg.strategy, snap, cfg.params)
-        for s in result.signals:
-            signals.append(s.signal_id)
-            decision = gate.decide(GateRequest.from_signal(s))
-            if decision.result is GateResult.APPROVED and decision.approved is not None:
-                executor.submit(decision.approved)
-            else:
-                rejects[str(decision.failed_check)] += 1
-        executor.process_events()
-
-        for inst, by_day in bars.items():
-            bar = by_day.get(day)
-            if bar is None:
-                continue
-            ref = prev_close.get(inst)
-            lim = cfg.gate_settings.price_limit_ratio
-            broker.match_bar(inst, BarFacts(bar.open, bar.high, bar.low, bar.volume,
-                                            None if ref is None else ref * (1 + lim),
-                                            None if ref is None else ref * (1 - lim)),
-                             datetime.combine(day, time(9, 0), tzinfo=KST))
-        executor.process_events()
+    def absorb_fills(day: date) -> None:
+        nonlocal seen_fills, cash, costs_total
         new_fills = broker.fills_for(ACCOUNT)[seen_fills:]
         seen_fills += len(new_fills)
         for f in new_fills:
@@ -295,6 +288,91 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
             costs_total += cost
             cash += -amount - cost if side == "BUY" else amount - cost
             fills_log.append((day, f.order_no, inst, side, str(f.quantity), str(f.price)))
+
+    for i, day in enumerate(days):
+        # 상·하한가: 기준가(전일 종가) × (1 ± 비율)을 호가 단위로 내림·올림
+        lims = {inst: price_limits(prev_close[inst], ratio, lambda p, inst=inst: tick_of(inst, p))
+                for inst in bars if inst in prev_close}
+        base = Decimal("0")
+        for k, et in enumerate(times):
+            clock._now = datetime.combine(day, et, tzinfo=KST).astimezone(UTC)  # noqa: SLF001
+            positions = {kk: v for kk, v in repo.positions(ACCOUNT).items() if v.quantity > 0}
+            if k == 0:
+                if HaltType.K2.value in repo.active_halts(ACCOUNT):
+                    if halts.resume(HaltType.K2, ACCOUNT, Channel.LOCAL, "backtest").ok:
+                        k2_resumes += 1
+                base = cash + sum((p.quantity * prev_close.get(kk, p.avg_price) for kk, p in positions.items()),
+                                  Decimal("0"))
+            for inst, by_day in bars.items():
+                bar = by_day.get(day)
+                if bar is None:
+                    continue
+                # 판정 시세 = 당일 시가 (이후 판정도 같음: 일봉에는 장중 가격이 없고 종가는 미래)
+                store.update_quote(Quote(inst, bar.open, clock.now(),
+                                         upper_limit=lims[inst][0] if inst in lims else None))
+            equity_open = cash + sum((p.quantity * bars[kk][day].open if day in bars.get(kk, {}) else
+                                      p.quantity * prev_close.get(kk, p.avg_price)) for kk, p in positions.items())
+            acct.daily = DailyRisk(base, Decimal("0"), equity_open - base, Decimal("0"))
+            reserved = sum((r.cash_remaining for r in repo.active_reservations(ACCOUNT)), Decimal("0"))
+            acct.cash_view = CashView(cash, cash - reserved)
+            if k == 0:
+                halts.check_daily_loss(ACCOUNT, acct.daily, cfg.account_limits.l4_daily_loss_ratio)
+
+            if k + 1 < len(times):
+                next_eval = datetime.combine(day, times[k + 1], tzinfo=KST)
+            else:
+                next_eval = (datetime.combine(days[i + 1], times[0], tzinfo=KST) if i + 1 < len(days)
+                             else datetime.combine(day + timedelta(days=1), times[0], tzinfo=KST))
+            ev_key = f"{day.isoformat()}T{et:%H:%M}"
+            ev_id = evaluation_id_of(spec.strategy_id, spec.version, "M1", ev_key)
+
+            def pos_view(inst: str) -> PositionView | None:
+                p = repo.position(ACCOUNT, inst)
+                if p.quantity <= 0:
+                    return None
+                own = repo.active_ownership(ACCOUNT, inst)
+                return PositionView(p.quantity, p.avg_price, 0, own is not None and own.owner == spec.owner)
+
+            def pending(inst: str) -> bool:
+                return bool(repo.active_new_intents(ACCOUNT, inst, Side.BUY.value)
+                            or repo.active_new_intents(ACCOUNT, inst, Side.SELL.value))
+
+            snap = store.snapshot(ev_id, "M1", ACCOUNT, clock.now(), base, sorted(cfg.data), pos_view, pending,
+                                  next_eval, history=lambda inst: repo.strategy_history(ACCOUNT, spec.owner, inst))
+            result = run_evaluation(cfg.strategy, snap, cfg.params)
+            signals_by_eval[ev_key] = [(s.signal_id, s.kind.value, s.instrument, str(s.quantity), str(s.price))
+                                       for s in result.signals]
+            for s in result.signals:
+                signals.append(s.signal_id)
+                decision = gate.decide(GateRequest.from_signal(s))
+                if decision.result is GateResult.APPROVED and decision.approved is not None:
+                    executor.submit(decision.approved)
+                else:
+                    rejects[str(decision.failed_check)] += 1
+            executor.process_events()
+
+            if k == 0:
+                # 첫 판정 주문: 그날 봉 시가로 체결(DP-7). 체결 시각 = 이 판정 시각(주문 생성보다 앞서지 않음)
+                for inst, by_day in bars.items():
+                    bar = by_day.get(day)
+                    if bar is None:
+                        continue
+                    up, low = lims.get(inst, (None, None))
+                    broker.match_bar(inst, BarFacts(bar.open, bar.high, bar.low, bar.volume, up, low), clock.now())
+                executor.process_events()
+                absorb_fills(day)
+
+        if len(times) > 1:
+            # 이후 판정 주문(과 남은 주문): 그날 마지막 판정 뒤에 종가 한 점으로 체결, 체결 시각 = 마지막 판정 시각.
+            # 거래량 상한은 첫 판정 체결과 합산해 그날 거래량 기준 (체결 모델이 일중 사용량을 누적)
+            for inst, by_day in bars.items():
+                bar = by_day.get(day)
+                if bar is None:
+                    continue
+                up, low = lims.get(inst, (None, None))
+                broker.match_bar(inst, BarFacts(bar.close, bar.close, bar.close, bar.volume, up, low), clock.now())
+            executor.process_events()
+            absorb_fills(day)
         broker.end_of_day()
         executor.process_events()
         broker.new_day()
@@ -316,7 +394,8 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
                                         "equity": [(d.isoformat(), str(e)) for d, e in equity]},
                                        sort_keys=True, default=str).encode()).hexdigest()
     return BacktestResult(cfg.run_id, cfg.segment, days, equity, trades, metrics, rejects, digest,
-                          run_dir / "trading.db", signals, fills_log, k2_resumes, costs_total, quality_failures)
+                          run_dir / "trading.db", signals, fills_log, k2_resumes, costs_total, quality_failures,
+                          signals_by_eval)
 
 
 def _round_trips(fills: list[tuple[date, str, str, str, str, str]], cfg: BacktestConfig) -> list[Trade]:
@@ -385,18 +464,31 @@ def compute_metrics(initial: Decimal, equity: list[tuple[date, Decimal]], trades
 
 # --- 룩어헤드 교란 검사 (D-073 (2), V-91) -------------------------------------------------------
 
-def perturbation_check(cfg: BacktestConfig, check_days: list[date]) -> list[str]:
-    """판정 기준 시각 이후 데이터를 크게 바꿔도 신호가 같아야 한다. 다르면 그 날짜를 돌려준다."""
+def perturbation_check(cfg: BacktestConfig, check_days: list[date], *, flat: bool = True,
+                       stateful: bool = True) -> list[str]:
+    """판정 기준 시각 이후 데이터를 크게 바꿔도 신호가 같아야 한다. 다르면 그 날짜를 돌려준다 (V-91).
 
-    def signals_at(data: dict[str, list[RawDaily]], day: date) -> list[tuple]:
+    - flat: 보유·미체결·이력 없는 상태로 그 날의 각 판정 시각 스냅샷만 만들어 비교한다. 검사일 이후 봉(당일 포함)을 교란.
+    - stateful: 실제 실행 상태(보유·미체결·이력·현금·게이트·체결)로 비교한다. 전체 기간을 한 번 돌린 기준 결과와,
+      검사일까지만 돌리되 데이터를 교란한 실행의 **검사일 모든 판정 신호**를 비교한다.
+      교란 2종: 검사일 다음 날 이후 봉은 전부(균일 ×3 / 봉마다 다른 배율), 검사일 당일 봉은 **종가만** 그날 고가 또는
+      저가로 바꾼다. 당일 시가·고가·저가·거래량은 체결 모델(첫 판정 시가 체결·지정가 관통·거래량 상한)과 판정 시세(시가)가
+      정당하게 쓰므로 바꾸지 않는다 — 따라서 당일 고가·저가·거래량의 누출은 이 검사로 잡지 못한다(flat 검사가 담당).
+      고가 = 저가 = 종가인 봉은 당일 교란이 없다. 판정 시각 사이의 체결(종가)은 그날 마지막 판정 뒤라 신호에 영향 없음.
+      (미래 봉 제거 변형은 검사일에서 끝나는 실행에서는 의미가 없어 뺐다 — 실행 시간 절약.)
+      실행은 임시 폴더에서 하고(var/backtest를 어지럽히지 않음), 최종 평가 구간 장부를 쓰지 않는다(segment=ALL로 같은 날짜).
+    """
+    times = eval_times_of(cfg)
+    spec = cfg.strategy.spec
+
+    def signals_at(data: dict[str, list[RawDaily]], day: date, et: time) -> list[tuple]:
         store = MarketDataStore(cfg.calendar, cfg.ticks)
         for inst, raw in data.items():
             store.register(cfg.infos[inst])
             store.update_status(inst, frozenset())
             store.update_daily(inst, raw, cfg.data_version)
-        as_of = datetime.combine(day, cfg.eval_time, tzinfo=KST)
-        spec = cfg.strategy.spec
-        ev = evaluation_id_of(spec.strategy_id, spec.version, "M1", f"{day.isoformat()}T{cfg.eval_time:%H:%M}")
+        as_of = datetime.combine(day, et, tzinfo=KST)
+        ev = evaluation_id_of(spec.strategy_id, spec.version, "M1", f"{day.isoformat()}T{et:%H:%M}")
         snap = store.snapshot(ev, "M1", ACCOUNT, as_of, cfg.initial_cash, sorted(data), lambda i: None,
                               lambda i: False)
         r = run_evaluation(cfg.strategy, snap, cfg.params)
@@ -410,19 +502,53 @@ def perturbation_check(cfg: BacktestConfig, check_days: list[date]) -> list[str]
     def scaled(r: RawDaily, f: Decimal, vf: Decimal) -> RawDaily:
         return RawDaily(r.day, r.open * f, r.high * f, r.low * f, r.close * f, r.volume * vf, r.corporate_action)
 
-    bad: list[str] = []
-    for day in check_days:
-        base = signals_at(cfg.data, day)
-        variants = (
-            {inst: [scaled(r, Decimal(3), Decimal(3)) if r.day >= day else r for r in raw]   # 균일 배율
-             for inst, raw in cfg.data.items()},
-            {inst: [scaled(r, factor(inst, r.day), 2 - factor(inst, r.day) + Decimal("0.5")) if r.day >= day else r
-                    for r in raw] for inst, raw in cfg.data.items()},                            # 봉마다 다른 배율
-            {inst: [r for r in raw if r.day < day] for inst, raw in cfg.data.items()},       # 미래 봉 제거
-        )
-        if any(signals_at(v, day) != base for v in variants):
-            bad.append(day.isoformat())
-    return bad
+    def close_moved(r: RawDaily, to_high: bool) -> RawDaily:
+        target = r.high if to_high else r.low
+        if target == r.close:
+            target = r.low if to_high else r.high
+        return replace(r, close=target)
+
+    bad: set[str] = set()
+    if flat:
+        for day in check_days:
+            variants = (
+                {inst: [scaled(r, Decimal(3), Decimal(3)) if r.day >= day else r for r in raw]   # 균일 배율
+                 for inst, raw in cfg.data.items()},
+                {inst: [scaled(r, factor(inst, r.day), 2 - factor(inst, r.day) + Decimal("0.5")) if r.day >= day
+                        else r for r in raw] for inst, raw in cfg.data.items()},                  # 봉마다 다른 배율
+                {inst: [r for r in raw if r.day < day] for inst, raw in cfg.data.items()},       # 미래 봉 제거
+            )
+            for et in times:
+                base = signals_at(cfg.data, day, et)
+                if any(signals_at(v, day, et) != base for v in variants):
+                    bad.add(day.isoformat())
+                    break
+
+    if stateful:
+        run_days = _run_days(cfg)
+        targets = [d for d in check_days if run_days and run_days[0] <= d <= run_days[-1]]
+        if targets:
+            with tempfile.TemporaryDirectory(prefix="v91-") as tmp:
+                probe = replace(cfg, segment="ALL", start=run_days[0], end=run_days[-1], out_dir=Path(tmp),
+                                final_usage_ledger=None)
+                base_run = run_backtest(replace(probe, run_id="base"))
+                for n, day in enumerate(targets):
+                    keys = [f"{day.isoformat()}T{et:%H:%M}" for et in times]
+                    want = [base_run.signals_by_eval.get(k) for k in keys]
+                    variants = (
+                        {inst: [scaled(r, Decimal(3), Decimal(3)) if r.day > day else
+                                (close_moved(r, True) if r.day == day else r) for r in raw]
+                         for inst, raw in cfg.data.items()},
+                        {inst: [scaled(r, factor(inst, r.day), 2 - factor(inst, r.day) + Decimal("0.5")) if r.day > day
+                                else (close_moved(r, False) if r.day == day else r) for r in raw]
+                         for inst, raw in cfg.data.items()},
+                    )
+                    for m, v in enumerate(variants):
+                        got = run_backtest(replace(probe, run_id=f"d{n}v{m}", data=v, end=day))
+                        if [got.signals_by_eval.get(k) for k in keys] != want:
+                            bad.add(day.isoformat())
+                            break
+    return sorted(bad)
 
 
 # --- 민감도·보고서 (D-077, §2.8) --------------------------------------------------------------
@@ -441,6 +567,7 @@ def render_report(cfg: BacktestConfig, result: BacktestResult, *, settings_hash:
     """04 §2.8 보고서 (docs/strategies/<ID>/backtest-v<n>.md로 옮겨 쓰는 초안). 판정은 §2.7 v0.5 기준."""
     spec = cfg.strategy.spec
     m = result.metrics
+    times = eval_times_of(cfg)
     ok_run = True
     passed = ok_run and reproducible is True and lookahead_bad == []
     lines = [
@@ -451,7 +578,11 @@ def render_report(cfg: BacktestConfig, result: BacktestResult, *, settings_hash:
         f"({len(result.days)}거래일), 종목 {len(cfg.data)}개, 품질 실패 종목 {len(result.quality_failures)}개",
         f"- 설정 해시: `{settings_hash}` / 코드 커밋: `{cfg.code_commit or '미기재'}` / 시드: {cfg.seed}",
         f"- 체결 가정(D-072): 다음 봉 시가, 시장가 슬리피지 {cfg.slippage_ticks}틱(호가 표 없으면 {cfg.slippage_tick}원), "
-        f"지정가 관통 체결, 봉 거래량 {cfg.volume_cap:%} 상한, 상한가 매수·하한가 매도 미체결",
+        f"지정가 관통 체결, 봉 거래량 {cfg.volume_cap:%} 상한, 상한가 매수·하한가 매도 미체결 "
+        f"(상·하한가 = 기준가×(1±{cfg.gate_settings.price_limit_ratio})를 호가 단위로 내림·올림)",
+        f"- 판정 시각: {','.join(t.strftime('%H:%M') for t in times)} — 첫 판정 주문은 그날 시가(DP-7), "
+        "이후 판정 주문은 그날 종가로 마지막 판정 뒤 체결(제안 가정), 판정 시세는 모두 그날 시가, "
+        "체결 시각 = 체결을 일으킨 판정 시각",
         f"- 비용(D-065): 수수료율 {cfg.gate_settings.cost_rates.commission_rate}, 매도 세율 "
         f"{cfg.gate_settings.cost_rates.sell_tax_rate}, 비용 합계 {result.costs}원",
         f"- 구간(D-075): {cfg.segment} (기본 60/20/20)" + (" — 최종 평가 구간 사용 기록됨" if cfg.segment == "FINAL" else ""),
@@ -477,7 +608,16 @@ def render_report(cfg: BacktestConfig, result: BacktestResult, *, settings_hash:
         "- 거래 상태(VI·거래정지) 이력 미반영: 그날 봉이 없으면 체결 없음으로만 처리.",
         "- 모의·실전 체결 차이는 PAPER에서 확인.",
         "- 일일 손실(K2)은 판정 시각에 한 번만 평가: 장중 손실로 K2가 걸려 이후 주문이 막히는 경우는 재현하지 않음(DP-6).",
-        "- 판정 시각(기본 09:05) 주문을 그날 시가로 체결: 09:00~판정 시각 사이 가격 변동을 무시(DP-7).",
+        f"- 첫 판정({times[0]:%H:%M}) 주문을 그날 시가로 체결: 09:00~판정 시각 사이 가격 변동을 무시(DP-7). "
+        "체결 시각은 판정 시각으로 기록(시가 가격과 시각이 다름).",
+        *([] if len(times) == 1 else [
+            "- 이후 판정 주문을 그날 종가로 체결(제안 가정): 판정 시각~종가 사이 가격 경로 무시, 판정 시세는 그날 시가"
+            "(장중 가격 없음) — 실제 장중 판정과 신호 가격·체결가가 다를 수 있음. 첫 판정 지정가는 하루 고가·저가로 관통 "
+            "판정(판정 전 가격 포함 가능, 기존 가정 유지). 거래량 상한은 하루 합산."]),
+        *([f"- 호가 표 없음(X-U1): 슬리피지 1틱과 상·하한가 호가 내림·올림에 `--slippage-tick` {cfg.slippage_tick}원을 "
+           "모든 가격대에 일괄 사용 — 실제 가격대별 호가 단위와 다를 수 있음."] if cfg.ticks is None else []),
+        "- 룩어헤드 교란 검사(V-91) 범위: 무보유 상태 스냅샷 + 실제 실행 상태(보유·미체결·이력) 재실행 비교. "
+        "실제 상태 비교에서 검사일 당일 봉은 종가만 교란(시가·고가·저가·거래량은 체결 모델이 쓰므로 제외).",
         "",
         "## 판정 (04 §2.7 v0.5 — 실행 기록, 성과 기준 아님)",
         f"- 오류 없이 완료: {'예' if ok_run else '아니오'}",

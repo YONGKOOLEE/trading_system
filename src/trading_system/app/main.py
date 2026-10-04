@@ -325,7 +325,7 @@ def backtest_main(argv: Sequence[str], root: Path) -> int:
     p.add_argument("--end", required=True)
     p.add_argument("--run-id", required=True)
     p.add_argument("--cash", default="10000000")
-    p.add_argument("--eval-time", default="09:05")
+    p.add_argument("--eval-time", default="09:05", help="판정 시각 HH:MM, 여러 개는 쉼표로 (예: 09:30,14:30)")
     p.add_argument("--segment", default="ALL", choices=["ALL", "TRAIN", "VALIDATION", "FINAL"])
     p.add_argument("--slippage-tick", default="10", help="호가 표가 없을 때 1틱 크기(원)")
     ns = p.parse_args(argv)
@@ -333,7 +333,8 @@ def backtest_main(argv: Sequence[str], root: Path) -> int:
         mode = Mode.BACKTEST
         gate_settings, _, calendar, ticks, caps = _load_common(root, mode)
         limits = load_limits_file(root / "config" / "limits.backtest.toml").limits
-        hh, mm = ns.eval_time.split(":")
+        eval_times = tuple(dtime(int(hh), int(mm)) for hh, mm in
+                           (part.strip().split(":") for part in ns.eval_time.split(",")))
         strat, params = load_strategy(StrategyDeploy(ns.strategy, (root / ns.params).resolve(), ()))
         data_dir = Path(ns.data)
         data = {f.stem: load_daily_csv(f) for f in sorted(data_dir.glob("*.csv"))}
@@ -346,7 +347,7 @@ def backtest_main(argv: Sequence[str], root: Path) -> int:
                              slippage_tick=Decimal(ns.slippage_tick), data=data, infos=infos,
                              start=date.fromisoformat(ns.start), end=date.fromisoformat(ns.end),
                              initial_cash=Decimal(ns.cash), out_dir=root / "var" / "backtest",
-                             eval_time=dtime(int(hh), int(mm)), segment=ns.segment,
+                             eval_time=eval_times[0], eval_times=eval_times, segment=ns.segment,
                              final_usage_ledger=root / "var" / "backtest" / "final-usage.json",
                              data_version=f"csv:{data_dir.name}")
         result = run_backtest(cfg)
