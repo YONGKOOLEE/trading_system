@@ -140,3 +140,100 @@ def test_fc_close_reconcile_retried_after_query_failure(tmp_path) -> None:  # ty
         assert len(w.repo.select("SELECT 1 FROM reconciliation WHERE trigger='CLOSE'")) == n   # 성공 뒤엔 다시 안 함
     finally:
         w.close()
+
+
+# --- 6차 검토 -----------------------------------------------------------------------------------------
+
+def test_r6_f2_presend_failed_cancel_retried_on_auto_release(env: Env) -> None:
+    """전송 전 실패(NOT_SENT)한 취소는 브로커에 간 적이 없으므로 자동 해제 때 재시도한다."""
+    env.broker.behavior = FakeBehavior.ACCEPT_ONLY
+    _limit_buy(env, "TST-B", "ob")
+    env.broker.behavior = FakeBehavior.PRE_SEND_FAIL
+    env.halts.activate(HaltType.K1, "LOCAL:u", "kill", None)
+    sent = env.repo.select("SELECT a.state FROM attempt a JOIN intent i ON a.intent_id=i.intent_id "
+                           "WHERE i.request_type='CANCEL'")
+    assert [r["state"] for r in sent] == ["NOT_SENT"]
+    env.broker.behavior = FakeBehavior.ACCEPT_ONLY
+    env.clock.advance(timedelta(seconds=1))
+    env.halts.activate(HaltType.K6, "monitor", "clock", None)
+    env.halts.report_condition(HaltType.K6, None, "clock_ok", True, "ok")
+    sent = env.repo.select("SELECT a.state FROM attempt a JOIN intent i ON a.intent_id=i.intent_id "
+                           "WHERE i.request_type='CANCEL' ORDER BY a.created_seq")
+    assert [r["state"] for r in sent][0] == "NOT_SENT" and len(sent) == 2   # 자동 해제 때 실제 전송 재시도
+
+
+def _world_entry(tmp_path, behavior):  # type: ignore[no-untyped-def]
+    from tests.scenario.test_t020_app import World
+    w = World(tmp_path, behavior)
+    w.engine.start()
+    w.resume_k8()
+    w.at(9, 5)
+    w.engine.tick()
+    return w
+
+
+def test_r6_f1_unknown_buy_at_kill_cancelled_once_adopted(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """KILL 때 결과 불명이던 매수가 나중에 접수로 확정되면(해소기 FOUND) 그 주문을 한 번 취소한다."""
+    from tests.scenario.test_t020_app import ACCOUNT as APP_ACCOUNT
+    w = _world_entry(tmp_path, FakeBehavior.LOST_ACCEPT)
+    try:
+        assert [i["state"] for i in w.intents()] == ["UNKNOWN"]
+        w.broker.behavior = FakeBehavior.ACCEPT_ONLY
+        w.command("KILL", {"account": None, "reason": "킬"})
+        w.engine.tick()
+        for s in (2, 4, 8, 16, 32, 5):                                # 해소기 회차
+            w.clock.advance(timedelta(seconds=s))
+            w.engine.tick()
+        assert "K1" in w.repo.active_halts(APP_ACCOUNT)
+        assert w.repo.open_orders(APP_ACCOUNT, "BUY") == [], w.intents()
+        assert sum(1 for i in w.intents() if i["request_type"] == "CANCEL") == 1
+    finally:
+        w.close()
+
+
+def test_r6_f3_exec_policy_cancel_retried_after_halt_and_no_row_flood(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """미체결 시간 취소가 정지에 막혀도 정지가 풀리면 다시 판정되고, 막힌 동안 판정 행이 tick마다 쌓이지 않는다."""
+    from dataclasses import replace
+    from datetime import datetime
+
+    from tests.scenario.test_t020_app import (ACCOUNT as A, CAPS_ALL_SUPPORTED, PARAMS, SETTINGS, CrossStrategy,
+                                              World, make_store, quote, scenario_limits)
+    from tests.support.sample_strategies import cross_spec
+    from trading_system.app.wiring import StrategyInput, build_engine
+    from trading_system.domain.enums import Mode
+    from trading_system.storage.repository import Repository
+    w = World(tmp_path, FakeBehavior.ACCEPT_ONLY)
+    try:
+        caps = w.engine.strategies[0].strategy.spec.capabilities
+        spec = cross_spec(version=2, capabilities=tuple(caps) + ("CAP-ORD-03",), unfilled_policy="미체결 10분 후 취소")
+
+        class S(CrossStrategy):
+            pass
+        w.repo.close()
+        w.repo = Repository(w.db, Mode.BACKTEST)
+        w.store = make_store(w.clock)
+        quote(w.store, w.clock)
+        w.engine = build_engine(mode=Mode.BACKTEST, repo=w.repo, clock=w.clock, broker=w.broker, store=w.store,
+                                account=A, account_limits=scenario_limits(), gate_settings=SETTINGS,
+                                caps=CAPS_ALL_SUPPORTED, kill_file=tmp_path / "KILL", clock_health=w.health,
+                                strategies=[StrategyInput(S(spec), dict(PARAMS), (datetime(2000, 1, 1, 9, 5).time(),))])
+        w.engine.strategies[0] = replace(w.engine.strategies[0], unfilled_minutes=10)
+        w.engine.start()
+        w.resume_k8()
+        w.at(9, 5)
+        w.engine.tick()
+        w.engine.halts.activate(HaltType.K5, "recovery", "조회 실패", A)          # 취소를 막는 정지
+        w.at(9, 15, 1)
+        rows0 = len(w.repo.select("SELECT 1 FROM gate_decision WHERE request_type='CANCEL'"))
+        for s in range(10):                                                     # 10초 동안 tick
+            w.at(9, 15, 1 + s)
+            w.engine.tick()
+        rows1 = len(w.repo.select("SELECT 1 FROM gate_decision WHERE request_type='CANCEL'"))
+        assert rows1 - rows0 <= 1                                              # 막힌 동안 행 폭주 없음
+        w.engine.halts.report_condition(HaltType.K5, A, "broker_connected", True, "x")
+        w.at(9, 16, 30)
+        w.engine.halts.report_condition(HaltType.K5, A, "reconciled", True, "y")
+        w.engine.tick()
+        assert any(i["request_type"] == "CANCEL" for i in w.intents()), w.intents()
+    finally:
+        w.close()

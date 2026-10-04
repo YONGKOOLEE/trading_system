@@ -40,7 +40,7 @@ from trading_system.domain.sinks import AlertSink
 from trading_system.domain.strategy import PositionView, evaluation_id_of
 from trading_system.evaluation.runner import run_evaluation
 from trading_system.execution.executor import ExecutionBlocked, Executor
-from trading_system.execution.resolver import ResolveProgress, UnknownResolver
+from trading_system.execution.resolver import ResolveOutcome, ResolveProgress, UnknownResolver
 from trading_system.gate.gate import Gate
 from trading_system.halt.manager import K5_LINK_THREAD, HaltManager
 from trading_system.marketdata.store import MarketDataStore
@@ -91,6 +91,7 @@ class AccountState:
         self.tracker.update_cash(account, view.deposit)
 
 
+EXEC_RETRY = timedelta(minutes=1)   # 실행 정책 취소가 게이트에 막혔을 때 재판정 간격 (6차 검토 F-3)
 BASE_RETRY_WINDOW = timedelta(minutes=10)   # 일일 기준 금액 실패 시 tick마다 재시도하는 기간 (재검토 F5, 임시값)
 BASE_SLOW_RETRY = timedelta(minutes=5)      # 그 뒤 재시도 간격 (재검토2 #3, 임시값)
 
@@ -124,6 +125,8 @@ class Engine:
     evaluated: set[str] = field(default_factory=set)
     _day_start: datetime | None = None
     _last_reconcile: datetime | None = None
+    _exec_tried: dict[str, datetime] = field(default_factory=dict)   # 실행 정책 취소 마지막 판정 시각 (6차 F-3)
+    _exec_tried_log: list[str] = field(default_factory=list)
     _base_retry_until: datetime | None = None   # 일일 기준 금액 빠른 재시도 마감 (재검토 F5)
     _base_next_try: datetime = datetime.min.replace(tzinfo=UTC)   # 다음 재시도 시각 (느린 재시도, 재검토2 #3)
     _reconcile_requested: threading.Event = field(default_factory=threading.Event)
@@ -307,8 +310,12 @@ class Engine:
         for iid, p in sorted(self.progress.items(), key=lambda kv: kv[1].next_at):
             if self.clock.now() < p.next_at:
                 continue
-            if self.resolver.step(p) is not None:
+            out = self.resolver.step(p)
+            if out is not None:
                 self.progress.pop(iid, None)
+                if out is ResolveOutcome.FOUND:
+                    # 정지 중 접수로 확정된 매수는 취소 대상이 된다 (6차 검토 F-1)
+                    self.halts.cancel_newly_open_buys(f"결과 불명 해소 {iid}")
 
     # 일일 ---------------------------------------------------------------------------
     def _daily(self, now: datetime) -> None:
@@ -478,9 +485,20 @@ class Engine:
                 attempt = self.repo.attempt_for(intent.intent_id)
                 if attempt is None or now - from_iso(attempt["created_at"]) < timedelta(minutes=ls.unfilled_minutes):
                     continue  # 미체결 시간 = 전송 시각부터
+                # 이미 취소 의도가 있으면(보냈거나 진행 중·브로커 거부) 다시 판정하지 않는다 — §8-7, 판정 행 누적 방지.
+                # 의도 없이 게이트에서 거부(정지 등)됐으면 1분 간격으로 새 키로 재판정 (6차 검토 F-3)
+                if self.repo.select("SELECT 1 FROM intent WHERE request_type='CANCEL' AND target_order_key=? LIMIT 1",
+                                    (order.order_key,)):
+                    continue
+                last = self._exec_tried.get(order.order_key)
+                if last is not None and now - last < EXEC_RETRY:
+                    continue
+                self._exec_tried[order.order_key] = now
+                n = sum(1 for k in self._exec_tried_log if k == order.order_key)
+                self._exec_tried_log.append(order.order_key)
                 req = GateRequest.cancel(RequestSource.EXEC_POLICY, self.account, order.instrument,
                                          Side(order.side), order.order_key,
-                                         idem_key=f"exec:{order.order_key}:unfilled", owner=ls.owner)
+                                         idem_key=f"exec:{order.order_key}:unfilled:{n}", owner=ls.owner)
                 d = self.gate.decide(req)
                 if d.result is GateResult.APPROVED and d.approved is not None:
                     self.executor.submit(d.approved)

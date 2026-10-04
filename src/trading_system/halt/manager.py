@@ -165,7 +165,7 @@ class HaltManager:
             for order in self._repo.open_orders(acct, Side.BUY.value):
                 if skip_tried and self._repo.select(   # 브로커로 보낸 적 있는 취소만 제외 — 전송 전 막힌 것은 재시도 (5차 F-3)
                         "SELECT 1 FROM intent i JOIN attempt a ON a.intent_id=i.intent_id "
-                        "WHERE i.request_type='CANCEL' AND i.target_order_key=? LIMIT 1",
+                        "WHERE i.request_type='CANCEL' AND i.target_order_key=? AND a.state<>'NOT_SENT' LIMIT 1",
                         (order.order_key,)):
                     continue
                 order_owner = self._repo.intent(order.intent_id).owner if order.intent_id else None
@@ -259,6 +259,15 @@ class HaltManager:
         if result.ok:
             self._retry_after_release(f"재개 {halt_type.value}", auto=False)
         return result
+
+    def cancel_newly_open_buys(self, why: str) -> None:
+        """결과 불명이던 매수가 접수로 확정됐을 때(해소기 FOUND·사람 확정) 판정·실행 스레드가 부른다 (6차 검토 F-1).
+
+        정지 발동 시점엔 브로커 주문 행이 없어 취소 대상에서 빠졌던 매수를, 아직 취소를 보낸 적 없으면 한 번 취소한다
+        (자동 해제 재시도와 같은 규칙 — 브로커 거부 취소는 다시 보내지 않음)."""
+        if not any(HaltType(r["halt_type"]) in CANCELS_OPEN_BUYS for r in self._repo.halt_rows(None)):
+            return
+        self._retry_after_release(why, auto=True)
 
     def _retry_after_release(self, why: str, auto: bool) -> None:
         if self.send_thread is not None and threading.get_ident() != self.send_thread:
