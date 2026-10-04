@@ -28,6 +28,7 @@ from trading_system.storage.jsonlog import Masker
 from trading_system.storage.repository import Repository
 
 CONFIRM_TTL = timedelta(seconds=60)
+STALE_AFTER = timedelta(seconds=120)   # 시작 시각보다 이만큼 넘게 오래된 메시지는 실행하지 않는다 (꺼져 있던 동안의 명령)
 K11_AFTER_FAILURES = 3     # 01 §2.7 알림 전송 연속 실패 3회 → K11 (D-024)
 CONNECT_TIMEOUT, READ_TIMEOUT = 3, 10
 POLL_SECONDS = 30
@@ -132,6 +133,7 @@ class CommandBot:
         self._alert = alert
         self._offset: int | None = None
         self._pending: dict[str, _Pending] = {}
+        self._started = clock.now()
 
     def poll_once(self, timeout: int = POLL_SECONDS) -> int:
         updates = self._api.get_updates(self._offset, timeout)
@@ -144,9 +146,17 @@ class CommandBot:
             msg = u.get("message") or {}
             chat = str((msg.get("chat") or {}).get("id", ""))
             text = str(msg.get("text") or "").strip()
-            self._handle(uid, chat, text)
+            raw_date = msg.get("date")
+            self._handle(uid, chat, text, raw_date if isinstance(raw_date, int) else None)
             handled += 1
         return handled
+
+    def _is_stale(self, date: int | None) -> bool:
+        """메시지 시각(epoch 초)이 있고 시작보다 STALE_AFTER 넘게 오래됐으면 True. 시각이 없으면 오래된 것으로 보지 않는다."""
+        if date is None:
+            return False
+        sent = datetime.fromtimestamp(date, tz=self._started.tzinfo)
+        return sent < self._started - STALE_AFTER
 
     def _reply(self, chat: str, text: str) -> None:
         try:
@@ -154,7 +164,7 @@ class CommandBot:
         except TelegramError:
             pass  # 회신 실패는 알림 경로(Notifier)의 실패 집계로 드러난다
 
-    def _handle(self, uid: int, chat: str, text: str) -> None:
+    def _handle(self, uid: int, chat: str, text: str, date: int | None = None) -> None:
         if chat != self._allowed:
             with self._repo.tx():
                 self._repo.audit(self._clock.now(), "REMOTE_REJECTED", "telegram", str(uid),
@@ -163,6 +173,15 @@ class CommandBot:
             return
         parts = text.split()
         if not parts:
+            return
+        if self._is_stale(date):
+            # 텔레그램은 미수신 메시지를 24시간 보관한다 → 꺼져 있던 동안 보낸 /kill 등이 시작 직후 실행되면
+            # 그날 매매가 사라진다(2026-10-05 독립 검토). 실행하지 않고 다시 보내라고만 답한다.
+            with self._repo.tx():
+                self._repo.audit(self._clock.now(), "REMOTE_STALE", "telegram", str(uid),
+                                 {"text_head": parts[0][:20], "message_date": date})
+            if parts[0].startswith("/"):
+                self._reply(chat, "꺼져 있던 동안 보낸 명령이라 실행하지 않았습니다 — 필요하면 다시 보내세요")
             return
         cmd, args = parts[0].lower(), parts[1:]
         if cmd == "/status":

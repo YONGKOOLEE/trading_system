@@ -65,8 +65,11 @@ class FakeTelegram:
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
-    def push(self, uid: int, text: str, chat: str = CHAT) -> None:
-        self.updates.append({"update_id": uid, "message": {"chat": {"id": int(chat)}, "text": text}})
+    def push(self, uid: int, text: str, chat: str = CHAT, date: int | None = None) -> None:
+        msg: dict = {"chat": {"id": int(chat)}, "text": text}
+        if date is not None:
+            msg["date"] = date
+        self.updates.append({"update_id": uid, "message": msg})
 
     def close(self) -> None:
         self.server.shutdown()
@@ -237,3 +240,36 @@ def test_outgoing_text_is_masked(env: Env, tg: FakeTelegram) -> None:
     Notifier(env.repo, api(tg), CHAT, env.clock, env.halts).pump()
     assert "1234567890" not in tg.sent[-1]["text"]
     assert Path and Decimal  # 표시용
+
+
+# --- 꺼져 있던 동안 보낸 명령 (2026-10-05 독립 검토 M-1) ---------------------------------------------------
+
+def test_stale_commands_sent_before_start_are_not_executed(env: Env, tg: FakeTelegram) -> None:
+    """시작 시각보다 2분 넘게 오래된 메시지(꺼져 있는 동안 보낸 /kill 등)는 실행하지 않고 다시 보내라고만 답한다."""
+    now = int(env.clock.now().timestamp())
+    b = bot(env, tg)
+    tg.push(1, "/kill 오래전", date=now - 3600)
+    tg.push(2, "/status", date=now - 300)
+    tg.push(3, "hi", date=now - 7200)            # 명령이 아닌 글은 조용히 무시
+    assert b.poll_once(timeout=0) == 3
+    assert ops(env).process_pending() == [] and env.repo.active_halts(ACCOUNT) == []
+    texts = [m["text"] for m in tg.sent]
+    assert len(texts) == 2 and all("꺼져 있던 동안" in t for t in texts)
+    assert sum(1 for e in env.repo.audit_events() if e["kind"] == "REMOTE_STALE") == 3
+
+
+def test_fresh_commands_near_start_still_work(env: Env, tg: FakeTelegram) -> None:
+    now = int(env.clock.now().timestamp())
+    b = bot(env, tg)
+    tg.push(1, "/kill 방금", date=now - 60)       # 시작 직전 1분 — 허용 범위
+    b.poll_once(timeout=0)
+    assert [o.status for o in ops(env).process_pending()] == ["DONE"]
+
+
+def test_stale_check_applies_after_chat_check(env: Env, tg: FakeTelegram) -> None:
+    now = int(env.clock.now().timestamp())
+    b = bot(env, tg)
+    tg.push(1, "/kill", chat="999", date=now - 3600)
+    b.poll_once(timeout=0)
+    kinds = [e["kind"] for e in env.repo.audit_events()]
+    assert "REMOTE_REJECTED" in kinds and "REMOTE_STALE" not in kinds and tg.sent == []

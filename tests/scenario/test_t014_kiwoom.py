@@ -462,6 +462,29 @@ def test_ws_gives_up_after_max_and_raises_critical(sim: Sim, clock: FixedClock) 
         rt.stop()
 
 
+def test_ws_keeps_retrying_after_max_and_recovers_without_restart(sim: Sim, clock: FixedClock) -> None:
+    """CP-023 (2026-10-05 무인 운영 검토): 한도 초과 뒤에도 스레드를 끝내지 않고 계속 재접속한다. 치명 알림은 1회,
+    OFFLINE 통보는 한도까지만(이후 실패는 조용히), 복구되면 ONLINE/RECONNECTED로 대조·K5 해제 경로를 탄다."""
+    a = adapter(sim, clock)
+    sim.ws_reject_reg = True
+    states: list[WsState] = []
+    crit: list[str] = []
+    rt = realtime(a, sim, clock, states, crit, max_reconnects=2)
+    rt.start()
+    try:
+        assert wait_until(lambda: WsState.FAILED in states)
+        logins = sim.ws_logins
+        assert wait_until(lambda: sim.ws_logins >= logins + 2)       # 한도 뒤에도 접속 시도가 계속된다
+        assert rt._thread is not None and rt._thread.is_alive()      # noqa: SLF001
+        sim.ws_reject_reg = False                                    # 서버 복구
+        assert wait_until(lambda: WsState.ONLINE in states)
+        assert crit == ["WS_FAILED"] and states.count(WsState.OFFLINE) == 2 and states.count(WsState.FAILED) == 1
+        sim.drop_ws()                                                # 복구 뒤 끊김 → 다시 정상 재접속 정책
+        assert wait_until(lambda: WsState.RECONNECTED in states)
+    finally:
+        rt.stop()
+
+
 def test_ws_login_rejected_invalidates_token(sim: Sim, clock: FixedClock) -> None:
     a = adapter(sim, clock)
     sim.ws_reject_login = True
@@ -470,7 +493,7 @@ def test_ws_login_rejected_invalidates_token(sim: Sim, clock: FixedClock) -> Non
     rt.start()
     try:
         assert wait_until(lambda: WsState.FAILED in states)
-        assert sent(sim, "au10001") == 2  # 로그인 거부마다 토큰 무효 → 재발급
+        assert sent(sim, "au10001") >= 2  # 로그인 거부마다 토큰 무효 → 재발급 (CP-023: 한도 뒤에도 재접속 계속이라 정확히 2는 아님)
     finally:
         rt.stop()
 
@@ -653,3 +676,45 @@ def test_stock_code_error_shows_offending_value_truncated() -> None:
     with pytest.raises(parse.KiwoomParseError) as e:
         parse.stock_code(None)
     assert "NoneType" in str(e.value)
+
+
+def test_ws_parse_error_raises_rate_limited_warning(sim: Sim, clock: FixedClock) -> None:
+    """2026-10-05 무인 운영 검토: 실시간 통보 해석 실패가 조용히 버려지지 않게 경고 알림(종류별 5분에 1회)."""
+    a = adapter(sim, clock)
+    warned: list[str] = []
+
+    def bad_handler(item: str, values: dict) -> None:
+        raise parse.KiwoomParseError("테스트 해석 불가")
+
+    rt = KiwoomRealtime(sim.ws_url, a.tokens, clock, registrations=[("00", [])], handlers={"00": bad_handler},
+                        on_warning=warned.append, backoff_base=0.01, backoff_cap=0.05)
+    rt._handle({"trnm": "REAL", "data": [{"type": "00", "item": "", "values": {"1": "x"}}]})  # noqa: SLF001
+    rt._handle({"trnm": "REAL", "data": [{"type": "00", "item": "", "values": {"1": "x"}}]})  # noqa: SLF001
+    assert len(warned) == 1 and "00" in warned[0] and "해석 불가" in warned[0] and len(rt.parse_errors) == 2
+    clock.advance(timedelta(minutes=5, seconds=1))
+    rt._handle({"trnm": "REAL", "data": [{"type": "00", "item": "", "values": {"1": "x"}}]})  # noqa: SLF001
+    assert len(warned) == 2
+
+
+def test_ws_terminal_rejection_reports_critical_once_while_retrying(sim: Sim, clock: FixedClock) -> None:
+    """독립 검토(2026-10-05) 중간: 한도 뒤에도 재접속을 계속하므로 IP·단말기 거부(8010 등)의 치명 통보가 60초마다 반복되지
+    않게 한 번만 보고한다. 거부가 풀려 접속에 성공하면 다시 보고할 수 있다."""
+    a = adapter(sim, clock)
+    sim.ws_reject_login = True
+    sim.ws_login_reject_msg = "[8010:지정단말기 사용자 IP 가 서버에 등록된 IP 와 다릅니다]"
+    states: list[WsState] = []
+    crit: list[str] = []
+    rt = realtime(a, sim, clock, states, crit, max_reconnects=2)
+    rt.start()
+    try:
+        assert wait_until(lambda: WsState.FAILED in states)
+        logins = sim.ws_logins
+        assert wait_until(lambda: sim.ws_logins >= logins + 3)      # 거부된 채 재시도가 계속된다
+        assert crit.count("TERMINAL") == 1 and crit.count("WS_FAILED") == 1
+        sim.ws_reject_login = False
+        assert wait_until(lambda: WsState.ONLINE in states)
+        sim.ws_reject_login = True                                  # 다시 거부되면 새 사건으로 다시 보고
+        sim.drop_ws()
+        assert wait_until(lambda: crit.count("TERMINAL") == 2)
+    finally:
+        rt.stop()

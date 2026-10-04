@@ -218,7 +218,15 @@ class KiwoomMarketFeed:
                 _, rows = self.api.query_raw(INFO_PATH, "ka10054", body, "motn_stk")
             today = self._today()
             for r in rows:
-                code = parse.stock_code(r.get("stk_cd"))
+                raw = r.get("stk_cd")
+                try:
+                    code = parse.stock_code(raw)
+                except parse.KiwoomParseError:
+                    # 시장 전체 목록이라 우리 종목이 아닌 낯선 코드(영숫자·접미사 등)가 섞일 수 있다 (2026-10-04 예행연습).
+                    # 우리 종목으로 보이는 행(코드를 포함)만 해석 실패로 보고 전체를 실패시킨다 (DP-14 보수).
+                    if isinstance(raw, str) and any(c in raw for c in self.infos):
+                        raise
+                    continue
                 if code in self.infos:
                     self._vi(code, r.get("virelis_time"), r.get("trde_cntr_proc_time"), today)
         except (BrokerQueryError, parse.KiwoomParseError) as exc:

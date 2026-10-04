@@ -312,7 +312,8 @@ def _paper_broker(startup, app: AppSettings, clock, store: MarketDataStore):  # 
                     **feed.handlers()}
         rt = KiwoomRealtime(adapter.cfg.ws_url, adapter.tokens, clock,
                             registrations=[("00", []), ("04", [])] + feed.registrations(), handlers=handlers,
-                            on_state=on_state, on_critical=lambda k, m: critical(k, m, "realtime"))
+                            on_state=on_state, on_critical=lambda k, m: critical(k, m, "realtime"),
+                            on_warning=lambda m: engine.alerts.alert("WARNING", m, None))
         extra.rt = rt  # type: ignore[attr-defined]   # 감시 스레드가 WS 수신 스레드 생존을 본다
         poller = MarketPoller(feed, alerts=engine.alerts)
         closers.extend([rt.stop, adapter.close])

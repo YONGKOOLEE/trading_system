@@ -8,7 +8,8 @@
   아니면 실패로 처리해 조용히 넘어가지 않는다.
 - 실시간 수신 `{"trnm":"REAL","data":[{"type":"00","item":...,"values":{FID:값}}]}`.
 끊기면: 상태 OFFLINE 알림(호출자가 위험 확대 거부) → 지수 대기(1·2·4…최대 60초) 재접속 최대 10회 →
-성공하면 RECONNECTED 알림(호출자가 조회 대조로 누락분 보완), 10회 실패면 FAILED + 치명 알림(K5).
+성공하면 RECONNECTED 알림(호출자가 조회 대조로 누락분 보완), 10회 실패면 FAILED + 치명 알림(K5, 1회) — [CP-023] 이후에도
+최대 대기(60초) 간격으로 재접속을 계속한다(스레드를 끝내지 않음). 복구되면 ONLINE/RECONNECTED.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import json
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
@@ -33,6 +34,7 @@ WS_PATH = "/api/dostk/websocket"
 LOGIN_TIMEOUT = 10.0
 MAX_RECONNECTS = 10
 BACKOFF_CAP = 60.0
+PARSE_WARN_EVERY = timedelta(minutes=5)
 
 
 class WsState(StrEnum):
@@ -40,7 +42,7 @@ class WsState(StrEnum):
     ONLINE = "ONLINE"
     RECONNECTED = "RECONNECTED"   # 재접속 성공 — 조회 대조 필요
     OFFLINE = "OFFLINE"
-    FAILED = "FAILED"             # 재접속 한도 초과 → K5
+    FAILED = "FAILED"             # 재접속 한도 초과 → K5 (CP-023: 스레드는 계속 재접속)
     STOPPED = "STOPPED"
 
 
@@ -112,6 +114,7 @@ class KiwoomRealtime:
                  handlers: dict[str, Handler],
                  on_state: Callable[[WsState, str], None] | None = None,
                  on_critical: Callable[[str, str], None] | None = None,
+                 on_warning: Callable[[str], None] | None = None,
                  connect: Callable[..., Any] | None = None,
                  backoff_base: float = 1.0, backoff_cap: float = BACKOFF_CAP,
                  max_reconnects: int = MAX_RECONNECTS, login_timeout: float = LOGIN_TIMEOUT) -> None:
@@ -122,6 +125,9 @@ class KiwoomRealtime:
         self._handlers = handlers
         self._on_state = on_state or (lambda s, m: None)
         self._on_critical = on_critical or (lambda k, m: None)
+        self._on_warning = on_warning or (lambda m: None)
+        self._critical_reported = False
+        self._warned_at: dict[str, datetime] = {}   # 통보 종류별 마지막 해석 실패 경고 시각
         if connect is None:
             from websockets.sync.client import connect as ws_connect
 
@@ -168,11 +174,14 @@ class KiwoomRealtime:
     def _run(self) -> None:
         failures = 0
         ever_online = False
+        gave_up = False     # 한도 초과를 알렸는지 — 알린 뒤에도 재접속은 계속한다 (CP-023)
         while not self._stop.is_set():
             self._set(WsState.CONNECTING)
             try:
                 self._session_open()
                 failures = 0
+                gave_up = False
+                self._critical_reported = False
                 if ever_online:
                     self.reconnects += 1
                     self._set(WsState.RECONNECTED, "재접속 — 조회 대조 필요")
@@ -184,12 +193,15 @@ class KiwoomRealtime:
                 if self._stop.is_set():
                     break
                 failures += 1
-                self._set(WsState.OFFLINE, f"{type(exc).__name__}: {str(exc)[:120]}")
-                if failures >= self._max:
-                    self._set(WsState.FAILED, f"재접속 {failures}회 실패")
-                    self._on_critical("WS_FAILED", f"실시간 재접속 {failures}회 실패")
-                    return
-                self._stop.wait(min(self._base * 2 ** (failures - 1), self._cap))
+                if not gave_up:
+                    self._set(WsState.OFFLINE, f"{type(exc).__name__}: {str(exc)[:120]}")
+                    if failures >= self._max:
+                        gave_up = True
+                        self._set(WsState.FAILED, f"재접속 {failures}회 실패 — 계속 시도")
+                        self._on_critical("WS_FAILED", f"실시간 재접속 {failures}회 실패 — 계속 시도")
+                # 한도 뒤에도 스레드를 끝내지 않는다: 끝나면 K5(link:thread)가 재시작 전까지 풀리지 않아 무인 운영에서
+                # 그날 매매가 사라진다. K5는 이미 걸려 있어 안전성은 같고, 회복하면 RECONNECTED → 대조 → K5 해제.
+                self._stop.wait(min(self._base * 2 ** min(failures - 1, 16), self._cap))
             finally:
                 ws, self._ws = self._ws, None
                 if ws is not None:
@@ -218,7 +230,9 @@ class KiwoomRealtime:
         cls = classify(code)
         if auth and cls in (ErrorClass.AUTH, ErrorClass.TERMINAL, ErrorClass.MODE_MISMATCH):
             self._tokens.invalidate()
-        if cls in (ErrorClass.MODE_MISMATCH, ErrorClass.TERMINAL):
+        if cls in (ErrorClass.MODE_MISMATCH, ErrorClass.TERMINAL) and not self._critical_reported:
+            # 재접속을 계속하므로(CP-023) 같은 거부의 치명 통보는 접속에 성공할 때까지 1회만 (알림·K5 반복 방지)
+            self._critical_reported = True
             self._on_critical(cls.value, f"{what} 거부 코드 {code}")
         raise ConnectionError(f"{what} 거부 (코드 {code})")
 
@@ -271,6 +285,20 @@ class KiwoomRealtime:
             except parse.KiwoomParseError as exc:
                 self.parse_errors.append(f"{d.get('type')}: {exc}")
                 del self.parse_errors[:-100]
+                self._warn_parse_error(str(d.get("type")), exc)
+
+    def _warn_parse_error(self, rtype: str, exc: Exception) -> None:
+        """해석 실패한 실시간 통보가 조용히 버려지지 않게 종류별로 5분에 1회 경고한다 (체결 통보(00)가 버려지면 이후 대조에서
+        K4가 되므로 원인을 바로 알 수 있어야 한다)."""
+        now = self._clock.now()
+        last = self._warned_at.get(rtype)
+        if last is not None and now - last < PARSE_WARN_EVERY:
+            return
+        self._warned_at[rtype] = now
+        try:
+            self._on_warning(f"실시간 {rtype} 통보 해석 불가(통보 버림): {str(exc)[:100]}")
+        except Exception:  # noqa: BLE001 — 경고 전달 실패가 수신 스레드를 죽이지 않게
+            pass
 
 
 def order_handlers(push: Callable[[OrderEvent], None], alias: str, clock: Clock,

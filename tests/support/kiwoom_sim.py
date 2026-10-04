@@ -70,6 +70,7 @@ class Sim:
     ws_in: list[Any] = field(default_factory=list)
     ws_logins: int = 0
     ws_reject_login: bool = False
+    ws_login_reject_msg: str = "[8005:Token이 유효하지 않습니다]"   # 로그인 거부 시 return_msg (코드 분류 시험용)
     ws_reject_reg: bool = False
     extra_rows: list[dict] = field(default_factory=list)   # kt00009에 덧붙일 행 (외부·이상 행)
     extra_open: list[dict] = field(default_factory=list)   # ka10075에 덧붙일 행
@@ -145,7 +146,7 @@ class Sim:
                 sim.ws_logins += 1
                 ok = not sim.ws_reject_login and login.get("trnm") == "LOGIN" and login.get("token") in sim.valid_tokens
                 ws.send(json.dumps({"trnm": "LOGIN", "return_code": 0 if ok else 3,
-                                    "return_msg": "" if ok else "[8005:Token이 유효하지 않습니다]"}))
+                                    "return_msg": "" if ok else sim.ws_login_reject_msg}))
                 if not ok:
                     return
                 while True:

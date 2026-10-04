@@ -1,26 +1,26 @@
 # 세션 인계 (짧게 유지 — 작업이 끝날 때마다 덮어쓴다)
 
-- 갱신: 2026-10-05 새벽 / 결정표 처리(A-046~A-053), 예수금 기록·텔레그램 연결(A-054~A-056), 예행연습 성공, 재검토 3건(A-058) / **다음: 재검토 결정(아래) → 10/6(화) PAPER-0 1일차(사용자)**
-- 브랜치(로컬만, push 없음): main = 4cb8f15. 그 뒤 미병합: 0d92651(절차서) + feat/T-021-code-diagnostic(종목코드 진단 메시지, 문서 정리). 병합은 지시 시
-- 테스트 `.venv\Scripts\python -m pytest -q` → 997 passed(4cb8f15, 755초). 이후 변경분 결과는 worklog 마지막 항목 참조. 빠른 확인은 `--ignore=tests/scenario/test_run_rehearsal.py --ignore=tests/scenario/test_run_rehearsal2.py`
+- 갱신: 2026-10-05 / 재검토 결정 1·2·3 구현 완료(A-059, CP-023), 시험 1006 passed / **다음: 01 v0.8·03 v0.9·04 v0.8 draft 승인 → 예행연습 1회 더 → 10/6 PAPER-0 1일차(사용자)**
+- 브랜치(로컬만, push 없음): main = fde7e65. feat/T-020-unattended-fixes = 구현·CP-023 커밋(병합은 지시 시)
+- 테스트 `.venv\Scripts\python -m pytest -q` → 1006 passed(2026-10-05, 807초). 빠른 확인은 `--ignore=tests/scenario/test_run_rehearsal.py --ignore=tests/scenario/test_run_rehearsal2.py`
 - 권한: settings.local.json의 git merge 차단 규칙은 사용자가 삭제(2026-10-04)
 
 ## 현재 상태
 - 6단계 구현, 인도 차수 M1(국내주식, 키움 모의). 완료 T-000~T-015·T-020·T-021, T-016(PAPER-0) **시작 조건 충족**(Q-1~3 해결)·실행 대기.
-- 승인본: 업무정의서 v0.6, 00 v0.4, **01 v0.7**, 02 v0.7, **03 v0.8**, **04 v0.7**, 05 v0.5. **마지막 승인 A-058**.
+- 승인본: 업무정의서 v0.6, 00 v0.4, **01 v0.7**, 02 v0.7, **03 v0.8**, **04 v0.7**, 05 v0.5. **마지막 승인 A-059** (01 v0.8·03 v0.9·04 v0.8은 draft, 현 승인본은 01 v0.7·03 v0.8·04 v0.7).
 - 결정 완료: Q-1 예수금·Q-2 U-06(A-046, 조회 제한 조건 kiwoom-kr §2), DP-28~38·40~43 확정(A-048·A-049), CP-021(A-050), CP-022(=DP-39, A-052), 01/03/04 개정(A-053).
 - LIVE 계좌: 모의는 현 계좌 유지, LIVE는 자동매매 전용 실계좌 추가(A-051).
 - PAPER-0 운영 방식(A-054): **10/6(화)부터 출근 전 시작**(06:45 preflight → run → K8 재개, 07:15 출발, 퇴근 후 확인) — pv-procedure §3.2. 예수금은 CASH_OBSERVED 자동 기록.
 - M2: 바이낸스 현물 유지(사용자 2026-10-04, 승인 범위 그대로). A-055: USDT 기준·환율 없음, 일일 기준 UTC 00:00, 한국 거주자 이용 가능(사용자 보고). 미결: PAPER 환경(테스트넷 권장/Demo), API 키 유형·리셋 처리(나중), 자동매매 전용 계정 분리(사용자 수동 매매 중 — A-051과 같은 문제). 숏·선물은 범위 밖 — 나중에 백테스트 근거 후 CP. 공식 문서 조사 `docs/broker-specs/binance-spot.md` v0.2 draft(★ 6행 원문 대조 완료).
 - 텔레그램(A-056): run 연결 구현(feat/T-013-telegram-run, app/telegram_run.py, 기본 꺼짐). 사용자 봇 생성·.env.paper 키 입력·`scripts/telegram-test.py` 전송 성공(2026-10-04). **사용자가 켬**(app.paper.toml `[telegram] enabled = true`, 4cb8f15). 예행연습에서 run 중 알림·`/status` 수신 확인(10-04). 독립 검토 중간 4건 미수정(worklog (24)). 남은 위험(낮음): 텔레그램 스레드는 감시 스레드 생존 감시 밖, 종료 시 최대 약 10초 지연.
 - `.env.example` TELEGRAM_* 자리표시자: 사용자 추가(4cb8f15, 에이전트 내용 미열람).
-- **재검토 미해결 결정**(worklog (24)): WS 재접속 10회 실패 시 K5 고착(수정은 01 §2.7·03 D-050 CP), 지난 텔레그램 명령 무시, VI 목록 해석 범위·실시간 해석 오류 알림, DP-40·41·43 문서 반영, 문서 CP 묶음. 무인 운영 주의는 pv-procedure §3.2.
+- **재검토 결정 처리**: WS 재접속 계속·지난 명령 무시·VI 해석 범위·실시간 해석 경고 구현(A-059, CP-023 draft 승인 대기). 남은 미해결: DP-40·41·43 문서 반영, 문서 CP 묶음, 텔레그램 검토 M-2~4. 무인 운영 주의는 pv-procedure §3.2.
 - 전략 paper0-verify v1 = PAPER (A-040·A-041), SNTP 연결 A-042. **실전 주문 코드·LIVE 승인 없음**.
 - PAPER 설정 완비(.env.paper는 사용자 작성·에이전트 읽기 금지, connection_approved=true, 005930, 시장가만).
 
 ## 다음 세션 첫 행동 (순서)
-1. `git status`·이 파일·`docs/.status` 확인. 남은 결정: 재검토 미해결 결정(위), S-Q1~4(전략 후보, T-018 — 비차단), 미병합 커밋 병합 여부.
-2. 병합 지시 시 **feat/T-021-code-diagnostic → main** (fast-forward, D-085). push는 지시 시만.
+1. `git status`·이 파일·`docs/.status` 확인. 남은 결정: CP-023 문서 3종 승인, S-Q1~4(전략 후보, T-018 — 비차단), 미병합 커밋 병합 여부.
+2. 병합 지시 시 **feat/T-020-unattended-fixes → main** (fast-forward, D-085). push는 지시 시만.
 3. PAPER-0 실행 안내(사용자 실행): `docs/strategies/paper0-verify/pv-procedure.md` — cd → preflight → run(창 하나) → **09:25까지 K8 재개** → status 확인. 3.1절 운영 주의(14:20 정지 확인, Ctrl+C 종료, 절전 끄기, 실행 중 preflight 금지).
 4. 1일차 기록 요청: entr·d2_entra 세 시점(DP-31), 첫 체결 직후 K4 여부(K-U16), 시작 대조 조회 실패 여부(K-U21), 계좌번호 형식(K-U20).
 5. 사용자가 "n일차 끝"이라 하면: `scripts\paper-review.py --mode PAPER` 결과 + `var/paper/logs/ops-*.jsonl` 분석 → kiwoom-kr K-U 갱신, T-017 기록.

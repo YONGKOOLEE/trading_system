@@ -211,3 +211,24 @@ def test_poller_round_robin_and_realtime_registration(sim: Sim, clock: FixedCloc
         assert wait_until(lambda: TradingStatus.VI in (store.trading_status(A) or frozenset()))
     finally:
         rt.stop()
+
+
+def test_vi_query_ignores_unparseable_codes_outside_universe(sim: Sim, clock: FixedClock) -> None:
+    """2026-10-04 예행연습 ka10054 "종목코드 형식 아님": 시장 전체 목록에 우리 종목이 아닌 낯선 코드가 있어도 목록 전체를
+    실패로 만들지 않는다. 우리 종목 행은 그대로 반영한다."""
+    alerts = Alerts()
+    _, store, f = feed(sim, clock, alerts)
+    f._master.update({A: frozenset(), B: frozenset()})  # noqa: SLF001
+    sim.vi_rows = [{"stk_cd": "0000A0_AL", "virelis_time": "100130", "trde_cntr_proc_time": "095930"},
+                   {"stk_cd": "ABC", "virelis_time": "100130", "trde_cntr_proc_time": "095930"},
+                   {"stk_cd": A, "virelis_time": "100130", "trde_cntr_proc_time": "095930"}]
+    assert f.refresh_vi()
+    assert store.trading_status(A) == {TradingStatus.VI} and store.trading_status(B) == frozenset()
+
+
+def test_vi_query_fails_when_universe_row_is_unparseable(sim: Sim, clock: FixedClock) -> None:
+    """우리 종목으로 보이는데(코드 포함) 해석할 수 없는 행은 전체 실패 — 반쪽 해석으로 정상 처리하지 않는다 (DP-14)."""
+    _, store, f = feed(sim, clock)
+    f._master.update({A: frozenset()})  # noqa: SLF001
+    sim.vi_rows = [{"stk_cd": f"{A}_AL", "virelis_time": "100130", "trde_cntr_proc_time": "095930"}]
+    assert f.refresh_vi() is False
