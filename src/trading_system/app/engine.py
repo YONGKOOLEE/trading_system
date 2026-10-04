@@ -314,7 +314,11 @@ class Engine:
                 self.progress.pop(iid, None)
                 if out is ResolveOutcome.FOUND:
                     # 정지 중 접수로 확정된 매수는 취소 대상이 된다 (6차 검토 F-1)
-                    self.halts.cancel_newly_open_buys(f"결과 불명 해소 {iid}", self.repo.intent(iid).broker_order_key)
+                    try:   # 실패해도 다른 해소 회차를 막지 않고 사람에게 알린다 (8차 F-1, 사람 확정 경로와 같게)
+                        self.halts.cancel_newly_open_buys(f"결과 불명 해소 {iid}", self.repo.intent(iid).broker_order_key)
+                    except Exception as exc:  # noqa: BLE001
+                        self._best_effort(lambda: self.alerts.alert(
+                            "EMERGENCY", f"해소 뒤 정지 취소 실패 {type(exc).__name__} — 매수 미체결 확인 필요", iid), "알림")
 
     # 일일 ---------------------------------------------------------------------------
     def _daily(self, now: datetime) -> None:
@@ -472,6 +476,10 @@ class Engine:
 
     # 실행 정책 (CAP-ORD-03) --------------------------------------------------------------
     def _exec_policy(self, now: datetime) -> None:
+        if self._exec_tried:   # 미체결이 끝난 주문의 재판정 기록 정리 (8차 F-3)
+            live = {o.order_key for o in self.repo.open_orders(self.account)}
+            for k in [k for k in self._exec_tried if k not in live]:
+                del self._exec_tried[k]
         for ls in self.strategies:
             if ls.unfilled_minutes is None:
                 continue
