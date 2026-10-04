@@ -126,7 +126,7 @@ class Engine:
     _day_start: datetime | None = None
     _last_reconcile: datetime | None = None
     _exec_tried: dict[str, datetime] = field(default_factory=dict)   # 실행 정책 취소 마지막 판정 시각 (6차 F-3)
-    _exec_tried_log: list[str] = field(default_factory=list)
+    _exec_tries: dict[str, int] = field(default_factory=dict)       # 주문별 재판정 회차(멱등키 구분)
     _base_retry_until: datetime | None = None   # 일일 기준 금액 빠른 재시도 마감 (재검토 F5)
     _base_next_try: datetime = datetime.min.replace(tzinfo=UTC)   # 다음 재시도 시각 (느린 재시도, 재검토2 #3)
     _reconcile_requested: threading.Event = field(default_factory=threading.Event)
@@ -487,15 +487,20 @@ class Engine:
                     continue  # 미체결 시간 = 전송 시각부터
                 # 이미 취소 의도가 있으면(보냈거나 진행 중·브로커 거부) 다시 판정하지 않는다 — §8-7, 판정 행 누적 방지.
                 # 의도 없이 게이트에서 거부(정지 등)됐으면 1분 간격으로 새 키로 재판정 (6차 검토 F-3)
-                if self.repo.select("SELECT 1 FROM intent WHERE request_type='CANCEL' AND target_order_key=? LIMIT 1",
-                                    (order.order_key,)):
+                # "보낸 적 있음" = 전송 시도가 NOT_SENT(전송 전 실패)가 아닌 취소 — 정지 경로와 같은 규칙(6차 F-2)
+                if self.repo.select("SELECT 1 FROM intent i JOIN attempt a ON a.intent_id=i.intent_id "
+                                    "WHERE i.request_type='CANCEL' AND i.target_order_key=? AND a.state<>'NOT_SENT' "
+                                    "LIMIT 1", (order.order_key,)):
                     continue
+                if self.repo.select("SELECT 1 FROM intent WHERE request_type='CANCEL' AND target_order_key=? "
+                                    "AND state IN ('PENDING_SEND','SENT','UNKNOWN','ACCEPTED') LIMIT 1",
+                                    (order.order_key,)):
+                    continue   # 진행 중인 취소가 있음
                 last = self._exec_tried.get(order.order_key)
                 if last is not None and now - last < EXEC_RETRY:
                     continue
                 self._exec_tried[order.order_key] = now
-                n = sum(1 for k in self._exec_tried_log if k == order.order_key)
-                self._exec_tried_log.append(order.order_key)
+                n = self._exec_tries[order.order_key] = self._exec_tries.get(order.order_key, 0) + 1
                 req = GateRequest.cancel(RequestSource.EXEC_POLICY, self.account, order.instrument,
                                          Side(order.side), order.order_key,
                                          idem_key=f"exec:{order.order_key}:unfilled:{n}", owner=ls.owner)
