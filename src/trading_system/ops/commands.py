@@ -85,13 +85,13 @@ class OpsProcessor:
     @classmethod
     def _kill_applies(cls, kill: dict, resume_account: str | None) -> bool:
         """이 KILL이 그 RESUME K1의 계좌에 걸리는가 — 형식 오류 KILL은 세지 않는다 (4차 검토 F-E).
-        전체 계좌 KILL(계좌 None)은 모든 RESUME K1에, 계좌 KILL은 같은 계좌의 RESUME K1에만 걸린다 — 다른 계좌 KILL은
-        별도 K1 행을 만들고 그 행은 이 RESUME으로 풀리지 않으므로 막을 이유가 없다."""
+        이 RESUME이 풀 K1 행에 그 KILL의 행이 포함되면 걸린다: 전체 계좌 KILL(None)은 모든 RESUME에, 전체 계좌
+        RESUME(None)은 계좌 K1 행까지 풀므로 모든 KILL에(5차 검토 F-1), 계좌 RESUME은 같은 계좌 KILL에만."""
         a = cls._args(kill)
         if a is None or kill["channel"] not in (Channel.LOCAL, Channel.REMOTE):
             return False
         acct = a.get("account")
-        return acct is None or acct == resume_account
+        return acct is None or resume_account is None or acct == resume_account
 
     @classmethod
     def _resume_k1_before(cls, cmd: dict, kills: list[dict]) -> bool:

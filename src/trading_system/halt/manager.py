@@ -163,8 +163,9 @@ class HaltManager:
         accounts = [account] if account else self._repo.accounts()
         for acct in accounts:
             for order in self._repo.open_orders(acct, Side.BUY.value):
-                if skip_tried and self._repo.select(
-                        "SELECT 1 FROM intent WHERE request_type='CANCEL' AND target_order_key=? LIMIT 1",
+                if skip_tried and self._repo.select(   # 브로커로 보낸 적 있는 취소만 제외 — 전송 전 막힌 것은 재시도 (5차 F-3)
+                        "SELECT 1 FROM intent i JOIN attempt a ON a.intent_id=i.intent_id "
+                        "WHERE i.request_type='CANCEL' AND i.target_order_key=? LIMIT 1",
                         (order.order_key,)):
                     continue
                 order_owner = self._repo.intent(order.intent_id).owner if order.intent_id else None
@@ -229,7 +230,7 @@ class HaltManager:
             # 스레드: 다른 스레드의 조건 보고는 QueuedHalts로 판정·실행 스레드에서 이 함수를 부르므로 전송도 그 스레드다
             # (RV-22, D-038). 이 관리자를 다른 스레드에서 직접 부르는 배선을 만들지 않는다(activate와 같은 제약).
             # 반복 전송 없음: 해제는 행마다 한 번(ACTIVE → RELEASED)이고, 이미 활성인 취소는 INV-17이 거부한다
-            self._retry_after_release(f"자동 해제 {halt_type.value}")
+            self._retry_after_release(f"자동 해제 {halt_type.value}", auto=True)
         return released
 
     def resume(self, halt_type: HaltType, account: str | None, channel: str, actor: str, *,
@@ -256,10 +257,10 @@ class HaltManager:
             self._alert("INFO" if result.ok else "WARNING",
                         f"정지 {halt_type.value} 재개 {'완료' if result.ok else '거부'}: {result.reason}", None)
         if result.ok:
-            self._retry_after_release(f"재개 {halt_type.value}")
+            self._retry_after_release(f"재개 {halt_type.value}", auto=False)
         return result
 
-    def _retry_after_release(self, why: str) -> None:
+    def _retry_after_release(self, why: str, auto: bool) -> None:
         if self.send_thread is not None and threading.get_ident() != self.send_thread:
             # 주문(취소)은 판정·실행 스레드에서만 (D-038, 4차 검토 F-B). 다른 스레드 해제는 다음 재개·해제 때 재시도
             self._alert("WARNING", f"{why}: 판정·실행 스레드가 아니라 막힌 매수 미체결 취소 재시도 보류", None)
@@ -268,7 +269,7 @@ class HaltManager:
             # 바깥 저장 단위 안에서는 보내지 않는다(INV-03 — 실행기도 거부). 다음 해제·재개 때 다시 시도된다
             self._alert("WARNING", f"{why}: 저장 단위 안이라 막힌 매수 미체결 취소 재시도 보류", None)
             return
-        self._retry_halt_cancels(auto=True)
+        self._retry_halt_cancels(auto=auto)   # 사용자 재개는 전부, 자동 해제는 미시도분만 (5차 검토 F-2)
 
     def _retry_halt_cancels(self, auto: bool = False) -> None:
         """한 정지가 풀리면 남은 정지의 매수 미체결 취소를 다시 시도한다 (다른 정지에 막혔던 취소, CP-018 R-10).
