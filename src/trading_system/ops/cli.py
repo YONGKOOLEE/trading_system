@@ -220,7 +220,9 @@ def _print_operations(repo: Repository, account: str | None, now: datetime) -> N
     print(f"보유 포지션: {len(pos)}건")
     for p in pos:
         print(f"  {p['account']} {p['instrument']} 수량 {p['quantity']} 평균가 {p['avg_price']}")
-    sql, prm = _acct("SELECT * FROM broker_order WHERE state IN ('ACCEPTED','PARTIAL')", account)
+    # 취소 주문 행(INTERNAL_CANCEL)은 수량 0으로 ACCEPTED에 남으므로 미체결로 세지 않는다 (리허설 결함)
+    sql, prm = _acct("SELECT * FROM broker_order WHERE state IN ('ACCEPTED','PARTIAL') "
+                     "AND origin <> 'INTERNAL_CANCEL'", account)
     orders = q(sql + " ORDER BY created_at", prm)
     print(f"미체결 주문: {len(orders)}건")
     for o in orders:
