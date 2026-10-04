@@ -383,11 +383,15 @@ class Engine:
             self.alerts.alert("WARNING", f"예수금 조회 실패: {exc}", None)
             return
         self.account_state.set_cash(self.account, cash)
-        self._observe_cash(cash)
+        try:
+            self._observe_cash(cash)
+        except Exception as exc:  # noqa: BLE001 — 관찰 전용: 기록 실패가 대조·시작을 막지 않게 (독립 검토 #1)
+            log_exception(self.log_dir, "engine.cash_observed", exc)
+            self._fallback(f"CASH_OBSERVED 기록 실패: {type(exc).__name__}: {exc}")
 
     def _observe_cash(self, cash: CashView) -> None:
         """조회한 현금 값이 직전 기록과 다를 때만 CASH_OBSERVED로 남긴다 (관찰 전용, DP-31 재결정 입력).
-        재시작하면 첫 조회를 다시 기록한다."""
+        재시작하면 첫 조회를 다시 기록한다. 기록에 실패하면 직전 값을 갱신하지 않아 다음 조회에서 다시 기록한다."""
         key = (cash.deposit, cash.broker_orderable, cash.observed)
         if key == self._last_cash_observed:
             return
