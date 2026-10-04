@@ -162,6 +162,7 @@ class Engine:
 
     # --- 시작 -------------------------------------------------------------------------
     def start(self) -> RecoveryReport:
+        self.halts.send_thread = threading.get_ident()   # 이 스레드가 판정·실행 스레드 — 정지 취소 재시도는 여기서만 (4차 검토 F-B)
         unknown = self.executor.recover_on_start()
         self.start_unknown = len(unknown)
         self.halts.on_start()
@@ -379,16 +380,18 @@ class Engine:
         in_session = is_open and s.regular_open <= now <= s.regular_close  # type: ignore[union-attr,operator]
         after_close = is_open and now > s.regular_close  # type: ignore[union-attr,operator]
         periodic = in_session and (self._last_reconcile is None or now - self._last_reconcile >= self.reconcile_every)
-        closing = after_close and self._closed_reconciled != today
+        # 마감 후 1회 대조: 조회가 실패하면 완료로 치지 않고 대조 주기 간격으로 다시 (4차 검토 F-C)
+        closing = after_close and self._closed_reconciled != today and (
+            self._last_reconcile is None or now - self._last_reconcile >= self.reconcile_every)
         if not (requested or periodic or closing):
             return
         self._reconcile_requested.clear()
         self._last_reconcile = now
-        if closing:
-            self._closed_reconciled = today
         self._refresh_cash()
         # 장 마감 후 1회 대조는 CLOSE: 소멸한 오늘 잔량 만료 종결·남은 미체결 알림 (03 §6.4)
-        self.reconciler.run(self.account, CLOSE_TRIGGER if closing else "PERIODIC")
+        result = self.reconciler.run(self.account, CLOSE_TRIGGER if closing else "PERIODIC")
+        if closing and getattr(result, "result", None) != "QUERY_FAILED":
+            self._closed_reconciled = today
 
     # 판정 ---------------------------------------------------------------------------
     def _blocked_globally(self) -> bool:

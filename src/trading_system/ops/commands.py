@@ -70,18 +70,37 @@ class OpsProcessor:
         cmds = sorted(self._repo.pending_commands(), key=lambda c: (c["command"] != "KILL", c["created_seq"]))
         # KILL을 먼저 처리하므로, 같은 묶음에서 KILL보다 먼저 들어온 RESUME K1이 그 KILL을 풀어 버리는 역전을 막는다
         # (재검토2 #4): 그런 RESUME은 거부 — 사용자의 마지막 의사(KILL)를 따른다
-        last_kill = max((c["created_seq"] for c in cmds if c["command"] == "KILL"), default=None)
-        return [self._superseded(cmd) if self._resume_k1_before(cmd, last_kill) else self._process(cmd)
+        kills = [c for c in cmds if c["command"] == "KILL"]
+        return [self._superseded(cmd) if self._resume_k1_before(cmd, kills) else self._process(cmd)
                 for cmd in cmds]
 
     @staticmethod
-    def _resume_k1_before(cmd: dict, last_kill: int | None) -> bool:
-        if last_kill is None or cmd["command"] != "RESUME" or cmd["created_seq"] > last_kill:
-            return False
+    def _args(cmd: dict) -> dict | None:
         try:
-            return json.loads(cmd["args"]).get("halt_type") == "K1"
-        except (ValueError, AttributeError):
+            a = json.loads(cmd["args"])
+        except ValueError:
+            return None
+        return a if isinstance(a, dict) else None
+
+    @classmethod
+    def _kill_applies(cls, kill: dict, resume_account: str | None) -> bool:
+        """이 KILL이 그 RESUME K1의 계좌에 걸리는가 — 형식 오류 KILL은 세지 않는다 (4차 검토 F-E).
+        전체 계좌 KILL(계좌 None)은 모든 RESUME K1에, 계좌 KILL은 같은 계좌의 RESUME K1에만 걸린다 — 다른 계좌 KILL은
+        별도 K1 행을 만들고 그 행은 이 RESUME으로 풀리지 않으므로 막을 이유가 없다."""
+        a = cls._args(kill)
+        if a is None or kill["channel"] not in (Channel.LOCAL, Channel.REMOTE):
             return False
+        acct = a.get("account")
+        return acct is None or acct == resume_account
+
+    @classmethod
+    def _resume_k1_before(cls, cmd: dict, kills: list[dict]) -> bool:
+        if cmd["command"] != "RESUME":
+            return False
+        a = cls._args(cmd)
+        if a is None or a.get("halt_type") != "K1":
+            return False
+        return any(k["created_seq"] > cmd["created_seq"] and cls._kill_applies(k, a.get("account")) for k in kills)
 
     def _superseded(self, cmd: dict) -> CommandOutcome:
         cid, actor = cmd["command_id"], cmd["actor"]
@@ -168,7 +187,10 @@ class OpsProcessor:
 
     def _later_kill(self, seq: int) -> str | None:
         """이 RESUME(created_seq=seq)보다 뒤에 들어온 대기 KILL이 있으면 거부 사유 (resume의 저장 단위 안에서 호출)."""
-        if any(c["command"] == "KILL" and c["created_seq"] > seq for c in self._repo.pending_commands()):
+        mine = next((c for c in self._repo.pending_commands() if c["created_seq"] == seq), None)
+        account = (self._args(mine) or {}).get("account") if mine else None
+        if any(c["command"] == "KILL" and c["created_seq"] > seq and self._kill_applies(c, account)
+               for c in self._repo.pending_commands()):
             return SUPERSEDED_BY_KILL
         return None
 

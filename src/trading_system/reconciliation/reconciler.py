@@ -319,12 +319,11 @@ class Reconciler:
 
     @staticmethod
     def _expired_at_close(io: BrokerOrderRow, b: object, fills: list) -> bool:  # type: ignore[type-arg]
-        """마감 후: 내부는 열림, 브로커는 소멸(EXPIRED) 또는 미표시이고 체결 수량이 같으면 만료 종결 대상.
-        체결·취소·정정 등 다른 종결 상태나 체결 수량 차이는 종전대로 상태 차이(사람 확인)."""
+        """마감 후: 내부는 열림, 브로커가 명시적으로 소멸(EXPIRED)이라 하고 체결 수량이 같으면 만료 종결 대상.
+        브로커 미표시(b None)는 만료 증거로 쓰지 않는다 — 조회 누락과 구별할 수 없다(4차 검토 F-C). 키움 소멸 표시
+        (CLOSED_UNKNOWN 등)를 만료로 볼지는 K-U3·PV-03 실측 후 결정(DP-40). 그 밖은 종전대로 상태 차이(사람 확인)."""
         if b is None:
-            # 미표시: 조회 체결 합이 내부 체결 수량과 같을 때만
-            q = sum((f.quantity for f in fills if f.order_no == io.order_no), Decimal("0"))
-            return q == io.filled_quantity
+            return False
         return getattr(b, "state", None) == "EXPIRED" and getattr(b, "filled_quantity", None) == io.filled_quantity
 
 

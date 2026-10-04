@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import time as dtime
@@ -71,6 +72,7 @@ class HaltManager:
                  reference_time_of: Callable[[str], dtime | None] | None = None,
                  alerts: AlertSink | None = None) -> None:
         self._repo = repo
+        self.send_thread: int | None = None   # 주문(취소) 송신 스레드 = 판정·실행 스레드 ID (engine.start가 설정, D-038)
         self._gate = gate
         self._executor = executor
         self._clock = clock
@@ -157,10 +159,14 @@ class HaltManager:
             return None
         return self.activate(HaltType.K2, "monitor", f"일일 손실 {daily.loss_ratio} ≥ L4 {l4_ratio}", account)
 
-    def _cancel_open_buys(self, halt_id: str, account: str | None, owner: str | None) -> None:
+    def _cancel_open_buys(self, halt_id: str, account: str | None, owner: str | None, skip_tried: bool = False) -> None:
         accounts = [account] if account else self._repo.accounts()
         for acct in accounts:
             for order in self._repo.open_orders(acct, Side.BUY.value):
+                if skip_tried and self._repo.select(
+                        "SELECT 1 FROM intent WHERE request_type='CANCEL' AND target_order_key=? LIMIT 1",
+                        (order.order_key,)):
+                    continue
                 order_owner = self._repo.intent(order.intent_id).owner if order.intent_id else None
                 if owner is not None and order_owner != owner:
                     continue
@@ -254,18 +260,27 @@ class HaltManager:
         return result
 
     def _retry_after_release(self, why: str) -> None:
+        if self.send_thread is not None and threading.get_ident() != self.send_thread:
+            # 주문(취소)은 판정·실행 스레드에서만 (D-038, 4차 검토 F-B). 다른 스레드 해제는 다음 재개·해제 때 재시도
+            self._alert("WARNING", f"{why}: 판정·실행 스레드가 아니라 막힌 매수 미체결 취소 재시도 보류", None)
+            return
         if self._repo.in_transaction:
             # 바깥 저장 단위 안에서는 보내지 않는다(INV-03 — 실행기도 거부). 다음 해제·재개 때 다시 시도된다
             self._alert("WARNING", f"{why}: 저장 단위 안이라 막힌 매수 미체결 취소 재시도 보류", None)
             return
-        self._retry_halt_cancels()
+        self._retry_halt_cancels(auto=True)
 
-    def _retry_halt_cancels(self) -> None:
-        """한 정지가 풀리면 남은 정지의 매수 미체결 취소를 다시 시도한다 (다른 정지에 막혔던 취소, CP-018 R-10)."""
+    def _retry_halt_cancels(self, auto: bool = False) -> None:
+        """한 정지가 풀리면 남은 정지의 매수 미체결 취소를 다시 시도한다 (다른 정지에 막혔던 취소, CP-018 R-10).
+
+        auto(자동 해제 경로): 이미 취소 의도가 만들어진 주문(브로커에 보냈다가 거부·결과 불명 등)은 다시 보내지 않는다 —
+        주문 변경 자동 재시도 금지(CLAUDE.md §8-7, 4차 검토 F-A). 게이트에 막혀 의도가 없던 취소만 재시도. 사용자 재개는 전부.
+        """
         for row in self._repo.halt_rows(None):
             k = HaltType(row["halt_type"])
             if k in CANCELS_OPEN_BUYS:
-                self._cancel_open_buys(row["halt_id"], row["account"], row["scope_owner"] if k is HaltType.K9 else None)
+                self._cancel_open_buys(row["halt_id"], row["account"], row["scope_owner"] if k is HaltType.K9 else None,
+                                       skip_tried=auto)
 
     def _check_resume(self, halt_type: HaltType, rows: list[dict], channel: str) -> ResumeResult:
         if channel != Channel.LOCAL and halt_type not in REMOTE_RESUMABLE:
