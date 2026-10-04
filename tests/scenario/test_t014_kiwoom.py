@@ -640,3 +640,16 @@ def test_v71_group_priority_holds_lower_priority_even_when_its_tr_is_free() -> N
     resolve.join(5)
     market.join(5)
     assert order == ["resolve", "market"]
+
+
+def test_stock_code_error_shows_offending_value_truncated() -> None:
+    """2026-10-04 예행연습: ka10054 목록의 해석 불가 종목코드가 무엇인지 알림·로그에서 보이게 (종목코드는 비민감)."""
+    with pytest.raises(parse.KiwoomParseError) as e:
+        parse.stock_code("0000A0_AL")
+    assert "'0000A0_AL'" in str(e.value) and "종목코드 형식 아님" in str(e.value)
+    with pytest.raises(parse.KiwoomParseError) as e:
+        parse.stock_code("X" * 100)
+    assert "X" * 21 not in str(e.value) and "…" in str(e.value)      # 20자까지만
+    with pytest.raises(parse.KiwoomParseError) as e:
+        parse.stock_code(None)
+    assert "NoneType" in str(e.value)

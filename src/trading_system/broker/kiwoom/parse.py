@@ -93,10 +93,12 @@ def optional_order_no(value: object, field: str) -> str | None:
 
 def stock_code(value: object, field: str = "stk_cd") -> str:
     if not isinstance(value, str):
-        raise KiwoomParseError(f"{field}: 종목코드 형식 아님")
+        raise KiwoomParseError(f"{field}: 종목코드 형식 아님 ({type(value).__name__})")
     m = _CODE.fullmatch(value.strip())
     if m is None:
-        raise KiwoomParseError(f"{field}: 종목코드 형식 아님")
+        # 종목코드는 비민감 → 진단용으로 값(20자까지)을 남긴다 (2026-10-04 예행연습 ka10054)
+        shown = value if len(value) <= 20 else value[:20] + "…"
+        raise KiwoomParseError(f"{field}: 종목코드 형식 아님 ({shown!r})")
     return m.group(1)
 
 
