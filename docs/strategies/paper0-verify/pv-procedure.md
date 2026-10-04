@@ -72,6 +72,7 @@ cd C:\AI\trading_system\trading_system
 
 | 시각 (예: 07:15 출발) | 할 일 |
 |---|---|
+| 06:43 | **PC 시간 동기화**: 설정 → 시간 및 언어 → 날짜 및 시간 → "지금 동기화" (2026-10-04 예행연습에서 오차 -1.10초로 preflight 실패 — Windows 기본 동기화 주기가 길다) |
 | 06:45 | `cd` → `preflight.py` (시계 오차 1초 이내) |
 | 06:50 | `run` 실행 (창 하나, 닫지 않음) |
 | 06:52 | 다른 창에서 `status` → `resume.py --mode PAPER K8` → `status`에서 "해제되지 않은 정지: 0건"·RESUME DONE 확인 |
