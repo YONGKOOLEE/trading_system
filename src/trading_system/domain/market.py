@@ -174,6 +174,8 @@ class CashView:
 
     deposit: Decimal           # 내부 기준 예수금
     broker_orderable: Decimal  # 브로커가 알려 준 주문가능현금 (키움 kt00001 ord_alow_amt)
+    # 관찰 전용 (필드명, 값 문자열): 브로커 응답의 현금 필드 원값. 게이트·현금 계산에 쓰지 않는다 (DP-31 재결정 입력)
+    observed: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         _dec("deposit", self.deposit)

@@ -35,6 +35,7 @@ from trading_system.config.strategy_registry import StrategyRegistry
 from trading_system.domain.clock import KST, Clock, from_iso, last_kst_time_at_or_before
 from trading_system.domain.enums import GateResult, HaltType, IntentState, RequestSource, RequestType, Side
 from trading_system.domain.limits import AccountLimits
+from trading_system.domain.market import CashView
 from trading_system.domain.models import GateRequest, OrderEvent
 from trading_system.domain.sinks import AlertSink
 from trading_system.domain.strategy import PositionView, evaluation_id_of
@@ -138,6 +139,7 @@ class Engine:
     last_progress: float = 0.0                   # 판정·실행 스레드 마지막 진행(단조 시각) — 감시 스레드가 읽음
     _fast_killed: set[str] = field(default_factory=set)
     _closed_reconciled: date | None = None       # 장 마감 후 1회 대조를 한 거래일 (RV-25)
+    _last_cash_observed: tuple | None = None      # 직전 CASH_OBSERVED 값 (같은 값 반복 기록 방지)
     _report_at: datetime | None = None           # 마지막으로 지난 보고 시각 (RV-21)
 
     def __post_init__(self) -> None:
@@ -376,9 +378,24 @@ class Engine:
     def _refresh_cash(self) -> None:
         try:
             with call_priority(Priority.RECONCILE):
-                self.account_state.set_cash(self.account, self.broker.query_cash(self.account))
+                cash = self.broker.query_cash(self.account)
         except BrokerQueryError as exc:
             self.alerts.alert("WARNING", f"예수금 조회 실패: {exc}", None)
+            return
+        self.account_state.set_cash(self.account, cash)
+        self._observe_cash(cash)
+
+    def _observe_cash(self, cash: CashView) -> None:
+        """조회한 현금 값이 직전 기록과 다를 때만 CASH_OBSERVED로 남긴다 (관찰 전용, DP-31 재결정 입력).
+        재시작하면 첫 조회를 다시 기록한다."""
+        key = (cash.deposit, cash.broker_orderable, cash.observed)
+        if key == self._last_cash_observed:
+            return
+        with self.repo.tx():
+            self.repo.audit(self.clock.now(), "CASH_OBSERVED", "engine", self.account,
+                            {"account": self.account, "deposit": str(cash.deposit),
+                             "orderable": str(cash.broker_orderable), "observed": dict(cash.observed)})
+        self._last_cash_observed = key
 
     def _reconcile_if_due(self, now: datetime) -> None:
         """대조 주기 (01 "장중 주기 대조, 체결 통보 후, 장 마감 후 1회", RV-25): 주기 대조는 정규장 안에서만,

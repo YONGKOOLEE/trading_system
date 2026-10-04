@@ -344,7 +344,8 @@ class KiwoomAdapter:
         # kt00001 예수금상세현황(qry_tp 3 추정조회, 명세 예시값). kt00005는 모의 미제공(실측 2026-10-03, RC9000)
         body, _ = self._query("kt00001", {"qry_tp": "3"}, None)
         try:
-            return CashView(parse.dec(body.get("entr"), "entr"), parse.dec(body.get("ord_alow_amt"), "ord_alow_amt"))
+            return CashView(parse.dec(body.get("entr"), "entr"), parse.dec(body.get("ord_alow_amt"), "ord_alow_amt"),
+                            observed=_cash_observed(body))
         except parse.KiwoomParseError as exc:
             raise BrokerQueryError(f"예수금 조회 해석 불가: {exc}") from None
 
@@ -358,6 +359,22 @@ class KiwoomAdapter:
 
 
 # --- 정규화 (순수 함수 — 계약 시험 대상) ----------------------------------------------------------
+
+# kt00001 응답 중 관찰만 하는 현금 필드 (DP-31: entr의 당일 체결 반영 여부 실측). 없으면 빼고, 해석 불가면 표시만.
+CASH_OBSERVED_FIELDS = ("entr", "d1_entra", "d2_entra", "ord_alow_amt", "pymn_alow_amt")
+
+
+def _cash_observed(body: dict) -> tuple[tuple[str, str], ...]:
+    out: list[tuple[str, str]] = []
+    for name in CASH_OBSERVED_FIELDS:
+        if name not in body:
+            continue
+        try:
+            out.append((name, str(parse.dec(body[name], name))))
+        except parse.KiwoomParseError:
+            out.append((name, "해석 불가"))
+    return tuple(out)
+
 
 def _account_digits(value: object) -> str | None:
     """계좌번호 → 숫자만. 숫자·공백·'-' 외 문자가 있으면 None(비교 불가)."""

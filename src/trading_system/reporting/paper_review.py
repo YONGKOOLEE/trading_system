@@ -21,6 +21,9 @@ from pathlib import Path
 from trading_system.domain.clock import KST
 from trading_system.domain.market import CostRates, estimate_cost
 
+# 키움 kt00001 관찰 필드 (broker/kiwoom/adapter.CASH_OBSERVED_FIELDS와 같음 — reporting은 broker를 import하지 않는다)
+CASH_FIELDS = ("entr", "d1_entra", "d2_entra", "ord_alow_amt", "pymn_alow_amt")
+
 
 @dataclass
 class Review:
@@ -45,6 +48,7 @@ class Review:
     alerts: Counter = field(default_factory=Counter)
     emergencies: list[str] = field(default_factory=list)
     daily_bases: list[dict] = field(default_factory=list)
+    cash_observations: list[dict] = field(default_factory=list)
 
 
 def _kst(text: str | None) -> str:
@@ -132,10 +136,14 @@ def _collect(conn: sqlite3.Connection, db: str, rates: CostRates | None) -> Revi
         r.commands[(c["command"], c["status"])] += 1
 
     for e in _rows(conn, "SELECT kind, at, summary FROM audit_event "
-                         "WHERE kind IN ('ALERT', 'UNKNOWN_ESCALATED', 'DAILY_BASE') ORDER BY seq"):
+                         "WHERE kind IN ('ALERT', 'UNKNOWN_ESCALATED', 'DAILY_BASE', 'CASH_OBSERVED') ORDER BY seq"):
         s = json.loads(e["summary"])
         if e["kind"] == "UNKNOWN_ESCALATED":
             r.escalated += 1
+        elif e["kind"] == "CASH_OBSERVED":
+            obs = s.get("observed") or {}
+            r.cash_observations.append({"at": _kst(e["at"]), "deposit": s.get("deposit"), "orderable": s.get("orderable"),
+                                        **{k: obs.get(k, "-") for k in CASH_FIELDS}})
         elif e["kind"] == "DAILY_BASE":
             r.daily_bases.append({"trade_date": s.get("trade_date"), "cash": s.get("cash"), "value": s.get("value"),
                                   "at": _kst(s.get("at"))})
@@ -193,7 +201,10 @@ def render_markdown(r: Review) -> str:
     L += ["## 일일 기준 (DAILY_BASE, DP-31)", ""]
     L += _table(["거래일", "현금", "평가액", "기록 시각"],
                 [[b["trade_date"], b["cash"], b["value"], b["at"]] for b in r.daily_bases]) + [""]
+    L += ["## 예수금 관찰 (CASH_OBSERVED, DP-31)", "", "값이 바뀔 때만 기록. 관찰 전용(게이트 계산에 쓰지 않음)", ""]
+    L += _table(["시각", "예수금(내부)", "주문가능", *CASH_FIELDS],
+                [[c["at"], c["deposit"], c["orderable"], *(c[k] for k in CASH_FIELDS)] for c in r.cash_observations]) + [""]
     L += ["## 이 기록으로 볼 수 없는 것", "",
           "- PV-10 체결가 vs 같은 시각 시세, PV-15 시세 조회 주기: 시세 이력을 저장하지 않음 → 운영 로그·키움 앱으로",
-          "- 예수금(entr·d2_entra) 세 시점: 사용자가 기록(결정표 C절)", ""]
+          "- 키움 앱 화면의 예수금과 응답 필드의 일치: 필요하면 사용자가 앱과 대조", ""]
     return "\n".join(L)

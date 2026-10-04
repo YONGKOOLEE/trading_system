@@ -242,3 +242,11 @@
 - 시험: `pytest -q tests/scenario/test_review3_reconcile.py -k "unknown or candidate or adoption"` → 5 passed. 전체 시험은 미실행(코드 변경 없음).
 - 미확인: 일일 호출 상한(40,000)의 모의 적용 여부(PAPER-0 관찰), LIVE 추가 계좌 개설·앱키/IP 단위.
 - 다음: main 재병합(지시 시) → PAPER-0 실행(사용자, pv-procedure).
+
+## 2026-10-04 (22) — 예수금 관찰 기록(A-054), 무인 운영 절차, M2 방향
+- 구현: kt00001 관찰 필드(entr·d1_entra·d2_entra·ord_alow_amt·pymn_alow_amt) → CashView.observed, 엔진이 값 변경 시 감사 CASH_OBSERVED, paper-review "예수금 관찰" 표. 게이트·현금 계산 불변.
+- 시험: 새 시험 5건(tests/scenario/test_cash_observation.py) 먼저 작성 → 4 failed(기대한 이유) → 구현 후 5 passed. 전체 `pytest -q` → 983 passed (757s).
+- 문서: pv-procedure §3.1 RV-23 자동화, §3.2 출근 전 시작(무인), decision-sheet C절, A-054.
+- 결정: 바이낸스 현물 유지, 숏은 나중(CP). 바이낸스 공식 문서 조사 에이전트 실행(로그인·API 호출 없음).
+- 미확인: 06:45 전후 키움 모의 서버 응답, 실시간 하루 넘김 운영.
+- 다음: PAPER-0 1일차(10/6, 사용자) → 결과 분석. 텔레그램 연결(별도 브랜치), binance-spot.md 검토.
