@@ -23,6 +23,7 @@ from trading_system.halt.manager import Channel, HaltManager
 from trading_system.storage.repository import Repository
 
 LOCAL_ONLY = frozenset({"CONFIRM_UNKNOWN", "RECONCILE", "RECONCILE_RESOLVE", "STRATEGY_SYNC"})
+SUPERSEDED_BY_KILL = "뒤이은 KILL 명령이 있어 K1 재개 거부 (사용자의 마지막 의사 = KILL)"
 KNOWN = frozenset({"KILL", "RESUME", "CANCEL", "REDUCE", "EXIT", "CONFIRM_UNKNOWN", "RECONCILE", "RECONCILE_RESOLVE",
                    "STRATEGY_SYNC"})
 
@@ -84,7 +85,7 @@ class OpsProcessor:
 
     def _superseded(self, cmd: dict) -> CommandOutcome:
         cid, actor = cmd["command_id"], cmd["actor"]
-        note = "뒤이은 KILL 명령이 있어 K1 재개 거부 (사용자의 마지막 의사 = KILL)"
+        note = SUPERSEDED_BY_KILL
         if cmd["channel"] == Channel.REMOTE:
             self._executor.alert("WARNING", f"원격 명령 RESUME REJECTED: {note}", cid)
         with self._repo.tx():
@@ -104,7 +105,7 @@ class OpsProcessor:
                 raise CommandError(f"알 수 없는 채널 {channel}")
             if name in LOCAL_ONLY and channel != Channel.LOCAL:
                 raise CommandError(f"{name}은 로컬에서만 가능")
-            status, result = self._dispatch(cid, channel, actor, name, args)
+            status, result = self._dispatch(cid, channel, actor, name, args, cmd.get("created_seq"))
         except (CommandError, ValueError, KeyError, InvalidOperation) as exc:
             status, result = "REJECTED", f"{type(exc).__name__}: {exc}"
         except ExecutionBlocked as exc:
@@ -121,14 +122,19 @@ class OpsProcessor:
                              {"channel": channel, "command": name, "status": status, "result": result})
         return CommandOutcome(cid, status, result)
 
-    def _dispatch(self, cid: str, channel: str, actor: str, name: str, args: dict) -> tuple[str, str]:
+    def _dispatch(self, cid: str, channel: str, actor: str, name: str, args: dict,
+                  seq: int | None = None) -> tuple[str, str]:
         account = args.get("account")
         if name == "KILL":
             halt_id = self._halts.activate(HaltType.K1, f"{channel}:{actor}", args.get("reason") or "운영자 킬 스위치",
                                            account)
             return "DONE", f"K1 발동 {halt_id}"
         if name == "RESUME":
-            r = self._halts.resume(HaltType(args["halt_type"]), account, channel, actor)
+            halt_type = HaltType(args["halt_type"])
+            # 대기 명령을 읽은 뒤 들어온 KILL(감시 스레드 fast_kill은 기존 K1을 보고 행을 남기지 않음)도 RESUME 적용
+            # 저장 단위 안에서 다시 확인한다 — 풀린 K1로 같은 tick에 신규 진입이 나가지 않게 (3차 검토 #2)
+            check = (lambda: self._later_kill(seq)) if halt_type is HaltType.K1 and seq is not None else None
+            r = self._halts.resume(halt_type, account, channel, actor, superseded=check)
             note = r.reason
             if self._kill_file is not None and self._kill_file.exists():
                 note += " / KILL 파일 있음: 위험 확대 전송은 계속 차단 (로컬에서만 삭제, V-119)"
@@ -159,6 +165,12 @@ class OpsProcessor:
             return "REJECTED", f"게이트 거부 {d.failed_check}: {d.reason}"
         state = self._executor.submit(d.approved)
         return "DONE", f"의도 {d.approved.intent_id} {state.value}"
+
+    def _later_kill(self, seq: int) -> str | None:
+        """이 RESUME(created_seq=seq)보다 뒤에 들어온 대기 KILL이 있으면 거부 사유 (resume의 저장 단위 안에서 호출)."""
+        if any(c["command"] == "KILL" and c["created_seq"] > seq for c in self._repo.pending_commands()):
+            return SUPERSEDED_BY_KILL
+        return None
 
     def _request(self, cid: str, name: str, args: dict) -> GateRequest:
         idem = f"ops:{cid}"

@@ -114,7 +114,7 @@ class HaltManager:
                 self._repo.update_halt(halt_id, conditions=conds)
         # 매수 미체결 취소는 정지 행이 새로 생길 때 한 번만 (RV-07). 정지 유지 중 재발동(매 tick L4 점검 등)이
         # 취소를 새 멱등키로 다시 보내면 주문 변경 자동 재시도가 된다 (CLAUDE.md §8-7). 다른 정지에 막힌 취소의
-        # 재시도는 재개 경로(_retry_halt_cancels)로만 한다 (CP-018 R-10)
+        # 재시도는 정지 해제 시점(사용자 재개·자동 해제)의 _retry_halt_cancels로만 한다 (CP-018 R-10)
         # 감시 스레드가 행만 먼저 기록한 정지(record_only)는 취소 대기 표시를 남긴다 → 여기서 한 번 취소 (재검토 F1)
         if (created or pending_cancel) and halt_type in CANCELS_OPEN_BUYS:
             self._cancel_open_buys(halt_id, account, owner if halt_type is HaltType.K9 else None)
@@ -217,17 +217,29 @@ class HaltManager:
                     self._repo.update_halt(row["halt_id"], released_at=now, released_by="auto")
                     self._alert("INFO", f"정지 {halt_type.value} 자동 해제", row["halt_id"])
                     released.append(row["halt_id"])
+        if released:
+            # 자동 해제(K5·K6·K10·K11)도 해제다: 그 정지에 막혔던 K1·K2·K9 매수 미체결 취소를 다시 시도한다
+            # (CP-018 R-10, 3차 검토 #1 — 재개 경로만 재시도하면 K5 자동 해제 뒤 K1인데 매수 미체결이 남는다).
+            # 스레드: 다른 스레드의 조건 보고는 QueuedHalts로 판정·실행 스레드에서 이 함수를 부르므로 전송도 그 스레드다
+            # (RV-22, D-038). 이 관리자를 다른 스레드에서 직접 부르는 배선을 만들지 않는다(activate와 같은 제약).
+            # 반복 전송 없음: 해제는 행마다 한 번(ACTIVE → RELEASED)이고, 이미 활성인 취소는 INV-17이 거부한다
+            self._retry_after_release(f"자동 해제 {halt_type.value}")
         return released
 
     def resume(self, halt_type: HaltType, account: str | None, channel: str, actor: str, *,
-               owner: str | None = None) -> ResumeResult:
-        """사용자 재개 명령. 원격 허용·재개 조건을 검사하고 감사 기록한다. K9는 전략(owner)별."""
+               owner: str | None = None, superseded: Callable[[], str | None] | None = None) -> ResumeResult:
+        """사용자 재개 명령. 원격 허용·재개 조건을 검사하고 감사 기록한다. K9는 전략(owner)별.
+
+        superseded: 저장 단위 **안에서** 부르는 확인 함수. 거부 사유 문자열을 돌려주면 재개를 거부한다
+        (예: 이 RESUME보다 뒤에 들어온 대기 KILL — 3차 검토 #2, ops/commands.py).
+        """
         with self._repo.tx():
             now = self._clock.now()
             rows = self._rows(halt_type, account)
             if halt_type is HaltType.K9:
                 rows = [r for r in rows if r["scope_owner"] == owner]
-            result = self._check_resume(halt_type, rows, channel)
+            veto = superseded() if superseded is not None else None
+            result = ResumeResult(False, veto) if veto else self._check_resume(halt_type, rows, channel)
             if result.ok:
                 for row in rows:
                     self._repo.update_halt(row["halt_id"], state=HaltState.RELEASED.value,
@@ -238,8 +250,15 @@ class HaltManager:
             self._alert("INFO" if result.ok else "WARNING",
                         f"정지 {halt_type.value} 재개 {'완료' if result.ok else '거부'}: {result.reason}", None)
         if result.ok:
-            self._retry_halt_cancels()
+            self._retry_after_release(f"재개 {halt_type.value}")
         return result
+
+    def _retry_after_release(self, why: str) -> None:
+        if self._repo.in_transaction:
+            # 바깥 저장 단위 안에서는 보내지 않는다(INV-03 — 실행기도 거부). 다음 해제·재개 때 다시 시도된다
+            self._alert("WARNING", f"{why}: 저장 단위 안이라 막힌 매수 미체결 취소 재시도 보류", None)
+            return
+        self._retry_halt_cancels()
 
     def _retry_halt_cancels(self) -> None:
         """한 정지가 풀리면 남은 정지의 매수 미체결 취소를 다시 시도한다 (다른 정지에 막혔던 취소, CP-018 R-10)."""
