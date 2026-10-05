@@ -298,3 +298,11 @@
 - 코드·승인본 01~05 수정 없음. 시험 미실행(문서만). 바이낸스 API 호출 없음.
 - 미해결: CP-024 승인(사용자), 검증 전략 승인, 테스트넷 USDT 잔고·L1(기준 금액 4,000 USDT 이상 필요) 확인.
 - 다음: 10/6 PAPER-0 1일차 결과 분석(트랙 A). CP-024 승인 시 업무정의서·00~05 개정본 draft(Q3).
+
+## 2026-10-05 (29) — A-066 CP-024 승인, 승인본 개정 draft 7종
+- A-066: 사용자 "전부 승인" → CP-024 v0.5 승인 + A-065 Q4 재확인(m2-paper0-verify 전략은 범위 밖, 미승인). 커밋 42a4573.
+- 승인본 보존: docs/archive/ business-definition-v0.6, 00-strategy-v0.4, 01-requirements-v0.8, 02-data-model-v0.7, 03-design-v0.9, 04-validation-v0.8, 05-plan-v0.5.
+- 개정 draft(병렬 에이전트 5, 파일 소유 분리): 업무정의서 v0.7, 00 v0.5, 01 v0.9, 02 v0.8, 03 v1.0, 04 v0.9, 05 v0.6 — 모두 미승인. 교차 정합 검토 1회(기계적 오류 4종 수정, 미결 7건은 handoff).
+- capabilities.md: 에이전트 개정본이 M1 실행 코드가 읽는 파일이라 원복(git checkout), 개정안은 docs/changes/CP-024-capabilities-draft.md로 보관 — PAPER-0(10/6) 실행본 보호.
+- 코드 수정 없음(사용자 "구현해도 좋아"였으나 M2 코드는 A-065 Q1·05 M2판 미승인, M1 코드는 PAPER-0 직전이라 손대지 않음). 시험 미실행(문서만).
+- 다음: PAPER-0 1일차 분석, 개정 draft 문서별 승인, handoff "개정 draft 미결" 확인.
