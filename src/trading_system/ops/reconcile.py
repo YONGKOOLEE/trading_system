@@ -23,6 +23,7 @@ METHODS = {
     "QTY_MISMATCH": {"EXTERNAL", "BROKER_ACTION"},
     "UNKNOWN_BROKER_ORDER": {"EXTERNAL", "BROKER_ACTION"},
     "MISSING_FILL": {"APPLY_FILL", "BROKER_ACTION"},
+    "EXCESS_FILL": {"BROKER_ACTION"},
     "INTERNAL_ONLY_ORDER": {"CLOSE_ORDER", "BROKER_ACTION"},
     "STATE_MISMATCH": {"CLOSE_ORDER", "BROKER_ACTION"},
     "STALE_ORDER": {"CLOSE_ORDER", "BROKER_ACTION"},
@@ -106,6 +107,17 @@ class ReconcileResolver:
             order = self._repo.broker_order(detail["order_key"])
             if order is None:
                 raise ResolveError("대상 주문 없음")
+            # T-017 재검토 2: 항목을 만든 뒤 내부 체결이 바뀌었거나, 같은 주문에 다른 누락 항목이 열려 있으면
+            # 차이 수량이 낡아 이중 반영될 수 있다 → 재대조로 새 항목을 만들게 한다
+            if "internal_total" in detail and order.filled_quantity != Decimal(detail["internal_total"]):
+                raise ResolveError("대조 이후 내부 체결이 바뀜 — 재대조 후 새 항목으로 해소 (이 항목은 BROKER_ACTION)")
+            others = [i for i in self._repo.open_recon_items(account) if i["kind"] == "MISSING_FILL"
+                      and i["item_id"] != item["item_id"]
+                      and json.loads(i["detail"] or "{}").get("order_key") == detail["order_key"]]
+            if others:
+                raise ResolveError("같은 주문에 누락 체결 항목이 여럿 — 최신 항목만 반영하고 나머지는 BROKER_ACTION")
+            if not detail.get("price"):
+                raise ResolveError("조회 체결 행이 없어 체결가를 모름 — 증권사 확인 후 BROKER_ACTION")
             self._executor.apply_event(OrderEvent(
                 kind="FILL", order_no=order.order_no, fill_id=detail["fill_id"],
                 quantity=Decimal(detail["quantity"]), price=Decimal(detail["price"]), at=from_iso(detail["at"]),

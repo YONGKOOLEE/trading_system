@@ -182,3 +182,151 @@ def test_stock_code_with_venue_rejects_unknown(raw: str) -> None:
 def test_plain_stock_code_still_rejects_venue_suffix() -> None:
     with pytest.raises(parse.KiwoomParseError):
         parse.stock_code("005930_AL", "stk_cd")
+
+
+# --- 재검토 반영 (T-017 2차) ---------------------------------------------------------------------
+
+def _kt00009(no: str, cntr: str, qty: str, px: str, tm: str) -> dict:
+    return {"ord_no": no, "stk_cd": "A005930", "io_tp_nm": "현금매수", "ord_qty": "10", "ord_uv": "0",
+            "trde_tp": "시장가", "cntr_no": cntr, "cntr_qty": qty, "cntr_uv": px, "cntr_tm": tm,
+            "acpt_tp": "접수", "orig_ord_no": "", "mdfy_cncl_tp": ""}
+
+
+def test_build_fills_counts_each_row_when_fill_number_is_order_number() -> None:
+    from datetime import date
+    from trading_system.broker.kiwoom.adapter import build_fills, build_orders
+    rows = [_kt00009("0050626", "0050626", "3", "277750", "093000"),
+            _kt00009("0050626", "0050626", "3", "277750", "093000"),   # 같은 내용의 두 번째 체결도 센다
+            _kt00009("0050626", "0050626", "2", "277800", "093001")]
+    fills = build_fills(rows, date(2026, 10, 6))
+    assert sum(f.quantity for f in fills) == Decimal("8") and len(fills) == 3
+    (o,) = build_orders(rows, [])
+    assert o.filled_quantity == Decimal("8")
+
+
+def test_build_fills_real_fill_numbers_still_deduplicated() -> None:
+    from datetime import date
+    from trading_system.broker.kiwoom.adapter import build_fills
+    rows = [_kt00009("0050626", "0241353", "3", "277750", "093000"),
+            _kt00009("0050626", "0241353", "3", "277750", "093000")]   # 같은 체결번호 중복 행 → 1건
+    assert len(build_fills(rows, date(2026, 10, 6))) == 1
+
+
+def _two_step_missing(env: Env):  # type: ignore[no-untyped-def]
+    env.broker.behavior = FakeBehavior.ACCEPT_ONLY
+    d = enter(env, "TST-A", "10")
+    order = env.repo.broker_order(env.repo.intent(d.approved.intent_id).broker_order_key)
+    query_fill_id_is_order_no(env)
+    env.broker.fill(order.order_no, Decimal("3"))
+    env.broker.drop_events()
+    rec(env).run(ACCOUNT, "PERIODIC")
+    env.broker.fill(order.order_no, Decimal("2"))
+    env.broker.drop_events()
+    rec(env).run(ACCOUNT, "PERIODIC")
+    return order
+
+
+def test_apply_fill_refused_when_several_items_for_same_order(env: Env) -> None:
+    from trading_system.ops.reconcile import ResolveError
+    _two_step_missing(env)
+    items = [i for i in env.repo.open_recon_items(ACCOUNT) if i["kind"] == ItemKind.MISSING_FILL]
+    assert len(items) == 2
+    with pytest.raises(ResolveError, match="여럿"):
+        resolver(env).resolve(items[0]["item_id"], "APPLY_FILL", "u")
+    assert env.repo.position(ACCOUNT, "TST-A").quantity == 0
+
+
+def test_apply_fill_refused_when_internal_changed_since_item(env: Env) -> None:
+    from trading_system.domain.models import OrderEvent
+    from trading_system.ops.reconcile import ResolveError
+    env.broker.behavior = FakeBehavior.ACCEPT_ONLY
+    d = enter(env, "TST-A", "10")
+    order = env.repo.broker_order(env.repo.intent(d.approved.intent_id).broker_order_key)
+    query_fill_id_is_order_no(env)
+    env.broker.fill(order.order_no, Decimal("3"))
+    env.broker.drop_events()
+    rec(env).run(ACCOUNT, "PERIODIC")
+    it = item(env, ItemKind.MISSING_FILL)
+    env.executor.apply_event(OrderEvent(kind="FILL", order_no=order.order_no, fill_id="LATE1", quantity=Decimal("3"),
+                                        price=Decimal("10000"), account=ACCOUNT,
+                                        trade_date=order.order_key.split("|")[1]))   # 늦은 실시간 통보
+    with pytest.raises(ResolveError, match="내부 체결이 바뀜"):
+        resolver(env).resolve(it["item_id"], "APPLY_FILL", "u")
+    assert env.repo.position(ACCOUNT, "TST-A").quantity == Decimal("3")
+    rec(env).run(ACCOUNT, "PERIODIC")       # 이제 수량이 같아 자동 종결
+    assert ItemKind.MISSING_FILL not in kinds(env)
+
+
+def test_internal_excess_fill_detected(env: Env) -> None:
+    from trading_system.domain.models import OrderEvent
+    env.broker.behavior = FakeBehavior.ACCEPT_ONLY
+    d = enter(env, "TST-A", "10")
+    order = env.repo.broker_order(env.repo.intent(d.approved.intent_id).broker_order_key)
+    query_fill_id_is_order_no(env)
+    env.broker.fill(order.order_no, Decimal("3"))
+    env.executor.process_events()
+    env.executor.apply_event(OrderEvent(kind="FILL", order_no=order.order_no, fill_id="DUP", quantity=Decimal("2"),
+                                        price=Decimal("10000"), account=ACCOUNT,
+                                        trade_date=order.order_key.split("|")[1]))   # 이중 반영 가정
+    rec(env).run(ACCOUNT, "PERIODIC")
+    assert ItemKind.EXCESS_FILL in kinds(env)
+
+
+def test_legacy_item_on_partial_order_is_not_auto_closed(env: Env) -> None:
+    env.broker.behavior = FakeBehavior.ACCEPT_ONLY
+    d = enter(env, "TST-A", "10")
+    order = env.repo.broker_order(env.repo.intent(d.approved.intent_id).broker_order_key)
+    env.broker.fill(order.order_no, Decimal("3"))
+    env.executor.process_events()
+    now = env.clock.now()
+    with env.repo.tx():   # 이전 형식(broker_total 없음) 항목, 다른 날 주문으로 가정해 이번 조회 값과 무관하게
+        rid = env.repo.insert_reconciliation(ACCOUNT, "PERIODIC", "MISMATCH", {}, now)
+        env.repo.insert_recon_item(rid, ACCOUNT, ItemKind.MISSING_FILL, "TST-A", order.order_no, None, "3@10000",
+                                   json.dumps({"order_key": order.order_key.replace(order.order_key.split("|")[1],
+                                                                                    "2000-01-01"),
+                                               "fill_id": "X", "quantity": "3", "price": "10000",
+                                               "at": now.isoformat()}))
+    rec(env).run(ACCOUNT, "PERIODIC")
+    assert ItemKind.MISSING_FILL in kinds(env)
+
+
+def test_restart_reports_open_items_as_emergency_once(env: Env) -> None:
+    no = env.broker.add_external_order(ACCOUNT, "TST-C", "BUY", Decimal("3"))
+    env.broker.fill(no)
+    env.broker.drop_events()
+    rec(env).run(ACCOUNT, "PERIODIC")
+    sink = ListSink()
+    r2 = rec(env, sink)                      # 재시작된 프로세스
+    r2.run(ACCOUNT, "STARTUP")
+    env.clock.advance(timedelta(minutes=1))
+    r2.run(ACCOUNT, "PERIODIC")
+    assert sink.levels("대조 불일치") == ["EMERGENCY"]
+
+
+def test_average_price_rounded_to_row_precision() -> None:
+    from trading_system.reconciliation.reconciler import _avg_price
+    t = __import__("datetime").datetime(2026, 10, 6, tzinfo=__import__("datetime").UTC)
+    rows = [FillRecord("1", "1", Decimal("1"), Decimal("277750"), t),
+            FillRecord("1", "1", Decimal("2"), Decimal("277800"), t)]
+    assert _avg_price(rows) == Decimal("277783")
+
+
+def test_day2_restart_closes_day1_item_and_k4_becomes_resumable(env: Env) -> None:
+    """2026-10-07 아침 상황 재현: 1일차 오판 항목(이전 형식)과 K4가 열린 채 재시작 → 시작 대조 MATCH → K4 재개 가능."""
+    from trading_system.domain.enums import HaltType
+    d = enter(env, "TST-A", "1")
+    order = env.repo.broker_order(env.repo.intent(d.approved.intent_id).broker_order_key)
+    now = env.clock.now()
+    with env.repo.tx():
+        rid = env.repo.insert_reconciliation(ACCOUNT, "PERIODIC", "MISMATCH", {}, now)
+        env.repo.insert_recon_item(rid, ACCOUNT, ItemKind.MISSING_FILL, "TST-A", order.order_no, None, "1@10000",
+                                   json.dumps({"order_key": order.order_key, "fill_id": order.order_no,
+                                               "quantity": "1", "price": "10000", "at": now.isoformat()}))
+    env.halts.activate(HaltType.K4, "reconciler", "대조 불일치 1건 (PERIODIC)", ACCOUNT)
+    env.clock.advance(timedelta(days=1))          # 다음 날: 어제 주문은 오늘 조회에 없다
+    env.broker.new_day()
+    query_fill_id_is_order_no(env)
+    r = rec(env).run(ACCOUNT, "STARTUP")
+    assert kinds(env) == [], [(i["kind"], i["detail"]) for i in env.repo.open_recon_items(ACCOUNT)]
+    assert r.result == "MATCH"
+    assert env.halts.resume(HaltType.K4, ACCOUNT, "LOCAL", "u").ok

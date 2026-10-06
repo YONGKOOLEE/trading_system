@@ -436,7 +436,10 @@ def build_orders(rows: list[dict], open_rows: list[dict]) -> list[BrokerOrderRec
         cntr = parse.fill_no(r.get("cntr_no"), "cntr_no")
         cq = parse.qty(r.get("cntr_qty") or "0", "cntr_qty")
         if cntr and cq > 0:
-            fills.setdefault(no, {})[cntr] = cq
+            # T-017: 모의 실측 cntr_no = 주문번호 값(K-U14) → 체결을 구별하지 못하므로 행마다 따로 센다
+            # (덮어써서 체결 합이 줄면 누락 체결을 놓친다. 많게 세면 대조 불일치로 사람 확인 — 보수적)
+            key = f"{cntr}#{len(fills.get(no, {}))}" if cntr == no else cntr
+            fills.setdefault(no, {})[key] = cq
     open_by_no: dict[str, dict] = {}
     for r in open_rows:
         no = parse.order_no(r.get("ord_no"))
@@ -491,6 +494,11 @@ def build_fills(rows: list[dict], day: date) -> list[FillRecord]:
             continue
         no = parse.order_no(r.get("ord_no"))
         f = FillRecord(no, cntr, q, parse.price(r.get("cntr_uv"), "cntr_uv"), parse.hms(r.get("cntr_tm"), day, "cntr_tm"))
+        if cntr == no:
+            # T-017: cntr_no가 주문번호와 같으면(모의 실측, K-U14) 체결 식별자가 아니다 → 같은 내용의 행도 합치지 않고
+            # 행마다 체결로 센다. 실제보다 많게 세는 쪽은 대조 불일치(사람 확인), 적게 세는 쪽은 누락을 놓친다
+            seen[(no, f"{cntr}#{len(seen)}")] = f
+            continue
         prev = seen.get((no, cntr))
         if prev is not None and prev != f:
             raise parse.KiwoomParseError(f"체결 {no}/{cntr} 행 내용이 서로 다름")
