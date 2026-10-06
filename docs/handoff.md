@@ -1,13 +1,29 @@
 # 세션 인계 (짧게 유지 — 작업이 끝날 때마다 덮어쓴다)
 
-- 갱신: 2026-10-06 밤 / PAPER-0 1일차 끝·분석·T-017 수정 완료. 2일차(10-07) 준비됨 / **다음: ① 2일차 결과 분석 ② CP-026 승인 요청(T-022 구현 완료, 아래) ③ 저녁 v2 전환 ④ 문서 승인 묶음**
+- 갱신: 2026-10-07 새벽 / CP-026 승인(A-070)·문서 반영, T-017 시험 공백·개선 브랜치, 2일차 조회 목록 / **다음: ① 2일차 결과 분석(`docs/strategies/paper0-verify/day2-analysis.md`) ② main 병합 여부(T-017 → T-022 → T-017 시험 공백·개선) ③ 저녁 v2 전환 ④ 아래 "결정 필요" ⑤ 문서 승인 묶음**
+
+## 작업 브랜치 (로컬만, 모두 커밋됨, 실행 브랜치 코드는 그대로)
+| 폴더(git worktree) | 브랜치 | 내용 | 시험 |
+|---|---|---|---|
+| `C:\AI\trading_system\trading_system` | feat/T-017-paper0-day1-fixes | **PAPER 실행용**. 문서만 추가(A-070, day2-analysis) | 코드 변경 없음 |
+| `C:\AI\trading_system\remote-ops` | feat/T-022-remote-ops | T-022 원격 운영(CP-026 승인 A-070) + 01·03·04·05·pv-procedure v0.5 draft 반영 | 전체 1083 passed |
+| `C:\AI\trading_system\t017-tests` | feat/T-017-test-gaps | CP-025 시험 공백 20건(V-171·173·177(c)·179·180), src 변경 없음 | 커밋 메시지 참고 |
+| `C:\AI\trading_system\t017-followups` | feat/T-017-followups | status 정지 시각 KST, 텔레그램 스레드 종료 감시(알림만, 정지 없음) | 커밋 메시지 참고 |
+- 병합 권장 순서: 2일차 확인 → 실행 브랜치를 main에 → T-022 → test-gaps → followups(각각 사용자 지시). 병합 뒤 다음 PAPER 실행일 아침 절차는 pv-procedure v0.5(원격 `/resume K8`·`/resume K4` 가능).
+
+## 결정 필요 (2026-10-07 작업에서 나온 것)
+1. CP-026 병합 시점(Q-2) — 위 권장 순서인지.
+2. V-180: v1 보유 중 v2 교체를 시스템이 거부·경고할지(현재 받아들임), 교체 뒤 v1 소유 보유 정리 경로(배포 설정에서 v1이 빠지면 v1 청산 신호가 안 나옴 — 01 K9 "교체: v1 감액·청산 허용"과 차이). 운영 규칙은 "보유 있으면 교체 안 함"으로 유지 중.
+3. CP-025 D-130 "등급 우선순위 없음" 문구 vs 코드(긴급 알림 먼저 전송, 시험 `test_emergency_sent_before_backlog`) — 문서를 코드에 맞출지(권장).
+4. 개선 제안 P1 텔레그램 스레드 사망·반복 예외를 K11로 볼지, P2 알림 롤백 유실(F8) 처리, P3 장 마감 후 CLOSE 대조가 요청 대조에 밀림(만료 종결 시점 변경).
+5. 04 §3.7 표 머리 5열 vs CP-025·026 행 6열, 원격 운영 V를 §3.8로 옮길지(문서 정리).
 - 브랜치(로컬만, push 없음): 체크아웃 **`feat/T-017-paper0-day1-fixes`** (HEAD f73baa8) = main(4e502a5) + T-017 수정 + docs/m2-binance-design 병합. **PAPER-0는 이 브랜치로 실행.** main 병합은 2일차에서 수정 확인 뒤 사용자 지시로(A-067 B-7).
 - 테스트: 2026-10-06 빠른 회귀 1052 passed(324초, 예행연습 2파일 제외) + 예행연습 9 passed(447초). 전체 `.venv\Scripts\python -m pytest -q`(약 13분).
-- 승인본(게이트): 업무정의서 v0.6, 00 v0.4, 01 v0.8, 02 v0.7, 03 v0.9, 04 v0.8, 05 v0.5 (archive에 보존, 현 파일은 draft). **마지막 기록 A-069.** 2일차 운영 카드(비공개 페이지): https://claude.ai/artifact/XXZrAhidXPAFo1hUDRgVdw 실전 주문 코드·LIVE 승인 없음.
+- 승인본(게이트): 업무정의서 v0.6, 00 v0.4, 01 v0.8, 02 v0.7, 03 v0.9, 04 v0.8, 05 v0.5 (archive에 보존, 현 파일은 draft). **마지막 기록 A-070.** 2일차 운영 카드(비공개 페이지): https://claude.ai/artifact/XXZrAhidXPAFo1hUDRgVdw 실전 주문 코드·LIVE 승인 없음.
 
 ## 다음 세션 첫 행동
 1. `git status`·이 파일·`docs/.status`·`docs/approvals.md` 끝 3행·`docs/worklog.md` 마지막 항목 확인.
-2. 사용자가 "2일차 끝"·결과를 주면: `status` 출력·텔레그램·`var/paper/review/`·`var/paper/logs/ops-20261007.jsonl`·DB(읽기 전용 `file:...?mode=ro`)로 분석 → `docs/07-paper-review.md` 2일차 추가, `docs/broker-specs/kiwoom-kr.md` §7c 보강. **확인할 것**: 시작 대조가 1일차 항목을 AUTO_MATCHED로 종결했는지, 09:30 v1 매도 체결 뒤 K4 재발 없음(K-U14 수정 확인), VI `_AL`/`_NX` 경고 사라짐, 불일치 알림 반복 없음, 07:50~09:00 서버 구간, 사용자가 `/kill` 보냈는지.
+2. 사용자가 "2일차 끝"·결과를 주면: `docs/strategies/paper0-verify/day2-analysis.md`(a~k 조회, 1일차 DB로 실행 검증됨)와 `status` 출력·텔레그램·`var/paper/review/`·`var/paper/logs/ops-20261007.jsonl`로 분석 → `docs/07-paper-review.md` 2일차 추가, `docs/broker-specs/kiwoom-kr.md` §7c 보강. **확인할 것**: 시작 대조가 1일차 항목을 AUTO_MATCHED로 종결했는지, 09:30 v1 매도 체결 뒤 K4 재발 없음(K-U14 수정 확인), VI `_AL`/`_NX` 경고 사라짐, 불일치 알림 반복 없음, 07:50~09:00 서버 구간, 사용자가 `/kill` 보냈는지.
 3. 수정이 확인되면 사용자에게 main 병합 여부를 묻는다.
 4. 사용자는 터미널 명령에 익숙하지 않다 — 실행 안내는 **복사해 붙일 전체 명령**, 용어는 풀어서.
 
@@ -20,7 +36,7 @@
 
 ## 진행 중 결정·작업
 ### 원격 운영 (사용자 요청 2026-10-06 — 회사에서 장중 조치 불가)
-- **방법 1 — 구현·시험 완료, CP-026 승인 대기** (A-068 착수, A-069 결정 "전부 권장"). worktree `C:\AI\trading_system\remote-ops`, 브랜치 `feat/T-022-remote-ops` 커밋 0b6e5a9(전체 1083 passed, t022 21 passed, 독립 재검토 반영). CP: `docs/changes/CP-026-remote-ops.md`(그 브랜치에만 있음). **승인 전 PAPER 실행 브랜치에 병합 금지.** 병합 순서 권장: 2일차 확인 → T-017 main 병합 → T-022 병합 → 01·03·04·05 draft에 `[CP-026]` 반영 → pv-procedure v0.5. (원래 구상:) 매매 시스템 텔레그램 봇 확장. `/resume K8`(복구 조건 충족 시만), `/resume K4`(열린 대조 불일치 0건 + 최근 대조 MATCH 시만) 원격 허용, `/reconcile`(즉시 대조·결과 회신), `/review`(오늘 체결·정지·불일치 요약). K3·K5·K7은 로컬 유지. 확인 코드(`/confirm`) 유지. 대상 규칙: 01 §2.9(원격 재개 범위), 03 §6.6, 04 V-32. **별도 브랜치에서 구현·시험 → CP-026 → 승인 뒤 병합**. 2일차 실행본에는 넣지 않는다.
+- **방법 1 — CP-026 승인(A-070), 문서 draft 반영 완료, 병합 대기**. worktree `C:\AI\trading_system\remote-ops`, 브랜치 `feat/T-022-remote-ops`(코드 0b6e5a9, 문서 f098414). CP: `docs/changes/CP-026-remote-ops.md`(그 브랜치에만 있음). **병합 지시 전 PAPER 실행 브랜치에 넣지 않음.** (원래 구상:) 매매 시스템 텔레그램 봇 확장. `/resume K8`(복구 조건 충족 시만), `/resume K4`(열린 대조 불일치 0건 + 최근 대조 MATCH 시만) 원격 허용, `/reconcile`(즉시 대조·결과 회신), `/review`(오늘 체결·정지·불일치 요약). K3·K5·K7은 로컬 유지. 확인 코드(`/confirm`) 유지. 대상 규칙: 01 §2.9(원격 재개 범위), 03 §6.6, 04 V-32. **별도 브랜치에서 구현·시험 → CP-026 → 승인 뒤 병합**. 2일차 실행본에는 넣지 않는다.
 - **방법 2 (설치 불필요)**: Claude Code Remote Control(https://code.claude.com/docs/en/remote-control.md). 도구 기능이라 정책 변경 없음. 원격 지시를 받아도 승인 구조 그대로 — `run`·정지 재개는 사용자(D-086), 에이전트는 분석·개발·조회. 텔레그램 채널 플러그인(https://code.claude.com/docs/en/channels.md)은 시험판·Bun 설치 필요라 보류.
 
 ### 검증 전략 v2 전환 (보유 0건인 날 저녁)
