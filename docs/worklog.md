@@ -324,5 +324,6 @@
 - v2 백테스트(var/backtest/paper0-verify-v2): 재현성·교란 통과, 체결 424, 지문 2360f83d…, 기록 backtest-v2.md. 중단된 이전 실행 폴더 `var/backtest/paper0-verify-v2-20261006*` 4개 남음(삭제 명령 권한 거부 — 사용자 정리).
 - v2 전환 명령을 PAPER 저장소 사본으로 사전 시험: register → v2 BACKTEST_PASSED → v2 PAPER → v1 STOPPED(REPLACE) 성공, 전환 뒤 K9(v1) 1건 남음이 정상.
 - 문서: CP-025(D-121~D-135, V-162~V-180) → 01 v0.9·02 v0.8·03 v1.0·04 v0.9 draft에 반영, docs/07-paper-review.md v0.1, strategy-v2.md, pv-procedure v0.4 §3.4.
-- 미해결: CP-025·개정 draft 승인, 수수료 실측 0.35% 추정 vs 설정 0.015%(앱 체결 내역 확인), 엔진 보유 거래일 수 0 고정(PAPER-1 전), NXT VI 보수 처리 유지 여부.
+- 미해결: CP-025·개정 draft 승인, 수수료 실측 0.35% 추정 vs 설정 0.015%(앱 체결 내역 확인), NXT VI 보수 처리 유지 여부.
 - 다음: 2일차 — 시작 대조 자동 종결 → K8·K4 재개 → 09:30 v1 매도 → 09:35 보유 0건이면 /kill → 저녁 v2 전환.
+- 정정: 재검토 V-3(엔진 보유 거래일 수 0 고정)은 잘못된 지적 — 스냅샷이 이력으로 채움(store.snapshot history, 시험 B-6). 문서·주석 정정.

@@ -103,8 +103,8 @@ SPEC_V2 = replace(
                  "보유 없음 AND 미체결 없음 AND 거래 상태 이상 없음 AND 판정 시각 < split_time",
                  "진입 S-4 qty 시장가", "데이터 품질 실패, 미체결 주문 있음, 거래 상태(정지·VI·주의 등) 있음", 1),
     ),
-    # hold_days 상한 0: 엔진이 보유 거래일 수를 아직 계산하지 않는다(PositionView 0 고정, 재검토 V-3) → 1 이상이면
-    # 실운영에서 청산이 영영 나오지 않으므로 v2는 0만 허용한다
+    # hold_days 상한 0: v2는 같은 날 왕복만 쓴다(PAPER-0 검증 목적). 보유 거래일 수는 스냅샷이 거래 이력으로 채운다
+    # (store.snapshot history) — 재검토 V-3 "0 고정"은 잘못된 지적이었다(2026-10-06 확인)
     params=(
         SPEC.params[0],
         ParamSpec("hold_days", "int", "거래일", "청산까지 최소 보유 거래일 수 — v2는 0만(같은 날 오후 청산)",
