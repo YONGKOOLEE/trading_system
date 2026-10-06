@@ -7,7 +7,7 @@
 3. 판정·실행 스레드 멈춤: 마지막 진행 후 STALL_ALERT_SECONDS 초과 → 긴급 알림 1회 + 하트비트 중단(watchdog도 알림).
    K8은 걸지 않는다 — 01 K8은 "재시작 복구 대기"이고, 느리지만 살아 있는 스레드는 내부 상태를 잃지 않으며
    위험 확대는 그 스레드의 게이트·실행기에서만 일어나므로 멈춘 동안 새 위험이 생기지 않는다.
-4. 하트비트 기록(재시도 포함), 10분마다 SNTP 시계 점검, 입출력 스레드 생존 감시(죽으면 긴급 알림 + K5).
+4. 하트비트 기록(재시도 포함), 10분마다 SNTP 시계 점검, 입출력 스레드 생존 감시(죽으면 긴급 알림 + K5, 텔레그램 스레드는 긴급 알림만).
 
 정지 발동·조건 보고는 QueuedHalts로 판정·실행 스레드에 맡긴다(K1 행 기록만 예외 — Engine.fast_kill 설명 참조).
 각 작업은 예외를 삼키고 기록한다: 감시 스레드가 죽으면 안 된다 (RV-06).
@@ -61,7 +61,8 @@ class Supervisor:
                  clock_monitor: _ClockCheck | None = None, mono: Callable[[], float] = time.monotonic,
                  interval: float = 1.0, clock_every: float = CLOCK_CHECK_SECONDS,
                  stall_limit: float = STALL_ALERT_SECONDS,
-                 watched: Sequence[tuple[threading.Thread, str]] = ()) -> None:
+                 watched: Sequence[tuple[threading.Thread, str]] = (),
+                 watched_alert_only: Sequence[tuple[threading.Thread, str]] = ()) -> None:
         self.engine = engine
         self.halts = QueuedHalts(engine)
         self.loop = LoopMonitor(self.halts, engine.alerts)
@@ -73,6 +74,7 @@ class Supervisor:
         self._clock_every = clock_every
         self._stall_limit = stall_limit
         self._watched = list(watched)
+        self._watched_alert_only = list(watched_alert_only)   # 텔레그램 등: 죽으면 알림만 (정지 규칙 변경 없음)
         self._dead_reported: set[str] = set()
         self._stalled = False
         self._last_clock = mono()
@@ -125,6 +127,13 @@ class Supervisor:
             self._dead_reported.add(label)
             self.engine.alerts.alert("EMERGENCY", f"{label} 스레드 종료 — K5, 재시작 필요", None)
             self.halts.activate(HaltType.K5, "thread", f"{label} 스레드 종료", self.engine.account)  # 대조로 안 풀림 (F2)
+        for t, label in self._watched_alert_only:
+            if t.is_alive() or label in self._dead_reported or t.ident is None:
+                continue
+            self._dead_reported.add(label)
+            # 정지는 걸지 않는다(01 정지 표에 없는 조건). 알림 전송 스레드가 죽었으면 텔레그램으로는 못 가고
+            # 콘솔·운영 로그·감사 ALERT(status)로만 보인다
+            self.engine.alerts.alert("EMERGENCY", f"{label} 스레드 종료 — 재시작 필요(정지 없음)", None)
 
     def _guard(self, name: str, fn: Callable[[], object]) -> object:
         try:
