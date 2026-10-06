@@ -22,7 +22,8 @@ class HaltControl(HaltSink, Protocol):
     """정지 발동 + 재개 조건 보고·재개. 전략 상태 전환(K9)처럼 정지를 풀어야 하는 쪽이 쓴다 (01 K9 v0.5)."""
 
     def report_condition(self, halt_type: HaltType, account: str | None, name: str, ok: bool, evidence: str = "", *,
-                         instrument: str | None = None, owner: str | None = None) -> list[str]: ...
+                         instrument: str | None = None, owner: str | None = None,
+                         recon: str | None = None) -> list[str]: ...
 
     def resume(self, halt_type: HaltType, account: str | None, channel: str, actor: str, *,
                owner: str | None = None) -> object: ...

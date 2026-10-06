@@ -179,7 +179,7 @@ class Reconciler:
             n = len(set(ids) | set(open_before.values()))
             if self._halts is not None:
                 self._halts.activate(HaltType.K4, "reconciler", f"대조 불일치 {n}건 ({trigger})", account)
-                self._halts.report_condition(HaltType.K4, account, "reconciled", False, rid)
+                self._halts.report_condition(HaltType.K4, account, "reconciled", False, rid, recon=rid)
             # T-017: 새 항목이 생길 때만 긴급 알림. 같은 항목이 열려 있는 동안은 60분마다 WARNING으로 상기만 한다
             # (K4는 그대로 유지 — 알림 횟수만 줄인다)
             new = set(ids) - set(open_before.values())
@@ -194,7 +194,7 @@ class Reconciler:
             self._reminded.pop(account, None)
         if result != "MISMATCH" and self._halts is not None:
             for k in (HaltType.K3, HaltType.K4, HaltType.K5):
-                self._halts.report_condition(k, account, "reconciled", True, rid)
+                self._halts.report_condition(k, account, "reconciled", True, rid, recon=rid)
         if cmp.open_after_close:
             # 03 §6.4 "남아 있으면 알림하고 다음 거래일 시작 전 사용자 확인 대상" (마감 후 대조는 하루 1회 → 알림 1회)
             self._alerts.alert("WARNING", f"장 마감 후 미체결 {len(cmp.open_after_close)}건이 브로커에 남아 있음 "
@@ -510,5 +510,6 @@ class RecoveryChecker:
         if unsettled:
             fail(f"5. 전송 대기·응답 대기 의도 {len(unsettled)}건")
         self._halts.report_condition(HaltType.K8, None, "recovery_ok", rep.ok,
-                                     f"실행 중 복구 판정, 대조 {r.recon_id}" if rep.ok else "; ".join(rep.failures))
+                                     f"실행 중 복구 판정, 대조 {r.recon_id}" if rep.ok else "; ".join(rep.failures),
+                                     recon=r.recon_id)   # 원격 K8 재개가 이번 대조의 판정인지 확인 (CP-026)
         return rep

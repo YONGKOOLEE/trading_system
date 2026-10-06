@@ -4,7 +4,7 @@
 - 요청별 허용은 게이트 G2가 domain/halts.py 표로 판정한다. 여기서는 발동·조건 기록·해제·재개만 한다.
 - 발동 시 매수 미체결 취소(K1·K2·K9)는 취소 요청을 만들어 **게이트를 거쳐** 보낸다.
 - 상태: 활성 → (재개 조건 충족) → 자동 해제 유형은 해제 / 사용자 재개 유형은 재개 대기 → 사용자 재개 → 해제.
-- 원격 재개는 K1·K2만 (01 §2.9). 재개 조건 검사는 재개 시점에 다시 한다.
+- 원격 재개는 K1·K2, 그리고 명령 처리 중 새 대조를 거친 K4·K8 (01 §2.9, CP-026). 재개 조건 검사는 재개 시점에 다시 한다.
 """
 
 from __future__ import annotations
@@ -18,7 +18,8 @@ from decimal import Decimal
 
 from trading_system.domain.clock import Clock, from_iso, next_kst_time_after
 from trading_system.domain.enums import GateResult, HaltType, IntentState, RequestSource, Side
-from trading_system.domain.halts import AUTO_RELEASE, CANCELS_OPEN_BUYS, EMERGENCY, REMOTE_RESUMABLE, HaltState
+from trading_system.domain.halts import (AUTO_RELEASE, CANCELS_OPEN_BUYS, EMERGENCY, REMOTE_FRESH_RECONCILE,
+                                         REMOTE_RESUMABLE, HaltState)
 from trading_system.domain.market import DailyRisk
 from trading_system.domain.models import GateRequest
 from trading_system.execution.executor import ExecutionBlocked, Executor
@@ -49,6 +50,8 @@ REQUIRED_CONDITIONS: dict[HaltType, tuple[str, ...]] = {
 # - 조회 경로(rest): 대조기가 브로커 조회 3종 성공 시 보고한다(조회 성공 = 연결 증거).
 # - 실시간 경로(realtime): 실시간 수신 쪽이 재접속(ONLINE·RECONNECTED) 시 보고한다(app/main.py).
 CANCEL_PENDING = "cancel_pending"   # record_only로 기록된 정지의 매수 미체결 취소 대기 (재검토 F1)
+K4_RECONCILER = "reconciler"        # 대조 불일치로 K4를 거는 주체 — 원격 K4 재개는 이 원인만 (CP-026)
+RAISED_BY = "raised_by:"            # K4 행을 다른 주체가 다시 건 기록 (조건 이름 접두사, 재개 조건에는 쓰지 않음)
 K5_LINK_REST = "link:rest"
 K5_LINK_REALTIME = "link:realtime"
 K5_LINK_THREAD = "link:thread"   # 입출력 스레드 종료 — 프로세스 재시작(engine.start)만 정상 보고 (재검토 F2)
@@ -100,6 +103,10 @@ class HaltManager:
                         "type": halt_type.value, "from": existing.get("variant"), "to": variant, "reason": reason})
                 awaiting = existing["state"] == HaltState.AWAITING_RESUME.value
                 conds = {} if awaiting else json.loads(existing["conditions"] or "{}")
+                if halt_type is HaltType.K4 and existing["actor"] != actor:
+                    # 다른 주체가 같은 K4를 다시 걸었음을 남긴다 — 원격 재개 판정이 원인을 구분한다 (CP-026 재검토 #1)
+                    conds[f"{RAISED_BY}{actor}"] = {"ok": False, "at": now.isoformat(), "evidence": reason}
+                    self._repo.update_halt(halt_id, conditions=conds)
             else:
                 halt_id = self._repo.insert_halt(halt_type.value, account, actor, reason, now,
                                                  instrument=instrument, owner=owner, variant=variant)
@@ -191,10 +198,12 @@ class HaltManager:
 
     # --- 조건·해제 -------------------------------------------------------------------
     def report_condition(self, halt_type: HaltType, account: str | None, name: str, ok: bool,
-                         evidence: str = "", *, instrument: str | None = None, owner: str | None = None) -> list[str]:
+                         evidence: str = "", *, instrument: str | None = None, owner: str | None = None,
+                         recon: str | None = None) -> list[str]:
         """재개 조건 충족 여부를 기록한다 (대조·시계·연결·저장 점검 등이 호출). 자동 해제 유형은 여기서 해제된다.
 
         K10은 종목 범위가 정확히 같은 정지에만 적용한다 (instrument=None은 계좌 전체 K10, CP-018 R-7).
+        recon: 이 판정의 근거 대조 ID — 원격 K4·K8 재개가 이번 대조의 판정인지 정확히 비교한다 (CP-026 재검토 #3).
         """
         released: list[str] = []
         with self._repo.tx():
@@ -207,6 +216,8 @@ class HaltManager:
             for row in rows:
                 conds = json.loads(row["conditions"])
                 conds[name] = {"ok": ok, "at": now.isoformat(), "evidence": evidence}
+                if recon is not None:
+                    conds[name]["recon"] = recon
                 if halt_type is HaltType.K5 and name == "broker_connected":
                     # 경로를 가리지 않는 연결 보고 = 모든 경로에 대한 보고 (RV-02 이전 계약 유지).
                     # 운영 코드는 경로별(K5_LINK_REST·K5_LINK_REALTIME)로 보고한다
@@ -237,11 +248,13 @@ class HaltManager:
         return released
 
     def resume(self, halt_type: HaltType, account: str | None, channel: str, actor: str, *,
-               owner: str | None = None, superseded: Callable[[], str | None] | None = None) -> ResumeResult:
+               owner: str | None = None, superseded: Callable[[], str | None] | None = None,
+               fresh_recon: str | None = None) -> ResumeResult:
         """사용자 재개 명령. 원격 허용·재개 조건을 검사하고 감사 기록한다. K9는 전략(owner)별.
 
         superseded: 저장 단위 **안에서** 부르는 확인 함수. 거부 사유 문자열을 돌려주면 재개를 거부한다
         (예: 이 RESUME보다 뒤에 들어온 대기 KILL — 3차 검토 #2, ops/commands.py).
+        fresh_recon: 원격 K4·K8 재개에서 명령 처리 중 새로 한 대조 ID (CP-026). 재개 조건의 증거가 이 대조여야 한다.
         """
         with self._repo.tx():
             now = self._clock.now()
@@ -252,7 +265,7 @@ class HaltManager:
             if not veto and halt_type is HaltType.K1 and account is not None and any(r["account"] is None for r in rows):
                 # 계좌 RESUME이 전체 계좌 KILL 행까지 풀면 다른 계좌의 KILL 의사가 사라진다 (6차 검토 F-4)
                 veto = "전체 계좌 K1이 걸려 있음 — 계좌 지정 없이(전체) 재개해야 함"
-            result = ResumeResult(False, veto) if veto else self._check_resume(halt_type, rows, channel)
+            result = ResumeResult(False, veto) if veto else self._check_resume(halt_type, rows, channel, fresh_recon)
             if result.ok:
                 for row in rows:
                     self._repo.update_halt(row["halt_id"], state=HaltState.RELEASED.value,
@@ -298,11 +311,29 @@ class HaltManager:
                 self._cancel_open_buys(row["halt_id"], row["account"], row["scope_owner"] if k is HaltType.K9 else None,
                                        skip_tried=auto, only=only)
 
-    def _check_resume(self, halt_type: HaltType, rows: list[dict], channel: str) -> ResumeResult:
-        if channel != Channel.LOCAL and halt_type not in REMOTE_RESUMABLE:
+    def _check_resume(self, halt_type: HaltType, rows: list[dict], channel: str,
+                      fresh_recon: str | None = None) -> ResumeResult:
+        fresh_name = REMOTE_FRESH_RECONCILE.get(halt_type) if channel != Channel.LOCAL else None
+        if channel != Channel.LOCAL and halt_type not in REMOTE_RESUMABLE and fresh_name is None:
             return ResumeResult(False, f"{halt_type.value}는 로컬에서만 재개할 수 있음 (01 §2.9)")
+        if fresh_name is not None and fresh_recon is None:
+            return ResumeResult(False, f"{halt_type.value} 원격 재개는 명령 처리 중 새 대조가 필요 (CP-026)")
         if not rows:
             return ResumeResult(False, "해제되지 않은 해당 정지 없음")
+        if fresh_name is not None:
+            if any(r["account"] is None for r in rows) and len(self._repo.accounts()) > 1:
+                # 복구 판정은 한 계좌만 본다 — 전체 범위 정지를 한 계좌 판정으로 풀지 않는다 (재검토 #2, 6차 F-4와 같은 이유)
+                return ResumeResult(False, f"여러 계좌의 전체 범위 {halt_type.value} — PC에서 재개")
+            for row in rows:   # 이전 대조의 충족 기록이 아니라 이번 대조의 판정이어야 한다 (A-069 ①②)
+                conds = json.loads(row["conditions"])
+                if halt_type is HaltType.K4 and (row["actor"] != K4_RECONCILER or any(
+                        k.startswith(RAISED_BY) for k in conds)):
+                    # 실행기가 건 K4(비정상 통보·종결 후 체결)는 대조 일치만으로 원인이 설명되지 않는다 (재검토 #1)
+                    return ResumeResult(False, "K4 원인에 대조 불일치 외의 것(실행기 비정상 통보 등)이 있음 — PC에서 확인·재개")
+                cond = conds.get(fresh_name, {})
+                if not (cond.get("ok") and cond.get("recon") == fresh_recon):
+                    why = cond.get("evidence") or "판정 없음"
+                    return ResumeResult(False, f"새 대조 {fresh_recon} 기준 {fresh_name} 미충족: {why}")
         for row in rows:
             if not self._conditions_met(halt_type, row, json.loads(row["conditions"])):
                 return ResumeResult(False, f"재개 조건 미충족: {self._missing(halt_type, row)}")

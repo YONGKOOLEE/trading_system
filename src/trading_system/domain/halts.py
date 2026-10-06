@@ -32,6 +32,9 @@ class K9Variant(StrEnum):
 AUTO_RELEASE = frozenset({HaltType.K5, HaltType.K6, HaltType.K10, HaltType.K11})
 # 원격(메신저)으로 재개할 수 있는 유형 (01 §2.9, Q-H)
 REMOTE_RESUMABLE = frozenset({HaltType.K1, HaltType.K2})
+# 원격 재개 시 명령 처리 중 새로 한 대조 기준으로 조건을 다시 보는 유형 → 그 재개 조건 이름 (CP-026, A-069 ①②).
+# 조건의 증거에 이번 대조 ID가 있어야 한다 — 이전 대조의 충족 기록으로는 원격 재개하지 않는다
+REMOTE_FRESH_RECONCILE: dict[HaltType, str] = {HaltType.K4: "reconciled", HaltType.K8: "recovery_ok"}
 # 발동 시 매수 미체결을 취소하는 유형 (01 §2.6 "미체결 주문" 열)
 CANCELS_OPEN_BUYS = frozenset({HaltType.K1, HaltType.K2, HaltType.K9})
 # 발동 시 긴급 알림 유형 (01 §2.10)

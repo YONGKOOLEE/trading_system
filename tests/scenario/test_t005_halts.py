@@ -324,11 +324,14 @@ def test_v28_k9_cancels_only_that_strategys_open_buys(env: Env) -> None:
 
 # --- V-32 원격 재개 범위 (채널 연동은 T-013) ----------------------------------------------------
 
-@pytest.mark.parametrize("k", [HaltType.K3, HaltType.K4, HaltType.K7, HaltType.K8])
-def test_v32_remote_resume_refused(env: Env, k: HaltType) -> None:
+# CP-026(A-068·A-069)으로 V-32 개정: K4·K8은 원격 재개가 가능해졌지만 명령 처리 중 새 대조(fresh_recon)가 있을 때만.
+# 새 대조 없이 정지 관리자에 바로 온 원격 재개는 여전히 거부된다. 새 대조 경로는 test_t022_remote_ops (V-181·V-182)
+@pytest.mark.parametrize("k, why", [(HaltType.K3, "로컬"), (HaltType.K4, "새 대조"), (HaltType.K7, "로컬"),
+                                    (HaltType.K8, "새 대조")])
+def test_v32_remote_resume_refused(env: Env, k: HaltType, why: str) -> None:
     env.halts.activate(k, "test", "x", ACCOUNT)
     r = env.halts.resume(k, ACCOUNT, Channel.REMOTE, "u")
-    assert not r.ok and "로컬" in r.reason
+    assert not r.ok and why in r.reason
     assert k.value in env.repo.active_halts(ACCOUNT)
 
 

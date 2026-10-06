@@ -3,7 +3,8 @@
 - 봇 API 롱 폴링(getUpdates)만 쓴다. 외부 포트를 열지 않는다. update_id로 중복을 없앤다(V-57).
 - 허용된 채팅 ID만 받는다. `/kill`을 뺀 명령은 1회용 확인 코드(60초)를 받은 뒤에만 명령 테이블에 넣는다(V-107).
   `/kill`은 위험을 줄이는 명령이라 확인 없이 즉시 넣는다(결정 대기열 DP-9).
-- 원격으로는 K1·K2만 재개할 수 있다(정지 관리자가 판정). 재개·상태 응답에는 KILL 파일 존재를 표시한다(V-119).
+- 원격으로는 K1·K2, 그리고 명령 처리 중 새 대조를 거친 K4·K8만 재개할 수 있다(정지 관리자가 판정, CP-026).
+  재개·상태 응답에는 KILL 파일 존재를 표시한다(V-119). `/reconcile`(대조)은 확인 코드, `/review`(오늘 요약)는 조회만.
 - 알림: 감사 이벤트 ALERT를 읽어 보낸다(전송 상태는 notification 표, ENT-26). 같은 알림은 최대 3회 시도.
   연속 3건 실패하면 K11(위험 확대 차단), 이후 전송이 성공하면 K11 해제 조건을 보고하고 밀린 알림을 보낸다(V-30).
 - 토큰은 Secret으로만 다루고 URL·오류 메시지·로그에 남기지 않는다. HTTP 자동 재시도는 없다(03 D-044와 같은 원칙).
@@ -17,12 +18,13 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import requests
 from requests.adapters import HTTPAdapter
 
-from trading_system.domain.clock import Clock
+from trading_system.domain.clock import KST, Clock, from_iso
 from trading_system.domain.enums import HaltType, IntentState
 from trading_system.domain.sinks import HaltControl
 from trading_system.storage.jsonlog import Masker
@@ -272,11 +274,13 @@ class CommandBot:
         cmd, args = parts[0].lower(), parts[1:]
         if cmd == "/status":
             self._reply(chat, self._status())
+        elif cmd == "/review":
+            self._reply(chat, self._review())
         elif cmd == "/kill":
             self._submit(uid, chat, "KILL", {"account": None, "reason": " ".join(args) or "원격 킬 스위치"})
         elif cmd == "/confirm":
             self._confirm(uid, chat, args[0] if args else "")
-        elif cmd in ("/resume", "/cancel", "/exit", "/reduce"):
+        elif cmd in ("/resume", "/cancel", "/exit", "/reduce", "/reconcile"):
             try:
                 name, cargs = self._parse(cmd, args)
             except ValueError as exc:
@@ -286,14 +290,21 @@ class CommandBot:
             self._pending[code] = _Pending(name, cargs, chat, uid, self._clock.now() + CONFIRM_TTL)
             self._reply(chat, f"{name} {json.dumps(cargs, ensure_ascii=False)} — 60초 안에 /confirm {code}")
         else:
-            self._reply(chat, "명령: /kill [사유], /resume K1|K2, /cancel <주문키>, /exit <종목> <수량>, "
-                              "/reduce <종목> <수량>, /status, /confirm <코드>")
+            self._reply(chat, "명령: /kill [사유], /resume K1|K2|K4|K8, /cancel <주문키>, /exit <종목> <수량>, "
+                              "/reduce <종목> <수량>, /reconcile, /status, /review, /confirm <코드>\n"
+                              "K4·K8 재개는 그 자리에서 대조를 새로 해 일치할 때만 됩니다. K3·K5·K7은 PC에서")
 
     def _parse(self, cmd: str, args: list[str]) -> tuple[str, dict]:
         if cmd == "/resume":
             if len(args) != 1:
-                raise ValueError("/resume K1|K2")
-            return "RESUME", {"account": None, "halt_type": args[0].upper()}
+                raise ValueError("/resume K1|K2|K4|K8")
+            halt_type = args[0].upper()
+            # K4·K8은 재개 직전 대조할 계좌가 필요하다 (CP-026). K1·K2는 기존대로 전체 범위
+            return "RESUME", {"account": self._account if halt_type in ("K4", "K8") else None, "halt_type": halt_type}
+        if cmd == "/reconcile":
+            if args:
+                raise ValueError("/reconcile (인자 없음)")
+            return "RECONCILE", {"account": self._account}
         if cmd == "/cancel":
             if len(args) != 1:
                 raise ValueError("/cancel <주문키>")
@@ -321,6 +332,28 @@ class CommandBot:
         with self._repo.tx():
             fresh = self._repo.insert_command(cid, "REMOTE", "telegram", command, args, self._clock.now())
         self._reply(chat, f"명령 접수: {command} ({cid})" if fresh else f"이미 받은 명령: {cid}")
+
+    def _review(self) -> str:
+        """오늘(KST 거래일) 요약 — 조회만 (A-069 ⑤). 계좌번호·금액은 넣지 않는다(종목·방향·수량·건수만)."""
+        today = self._repo.trade_date_of(self._clock.now())
+        fills = self._repo.select(
+            "SELECT bo.instrument AS instrument, bo.side AS side, f.quantity AS quantity FROM fill f "
+            "JOIN broker_order bo ON bo.order_key = f.order_key WHERE bo.trade_date = ? ORDER BY f.at", (today,))
+        totals: dict[tuple[str, str], Decimal] = {}
+        for f in fills:
+            key = (f["instrument"], f["side"])
+            totals[key] = totals.get(key, Decimal(0)) + Decimal(f["quantity"])
+        side_ko = {"BUY": "매수", "SELL": "매도"}
+        lines = [f"[{today} 요약] 오늘 체결 {len(fills)}건"]
+        lines += [f"- {inst} {side_ko.get(side, side)} {qty.normalize():f}" for (inst, side), qty in totals.items()]
+        lines.append(self._status())
+        last = self._repo.select("SELECT result, created_at FROM reconciliation ORDER BY created_seq DESC LIMIT 1")
+        lines.append("마지막 대조: " + (f"{last[0]['result']} ({from_iso(last[0]['created_at']).astimezone(KST):%H:%M} KST)"
+                                     if last else "없음"))
+        kinds = sorted({i["kind"] for i in self._repo.open_recon_items(None)})
+        if kinds:
+            lines.append("불일치 유형: " + ", ".join(kinds))
+        return "\n".join(lines)
 
     def _status(self) -> str:
         halts = self._repo.halt_rows(None)
