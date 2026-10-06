@@ -30,6 +30,7 @@ class FakeTelegram:
         self.updates: list[dict] = []
         self.sent: list[dict] = []
         self.fail = False
+        self.send_reply = None   # T-017: sendMessage 본문 → (HTTP 코드, 응답) 또는 None(정상)
         self.paths: list[str] = []
         fake = self
 
@@ -45,6 +46,10 @@ class FakeTelegram:
                 if fake.fail:
                     return self._send(502, {"ok": False, "description": "Bad Gateway"})
                 method = self.path.rsplit("/", 1)[-1]
+                if method == "sendMessage" and fake.send_reply is not None:
+                    special = fake.send_reply(body)
+                    if special is not None:
+                        return self._send(*special)
                 if method == "sendMessage":
                     fake.sent.append(body)
                     return self._send(200, {"ok": True, "result": {"message_id": len(fake.sent)}})

@@ -53,7 +53,7 @@ def telegram_threads(engine: "Engine", repo: Repository, enabled: bool, secrets:
         skipped = repo.skip_old_alerts_on_first_enable()
     if skipped:
         alert("INFO", f"텔레그램 첫 연결: 이전 알림 {skipped}건은 보내지 않음")
-    notifier = Notifier(repo, api, chat, clock, halts)
+    notifier = Notifier(repo, api, chat, clock, halts, sleep=stop.wait, should_stop=stop.is_set)
     bot = CommandBot(repo, api, chat, engine.account, clock, kill_file, alert)
 
     def notify_loop() -> None:

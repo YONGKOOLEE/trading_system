@@ -1,0 +1,8 @@
+# paper0-verify v2 파라미터 (R-19, T-017·A-067 B-5). 값을 바꾸면 전략 버전을 올린다(D-011).
+strategy = "paper0-verify"
+version = 2
+
+[params]
+qty = 1               # 1주 (04 §4.1)
+hold_days = 0         # 같은 날 오후 판정에서 청산
+split_time = "12:00"  # KST. 09:30 판정 = 진입만, 14:30 판정 = 청산만

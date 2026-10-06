@@ -828,7 +828,8 @@ class Repository:
     def pending_notifications(self) -> list[dict]:
         return [dict(r) for r in self._x("SELECT * FROM notification WHERE status='PENDING' ORDER BY alert_seq")]
 
-    def mark_notification(self, alert_seq: int, ok: bool, at: datetime, error: str | None = None) -> None:
+    def mark_notification(self, alert_seq: int, ok: bool, at: datetime, error: str | None = None,
+                          count_failure: bool = True) -> None:
         """성공이면 SENT, 실패면 시도 횟수를 늘린다. 밀린 알림은 버리지 않는다(복구 시 전송, V-30)."""
         if ok:
             self._x("UPDATE notification SET status='SENT', attempts=attempts+1, last_attempt_at=?, last_error=NULL "
@@ -838,8 +839,15 @@ class Repository:
             return
         self._x("UPDATE notification SET attempts=attempts+1, last_attempt_at=?, last_error=? WHERE alert_seq=?",
                 (to_iso(at), (error or "")[:200], alert_seq))
+        if not count_failure:   # 429 전송 제한 — 채널 장애가 아니라 K11 연속 실패로 세지 않는다 (T-017 M-3)
+            return
         self._x("INSERT INTO meta(key, value) VALUES('notify_fail_streak', '1') "
                 "ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER) + 1 AS TEXT)")
+
+    def drop_notification(self, alert_seq: int, at: datetime, error: str) -> None:
+        """메시지 자체가 거부된 알림을 대기열에서 뺀다(DROPPED). 연속 실패 수는 건드리지 않는다 (T-017 M-2)."""
+        self._x("UPDATE notification SET status='DROPPED', attempts=attempts+1, last_attempt_at=?, last_error=? "
+                "WHERE alert_seq=?", (to_iso(at), error[:200], alert_seq))
 
     def notification_fail_streak(self) -> int:
         r = self._x("SELECT value FROM meta WHERE key='notify_fail_streak'").fetchone()

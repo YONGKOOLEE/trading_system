@@ -135,6 +135,10 @@ def _strategies(app: AppSettings) -> list[StrategyInput]:
     out = []
     for dep in app.strategies:
         strat, params = load_strategy(dep)
+        check = getattr(strat, "validate_deploy", None)   # 전략별 배포 조건 검사 (T-017 v2 split_time)
+        problems = check(params, dep.eval_times) if check is not None else []
+        if problems:
+            raise ConfigError(f"전략 배포 설정 오류 {strat.spec.strategy_id} v{strat.spec.version}: " + "; ".join(problems))
         out.append(StrategyInput(strat, params, dep.eval_times, dep.verification_approval))
     return out
 
