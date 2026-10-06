@@ -261,7 +261,9 @@ class KiwoomMarketFeed:
 
     def handlers(self) -> dict[str, Callable[[str, dict], None]]:
         def h1h(item: str, values: dict) -> None:
-            code = parse.stock_code(values.get("9001") or item, "9001")
+            # T-017: 9001에 거래소 접미사(_AL·_NX)가 붙어 온다(1일차 실측). 우리 종목이면 거래소와 무관하게
+            # VI로 반영(보수적 — 위험 확대 거부), 유니버스 밖이면 해석 실패 경고 없이 무시한다
+            code, _venue = parse.stock_code_with_venue(values.get("9001") or item, "9001")
             if code in self.infos:
                 self._vi(code, values.get("1224"), values.get("1223"), self._today())
                 self._compose(code)

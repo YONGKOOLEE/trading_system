@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from trading_system.broker.base import BrokerAdapter, BrokerQueryError
@@ -74,6 +74,7 @@ class RecoveryReport:
     halts: list[str] = field(default_factory=list)
 
 
+OPEN_ITEM_REMINDER = timedelta(minutes=60)   # T-017: 미해소 불일치 상기 간격 (1일차 1분마다 EMERGENCY 361건)
 QUERY_FAILURES_TO_K5 = 3   # 연속 대조 조회 실패 → K5 (03 타임아웃 표 "최대 3회 → K5", e2e 결함 후보 2)
 
 
@@ -88,6 +89,7 @@ class Reconciler:
         self._alerts = alerts
         self._drain_events = drain_events   # 대기 중인 브로커 통보 반영 (실행기 process_events, RV-24)
         self._failures: dict[str, int] = {}  # 계좌별 연속 조회 실패 수
+        self._reminded: dict[str, datetime] = {}  # 계좌별 마지막 불일치 알림 시각 (T-017 반복 억제)
         # 재조회 전 대기: 01 "재조회 1회 (체결 반영 지연 확인)" — 실시간 체결 통보가 조회보다 늦게 오는 지연을 기다린다.
         # 실운영은 main이 짧은 실제 대기를 넘긴다(판정·실행 스레드만 멈춤, 감시 스레드는 계속). 시험 기본은 대기 없음
         self._requery_wait = requery_wait
@@ -148,7 +150,7 @@ class Reconciler:
         with self._repo.tx():
             # 같은 내용의 열린 항목은 다시 만들지 않는다. 이번에 안 보여도 열린 항목은 사람이 해소하기 전까지 남는다
             # (예: 외부 주문이 다음 날 조회에서 사라짐) — 열린 항목이 있으면 일치로 보지 않는다
-            auto_closed = self._close_known_order_items(account, now)
+            auto_closed = self._close_known_order_items(account, now) + self._close_matched_fill_items(account, now)
             open_before = {(i["kind"], i["instrument"], i["ref"], i["internal_value"], i["broker_value"]): i["item_id"]
                            for i in self._repo.open_recon_items(account)}
             result = "MISMATCH" if found or open_before else "MATCH"
@@ -167,7 +169,16 @@ class Reconciler:
             if self._halts is not None:
                 self._halts.activate(HaltType.K4, "reconciler", f"대조 불일치 {n}건 ({trigger})", account)
                 self._halts.report_condition(HaltType.K4, account, "reconciled", False, rid)
-            self._alerts.alert("EMERGENCY", f"대조 불일치 {n}건 — 사람 확인 필요 (reconcile-resolve)", rid)
+            # T-017: 새 항목이 생길 때만 긴급 알림. 같은 항목이 열려 있는 동안은 60분마다 WARNING으로 상기만 한다
+            # (K4는 그대로 유지 — 알림 횟수만 줄인다)
+            new = set(ids) - set(open_before.values())
+            last = self._reminded.get(account)
+            if new:
+                self._alerts.alert("EMERGENCY", f"대조 불일치 {n}건 — 사람 확인 필요 (reconcile-resolve)", rid)
+                self._reminded[account] = now
+            elif last is None or now - last >= OPEN_ITEM_REMINDER:
+                self._alerts.alert("WARNING", f"대조 불일치 {n}건 미해소 — 사람 확인 필요 (reconcile-resolve)", rid)
+                self._reminded[account] = now
         elif self._halts is not None:
             for k in (HaltType.K3, HaltType.K4, HaltType.K5):
                 self._halts.report_condition(k, account, "reconciled", True, rid)
@@ -221,6 +232,31 @@ class Reconciler:
             self._repo.resolve_recon_item(item["item_id"], "AUTO_ADOPTED", "reconciler", now)
             self._repo.audit(now, "RECON_ITEM_AUTO_RESOLVED", "reconciler", item["item_id"],
                              {"order_no": item["ref"], "intent_id": order.intent_id, "trade_date": trade_date})
+            closed.append(item["item_id"])
+        return closed
+
+    def _close_matched_fill_items(self, account: str, now: datetime) -> list[str]:
+        """열린 '누락 체결' 항목 중 그 주문의 내부 반영 수량이 항목의 브로커 수량 이상이 된 것은 자동 종결한다 (T-017).
+
+        1일차처럼 체결번호 차이로 생긴 오판 항목, 또는 뒤늦게 통보로 반영된 체결. 원장은 바꾸지 않는다 — 항목 상태만.
+        브로커 수량은 항목의 broker_total(T-017 이후) 또는 quantity(이전 항목)."""
+        closed: list[str] = []
+        for item in self._repo.open_recon_items(account):
+            if item["kind"] != ItemKind.MISSING_FILL:
+                continue
+            try:
+                detail = json.loads(item["detail"] or "{}")
+                broker_total = Decimal(detail.get("broker_total") or detail["quantity"])
+                order_key = detail["order_key"]
+            except (ValueError, KeyError, ArithmeticError):
+                continue
+            order = self._repo.broker_order(order_key)
+            if order is None or order.filled_quantity < broker_total:
+                continue
+            self._repo.resolve_recon_item(item["item_id"], "AUTO_MATCHED", "reconciler", now)
+            self._repo.audit(now, "RECON_ITEM_AUTO_RESOLVED", "reconciler", item["item_id"],
+                             {"order_key": order_key, "broker_total": str(broker_total),
+                              "internal_filled": str(order.filled_quantity), "basis": "주문별 체결 수량 일치 (K-U14)"})
             closed.append(item["item_id"])
         return closed
 
@@ -294,15 +330,33 @@ class Reconciler:
             elif b.state not in OPEN:
                 found.append((ItemKind.STATE_MISMATCH, io.instrument, io.order_no, io.state, b.state,
                               {"order_key": io.order_key, "broker_state": b.state}))
+        # T-017 (K-U14 실측 2026-10-06): 키움 모의 kt00009 cntr_no는 실시간 909 체결번호와 다른 값(주문번호와 같음)
+        # → 체결번호로 짝지으면 같은 체결이 누락 체결로 잡힌다. 주문별 체결 수량 합(브로커 조회 vs 내부 반영)으로
+        # 대조하고, 브로커 쪽이 많을 때만 그 차이를 누락 체결로 본다. 체결번호 없는 조회 행은 종전대로 쓰지 않는다(D-094)
+        by_order: dict[str, list] = {}  # type: ignore[type-arg]
         for f in fills:
-            if not f.fill_id:
-                continue  # 체결번호 없는 조회 체결은 반영 후보로 쓰지 않는다 (D-094)
-            order = self._repo.broker_order_by_no(f.order_no, today, account)
+            if f.fill_id:
+                by_order.setdefault(f.order_no, []).append(f)
+        for order_no, rows in by_order.items():
+            order = self._repo.broker_order_by_no(order_no, today, account)
             # 외부 주문 체결은 수량 대조로
-            if order is not None and order.intent_id is not None and                     not self._repo.fill_exists(order.order_key, f.fill_id):
-                found.append((ItemKind.MISSING_FILL, order.instrument, f.order_no, None, f"{f.quantity}@{f.price}",
-                              {"order_key": order.order_key, "fill_id": f.fill_id, "quantity": str(f.quantity),
-                               "price": str(f.price), "at": f.at.isoformat()}))
+            if order is None or order.intent_id is None:
+                continue
+            broker_total = sum((f.quantity for f in rows), Decimal("0"))
+            internal_total = order.filled_quantity
+            if broker_total <= internal_total:
+                continue
+            diff = broker_total - internal_total
+            last = max(rows, key=lambda f: f.at)
+            amount = sum((f.quantity * f.price for f in rows), Decimal("0"))
+            avg = amount / broker_total
+            # APPLY_FILL이 반영할 체결: 차이 수량, 평균가, 누계별 고유 식별(같은 누계 재반영 방지)
+            found.append((ItemKind.MISSING_FILL, order.instrument, order_no, str(internal_total),
+                          f"{broker_total}@{avg.normalize()}",
+                          {"order_key": order.order_key, "fill_id": f"Q{order_no}-{broker_total}",
+                           "quantity": str(diff), "price": str(avg.normalize()), "at": last.at.isoformat(),
+                           "broker_total": str(broker_total), "internal_total": str(internal_total),
+                           "basis": "주문별 체결 수량 합 (K-U14)"}))
         if closing:
             # 누락 체결이 있는 주문, 보유 수량이 다른 종목의 주문은 만료 종결하지 않는다 — 상태 차이로 사람 확인
             missing = {f[2] for f in found if f[0] == ItemKind.MISSING_FILL}

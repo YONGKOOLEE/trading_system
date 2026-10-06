@@ -17,6 +17,7 @@ from trading_system.domain.clock import KST
 
 _NUM = re.compile(r"[+-]?\d+(\.\d+)?", re.ASCII)  # 전각 숫자 등 거부
 _CODE = re.compile(r"[AQJ]?(\d{6})", re.ASCII)
+_CODE_VENUE = re.compile(r"[AQJ]?(\d{6})(?:_(AL|NX))?", re.ASCII)
 
 
 class KiwoomParseError(ValueError):
@@ -100,6 +101,22 @@ def stock_code(value: object, field: str = "stk_cd") -> str:
         shown = value if len(value) <= 20 else value[:20] + "…"
         raise KiwoomParseError(f"{field}: 종목코드 형식 아님 ({shown!r})")
     return m.group(1)
+
+
+
+def stock_code_with_venue(value: object, field: str) -> tuple[str, str | None]:
+    """실시간 시장 통보(1h 등)의 종목코드 — 거래소 접미사 _AL·_NX를 허용해 (코드, 접미사)로 돌려준다.
+
+    T-017 (PAPER-0 1일차 2026-10-06 실측): 1h 9001이 '005930_AL'·'005930_NX' 형태로 온다. 조회 응답의
+    stk_cd는 종전대로 stock_code()로 접미사를 거부한다. 다른 접미사·형식은 해석 불가.
+    """
+    if not isinstance(value, str):
+        raise KiwoomParseError(f"{field}: 종목코드 형식 아님 ({type(value).__name__})")
+    m = _CODE_VENUE.fullmatch(value.strip())
+    if m is None:
+        shown = value if len(value) <= 20 else value[:20] + "…"
+        raise KiwoomParseError(f"{field}: 종목코드 형식 아님 ({shown!r})")
+    return m.group(1), m.group(2)
 
 
 def hms(value: object, day: date, field: str) -> datetime:

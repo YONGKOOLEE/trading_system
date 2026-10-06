@@ -173,6 +173,22 @@ def test_vi_from_query_and_realtime_with_expiry(sim: Sim, clock: FixedClock) -> 
     assert store.trading_status(B) == frozenset()
 
 
+def test_realtime_vi_code_with_venue_suffix(sim: Sim, clock: FixedClock) -> None:
+    """T-017 (PAPER-0 1일차 실측): 1h 9001이 '005930_AL'·'_NX'처럼 거래소 접미사를 붙여 온다.
+    우리 종목이면 거래소와 무관하게 VI로 반영(보수적), 유니버스 밖이면 조용히 무시."""
+    _, store, f = feed(sim, clock)
+    f._master.update({A: frozenset(), B: frozenset()})  # noqa: SLF001
+    h = f.handlers()
+    h["1h"](A, {"9001": f"{A}_AL", "1223": "100200", "1224": ""})
+    assert store.trading_status(A) == {TradingStatus.VI}
+    h["1h"]("123450_NX", {"9001": "123450_NX", "1223": "100200", "1224": ""})   # 유니버스 밖 → 예외 없이 무시
+    assert TradingStatus.VI not in (store.trading_status(B) or frozenset())
+    clock.advance(timedelta(minutes=2, seconds=1))
+    f.tick()
+    h["1h"](B, {"9001": f"{B}_NX", "1223": "100500", "1224": ""})
+    assert store.trading_status(B) == {TradingStatus.VI}
+
+
 def test_realtime_0g_limits_and_0s_calendar_conflict(sim: Sim, clock: FixedClock) -> None:
     alerts = Alerts()
     _, store, f = feed(sim, clock, alerts)
