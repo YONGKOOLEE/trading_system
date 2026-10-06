@@ -1,6 +1,6 @@
 # 세션 인계 (짧게 유지 — 작업이 끝날 때마다 덮어쓴다)
 
-- 갱신: 2026-10-06 / **PAPER-0 1일차 완료 — K-U14로 K4, 매도 거부, 모의 1주 보유 중. T-017 수정 커밋(feat/T-017-paper0-day1-fixes, 체크아웃됨)** / **다음: ① 2일차 시작 대조가 어제 항목을 자동 종결하는지 확인 → K8·K4 재개 ② 2일차 결과 분석 ③ 개정 draft 문서별 승인**
+- 갱신: 2026-10-06 밤 / PAPER-0 1일차 분석·T-017 수정 완료(c63c444·23e42ba·f4d3993), 텔레그램 M-2~4·검증 전략 v2(코드·백테스트) / **다음: ① 2일차 아침 K8·K4 재개 ② 09:35 보유 0건이면 /kill ③ 저녁 v2 전환(사본 시험 완료) ④ CP-025·개정 draft 승인**
 - 브랜치(로컬만, push 없음): 현재 체크아웃 **`feat/T-017-paper0-day1-fixes`** = main(4e502a5) + T-017 수정 + docs/m2-binance-design 병합. **PAPER-0 2일차는 이 브랜치로 실행.** main 병합은 사용자 지시 시
 - 테스트 `.venv\Scripts\python -m pytest -q` → 1006 passed(2026-10-05, 807초). 빠른 확인은 `--ignore=tests/scenario/test_run_rehearsal.py --ignore=tests/scenario/test_run_rehearsal2.py`
 - 승인본: 업무정의서 v0.6, 00 v0.4, 01 v0.8, 02 v0.7, 03 v0.9, 04 v0.8, 05 v0.5. **마지막 기록 A-065**(A-062~A-065는 M2 설계 결정 — 문서 승인 아님). 실전 주문 코드·LIVE 승인 없음.
@@ -16,6 +16,9 @@
 - 어제 K4가 걸린 채 끝났고 005930 1주 보유. 아침 run 시작 대조에서 어제 MISSING_FILL 항목이 자동 종결(AUTO_MATCHED)되어야 한다 → `status`에서 열린 대조 불일치 0건 확인 → `resume.py --mode PAPER K8`, `resume.py --mode PAPER K4`.
 - 보유 1주라 09:30에는 EXIT(매도)가 나가고 ENTRY는 안 나감, 14:30에는 ENTRY(매수)가 나가 밤새 보유 — 매매 시각이 하루 밀린 상태. 그대로 두어도 인프라 검증에는 문제없음(익일 보유·재시작 대조도 검증됨). 원래 순서로 돌리려면 14:30 전 `/kill`(K1) → 다음 날 아침 `resume.py K1`.
 - 관찰: 매도 체결 뒤 K4가 다시 안 걸리는지(수정 확인), VI 경고가 사라졌는지, 07:50~09:00 서버 구간.
+- 저녁 v2 전환(보유 0건일 때만): Ctrl+C → 에이전트가 config/app.paper.toml 전략 3줄을 v2로(module `Paper0VerifyV2`, params `paper0-verify-v2.toml`, verification_approval `A-067`) → 사용자: `strategy.py register --mode PAPER` → `transition --mode PAPER paper0-verify 2 BACKTEST_PASSED --approval A-067 --evidence docs/strategies/paper0-verify/backtest-v2.md` → `transition ... 2 PAPER --approval A-067` → `transition ... 1 STOPPED --stop-reason REPLACE --approval A-067`. 사본 저장소로 사전 시험 성공(2026-10-06). 전환 뒤 status에 K9(paper0-verify:1) 1건 남는 것은 정상.
+- 확인 필요(사용자): 키움 앱 체결 내역의 1일차 매수 수수료(실측 추정 약 970원 = 0.35%, 설정 0.015%), CP-025 Q-5~Q-9, 07-paper-review 판단 필요 1~5.
+- 정리(사용자): `var/backtest/paper0-verify-v2-20261006*` 4개 폴더(중단된 실행, 근거로 쓰지 않음).
 
 ## M1 현재 상태
 - 6단계 구현, M1(국내주식, 키움 모의). 완료 T-000~T-015·T-020·T-021, T-016(PAPER-0) 시작 조건 충족. 전략 paper0-verify v1 = PAPER(005930 1주, 09:30 매수·14:30 매도, 시장가).
