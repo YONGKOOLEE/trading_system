@@ -1,27 +1,39 @@
 # 세션 인계 (짧게 유지 — 작업이 끝날 때마다 덮어쓴다)
 
-- 갱신: 2026-10-07 밤 / PAPER-0 2일차 정상(F-1·F-3 수정 실측 확인), **main 병합 완료**(A-075), v2 전환 완료(사용자 명령 4개), 일봉 30종목 수집 / **다음: ① 3일차(10-08) 결과 분석 ② 추세추종 30종목 백테스트 결과 보고(진행 중, 브랜치 feat/T-018-multi-backtest) ③ CP-028(P1~P4) 구현(승인 A-074, 병합 뒤 착수 조건 충족) ④ 아래 "결정 필요" ⑤ 문서 승인 묶음**
-- **체크아웃: `main`** (HEAD acb839b 이후). PAPER는 이제 main으로 실행. 병합된 것: T-017 수정·시험 보충·개선(status KST, 텔레그램 스레드 감시), T-022 원격 운영(CP-026), T-023 시세 기록(CP-027), T-018 trend-sma 초안·fetch-daily, VI 영문 코드 무시·PAPER 수수료 0.35%(639f531), 배포 설정 v2(acb839b). 전체 시험 1182 passed. push 없음.
-- 별도 유지(미병합): M2 `feat/T-M2-01-min-e2e`(worktree m2-binance, 1919a8a), `feat/T-M2-10-adapter`(m2-adapter, 2a9f9ba). 정리 가능한 worktree: remote-ops, t017-tests, t017-followups, t018-trend, t018-data, t023-mdlog, merge-dryrun(tmp/merge-dryrun) — 병합 끝, 삭제는 사용자 확인 뒤.
-- 승인본(게이트): 업무정의서 v0.6, 00 v0.4, 01 v0.8, 02 v0.7, 03 v0.9, 04 v0.8, 05 v0.5. **마지막 기록 A-076.** 운영 카드(3일차): https://claude.ai/artifact/XXZrAhidXPAFo1hUDRgVdw 실전 주문 코드·LIVE 승인 없음.
-
-## 결정 필요
-1. V-180: v1 보유 중 v2 교체를 시스템이 거부·경고할지, 교체 뒤 v1 소유 보유 정리 경로(01 K9 "교체: v1 감액·청산 허용"과 차이).
-2. CP-027 호가 단위: 시세 모를 때 코드는 사건 가격 기준으로 채움, CP C-3은 빈 값 — 문서를 코드에 맞출지(측정 영향 없음).
-3. M2 어댑터 [제안] 6건(우선순위 예산 비율, 429 기본 60초, MARKET_LOT_SIZE 0 대체, isSpotTradingAllowed=false → HALTED, WS 23시간 교체, 실패 주문 weight 1).
-4. 추세추종: 파라미터·진입 방식·추적 손절·운용 규모(L7·L2·L3) — 30종목 백테스트 보고 뒤.
-5. 장외 시세 조회(19:43 ka10001 HTTP 302) 줄이기 — 개선 후보.
+- 갱신: 2026-10-08 새벽 / **3일차(10-08)는 "보는 자동 운영"**(A-080 중간안): 사용자가 06:45에 autopilot 1회 직접 실행·화면 확인. main = CP-028(운영 복원력)·CP-029(자동 운영, 대화 지시 실행 A-079) 병합 완료. 마지막 기록 **A-080**. 운영 카드: https://claude.ai/artifact/XXZrAhidXPAFo1hUDRgVdw
+- **체크아웃 `main`** (HEAD f639b9c 이후: T-025 자동 운영 c17651e, trend-sma 30종목 백테스트 보고서 f639b9c). 전체 시험: autopilot 브랜치 1252 passed, 병합 main 결과는 worklog (38). push 없음.
+- 별도 브랜치(미병합): M2 `feat/T-M2-01-min-e2e`(1919a8a), `feat/T-M2-10-adapter`(2a9f9ba), `feat/T-M2-02-03`(3a2164d). worktree: m2-binance, m2-adapter, m2-next, cp028, autopilot, t018-multi(모두 병합 끝난 것은 cp028·autopilot·t018-multi — 정리는 사용자 확인 뒤).
+- 어젯밤 대화 지시(A-079) 첫 사용: `resume.py --mode PAPER K1` 기록(local-b53ec44e…) — 3일차 run 시작 때 처리돼 K1 해제 → 자동 운영이 K8 자동 재개.
+- 실전 주문 코드·LIVE 승인 없음. 게이트 변경 없음(01~05·업무정의서·00은 draft, 검토 요약 docs/changes/draft-bundle-review-2026-10-07.md).
 
 ## 다음 세션 첫 행동
 1. `git status`(main)·이 파일·`docs/approvals.md` 끝 3행·`docs/worklog.md` 마지막 항목 확인.
-2. "3일차 끝"이면: `docs/strategies/paper0-verify/day2-analysis.md` 조회(날짜만 2026-10-08로)·status·paper-review(이제 슬리피지·조회 주기 포함)로 분석 → 07-paper-review 3일차. **확인할 것**: 시작 때 STRATEGY_SYNC 3건 처리·K9(paper0-verify:1) 1건, K8·K1 재개, 09:30 v2 매수·14:30 v2 매도, 시세 기록(quote_snapshot) 행 생성, VI 영문 코드 경고 0건, 07:53 K5 재현 여부, 원격 명령 사용 여부.
-3. 사용자는 터미널 명령에 익숙하지 않다 — 실행 안내는 **복사해 붙일 전체 명령**, 용어는 풀어서.
+2. 사용자가 아침 자동 운영 결과(텔레그램·창 출력)를 주면 확인: "시작 점검 통과, run 시작" → K9(REPLACE) 경고 → K1 해제 → "K8 자동 재개 완료". 문제면 `var\paper\logs\autopilot-20261008.log`·`run-console-20261008.log`·`status`로 원인 파악. 출발 시간이 급하면 수동 절차(카드 PC 명령)로 돌리게 안내.
+3. 장중: 원격 접속으로 `/review` 결과를 받으면 확인(09:35 보유 1, 14:35 보유 0이 정상 — v2).
+4. 16시 전후 일일 요약 확인 뒤 3일차 분석: day2-analysis.md 조회(날짜 2026-10-08)·paper-review(슬리피지·조회 주기 첫 측정, 수수료 0.35% 추정 vs 키움 앱)·07-paper-review 3일차·autopilot 첫 모의 서버 실행 결과(V-212). 확인할 것: STRATEGY_SYNC 3건·K9, K1→K8 자동 재개 시각, v2 09:30 매수·14:30 매도, quote_snapshot 행, VI 영문 코드 경고 0건, 07:53 K5와 CP-028 P4 장 전 재대조로 09:00 전 해제되는지, 15:45 종료 절차·백업·요약.
+5. 성공이면 사용자에게 예약 등록 안내(관리자 PowerShell, pv-procedure §3.5) → 10-12(월)부터 무인. 10-09는 한글날 휴장.
+6. 사용자는 터미널 명령에 익숙하지 않다 — 실행 안내는 **복사해 붙일 전체 명령**, 용어는 풀어서. "실전"은 LIVE에만 쓴다(모의 서버 실행은 "모의 서버 실행").
 
-## 3일차(2026-10-08) 사용자 절차 — 운영 카드에 안내
-- 06:43 시간 동기화 → `preflight` → `run` → 두 번째 창 `status` → `resume.py --mode PAPER K8`, `resume.py --mode PAPER K1` → `status`(K9 1건만 남으면 정상).
-- 09:35 `/review`: 보유 1건 정상(v2 매수). 14:35 `/review`: 보유 0건 정상. **/kill 보내지 않음.**
-- 장중 K4·K8 → 텔레그램 `/resume K4|K8` → `/confirm 코드`(새 대조 일치 시만).
-- 저녁: 키움 앱 → `status` → `paper-review` → `backup` → Ctrl+C → "3일차 끝".
+## 3일차(2026-10-08) 아침 사용자 절차 — 안내 완료
+1. PC 켜고 로그인 → VS Code 열기.
+2. 06:43 시간 동기화(설정 → 시간 및 언어 → 날짜 및 시간 → "지금 동기화") — 예약 작업 미등록이라 손으로.
+3. 06:45 PowerShell 창 하나(15:45 이후 끝날 때까지 닫지 않음):
+   ```
+   cd C:\AI\trading_system\trading_system
+   $env:TRADE_MODE='PAPER'
+   .venv\Scripts\python scripts\autopilot.py --mode PAPER
+   ```
+4. 텔레그램 "시작 점검 통과, run 시작" → "정지 K9 발동(REPLACE)"(정상) → "K8 자동 재개 완료"(K1 먼저 해제, 5분 안팎) 확인 뒤 출발.
+5. 출발 전 VS Code 대화창 `/remote-control` → 회사에서 claude.ai/code 또는 Claude 앱 Code 탭.
+6. 09:35·14:35 텔레그램 `/review`. 16시 전후 "일일 요약"이 오면 끝(paper-review·백업·종료 자동). 퇴근 후 키움 앱 체결·잔고만 확인해 알려 준다.
+- 이상: 06:50까지 "run 시작" 없음 → 창 메시지를 원격으로 보냄. 급하면 Ctrl+C로 끄고 수동 절차.
+
+## 결정 필요 (급하지 않음)
+1. 전략은 뒤로(사용자 2026-10-08: 지금은 시스템 검증·사용법 우선). 보존: trend-sma 초안·30종목 백테스트(docs/strategies/trend-sma/backtest-v1-multi.md), 스크리닝 아이디어(전 종목 대상, 거래 가능 필터 → 추세 판정 → 상대강도 순위, 보유 20) — 전략 착수 때 Q1~Q5로.
+2. 시스템 과제 목록에 추가: 동적 유니버스, 다종목 동시 운영(보유 20), 정정 주문(CAP-ORD-03), 지정가·호가 단위(X-U1), 게이트 L1(시장가 상한가 기준)과 전략 위험 계산 정합.
+3. M2 [제안] 12건(T-M2-02·03 6건, 어댑터 6건), CP-027 호가 단위 문서·코드 차이, V-180 보유 중 교체 처리.
+4. 문서 승인 묶음(CP-025 먼저 — 코드는 main에 있음).
+5. 사용 설명서(평소·이상 시·원격·전략 변경·끄고 켜기) — 자동 운영 첫 실행 결과 반영 뒤 작성.
 
 ## 진행 중 결정·작업
 ### 원격 운영 (사용자 요청 2026-10-06 — 회사에서 장중 조치 불가)
