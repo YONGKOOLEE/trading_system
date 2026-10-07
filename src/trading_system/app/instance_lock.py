@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import IO
 
 LOCK_NAME = "run.lock"
+AUTOPILOT_LOCK = "autopilot.lock"   # PAPER 무인 자동 운영(app/autopilot.py)의 단일 실행 (CP-029)
 
 
 class InstanceLocked(RuntimeError):
@@ -54,10 +55,11 @@ class InstanceLock:
             self._f = None
 
 
-def acquire_instance_lock(base: Path) -> InstanceLock:
-    """잠금을 잡는다. 다른 프로세스(또는 같은 프로세스의 다른 핸들)가 잡고 있으면 InstanceLocked."""
+def acquire_instance_lock(base: Path, name: str = LOCK_NAME) -> InstanceLock:
+    """잠금을 잡는다. 다른 프로세스(또는 같은 프로세스의 다른 핸들)가 잡고 있으면 InstanceLocked.
+    name: 잠금 파일 이름 (기본 run.lock = 엔진, autopilot.lock = 자동 운영)."""
     base.mkdir(parents=True, exist_ok=True)
-    path = base / LOCK_NAME
+    path = base / name
     f = open(path, "a+b")  # noqa: SIM115 — 프로세스 수명 동안 열어 둔다
     try:
         _lock(f)
@@ -78,4 +80,4 @@ def instance_running(base: Path) -> bool:
     return False
 
 
-__all__ = ["InstanceLock", "InstanceLocked", "acquire_instance_lock", "instance_running", "LOCK_NAME"]
+__all__ = ["InstanceLock", "InstanceLocked", "acquire_instance_lock", "instance_running", "LOCK_NAME", "AUTOPILOT_LOCK"]

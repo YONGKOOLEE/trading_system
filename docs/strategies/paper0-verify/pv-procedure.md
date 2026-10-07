@@ -2,6 +2,7 @@
 
 - 버전 v0.5 (2026-10-07, draft — [CP-026](../../changes/CP-026-remote-ops.md)(CP 승인 A-070) 반영: §3.2·§3.3·§3.4에 원격 K4·K8 재개(`/resume K4|K8` → `/confirm`), `/reconcile`, `/review` 원격 대안 추가. **원격 대안은 T-022 병합 후 적용** — 병합 전(현재 PAPER 실행 브랜치 `feat/T-017-paper0-day1-fixes`)에는 기존 로컬 절차만 유효하다. 이전 v0.4 (2026-10-06): §3.4 1일차 이후 운영(K4 재개, 매매 순서 복구, v2 전환) 추가. 이전 v0.3: §3.1 예수금 자동 기록·수동 주문, §3.2 무인 운영, §3.3 텔레그램) — 사용자가 따라 실행하고, 결과는 에이전트가 `docs/broker-specs/kiwoom-kr.md`에 "② 모의 실측, 일자"로 기록한다.
 - **모의 주문 실행은 사용자가 한다(D-086).** 에이전트는 실행 명령을 돌리지 않는다. 실전 계좌·LIVE는 범위 밖.
+- [CP-029 draft, 2026-10-07] §3.5 무인 자동 운영 초안 추가(D-086 PAPER 예외 — 사용자가 등록한 예약 작업이 실행). CP-029 승인·병합·사용자 등록 전에는 효력 없음.
 - 목적: 인프라 검증(주문·체결·통보·대조·정지). 수익 목적 아님.
 
 ## 1. 시작 전 체크리스트
@@ -142,6 +143,59 @@ cd C:\AI\trading_system\trading_system
 - 07:50~09:00 사이 키움 모의 서버가 연결을 끊고 일부 조회가 실패할 수 있다(K5, 자동 해제). 09:30 판정 전에 풀렸는지 09:35 `/status`로 본다.
 - 대조 불일치 알림은 이제 새 항목일 때만 긴급, 이후 60분마다 경고 1건이다. 경고가 계속 오면 K4가 아직 걸려 있다는 뜻이다.
 - [CP-026, T-022 병합 후 적용] 장중 K4 알림을 받으면 `/review`로 열린 불일치 유형을 보고, 항목이 자동 종결돼 불일치가 0건이 된 뒤에 `/resume K4` → `/confirm <코드>`를 시도할 수 있다. `/reconcile`을 반복하면 키움 조회 호출이 늘어나므로 필요할 때만 쓴다.
+
+### 3.5 무인 자동 운영 (초안 — [CP-029](../../changes/CP-029-paper-autopilot.md) draft, A-078)
+**효력 조건: CP-029 승인 + 브랜치 `feat/T-025-paper-autopilot` 병합 + 사용자가 아래 등록을 실행한 뒤.** 그 전에는 §3·§3.2의 수동 절차만 유효하다. 첫 자동 운영일 예정: 2026-10-12(월). M1 PAPER 전용 — LIVE는 자동화하지 않는다(자동 운영은 `--mode PAPER` 외에는 거부).
+
+하루 흐름(평일, 휴장일은 텔레그램 "휴장일 — 자동 운영 쉼" 1줄 뒤 끝):
+| 시각 | 자동 운영이 하는 일 |
+|---|---|
+| 06:40 | 시계 동기화(`w32tm /resync`, 별도 작업) |
+| 06:45 | 시작 점검(preflight) → 통과하면 run 시작(창 없음) → 텔레그램 "시작 점검 통과, run 시작" |
+| 06:46~08:55 | K8 자동 재개: 새 대조 + 복구 조건 1~5(원격 `/resume K8`과 같은 기준). 거부되면 5분마다 재시도. 완료 시 "K8 자동 재개 완료" |
+| 장중 | run 생존·하트비트 감시(멈추면 긴급 알림, 자동 재시작 없음) |
+| 15:45 | 마감 대조 확인 → 정지 요청 파일로 run 정상 종료(Ctrl+C와 같은 순서) → paper-review → 백업 → 텔레그램 일일 요약 |
+
+**1회 등록 (사용자, 관리자 권한 PowerShell)** — 시작 메뉴에서 "Windows PowerShell"을 오른쪽 클릭 → "관리자 권한으로 실행" 후:
+```
+cd C:\AI\trading_system\trading_system
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\schedule-register.ps1
+```
+기대 결과: "등록 완료", 작업 2개(`TradingSystem-PAPER-ClockSync`, `TradingSystem-PAPER-Autopilot`)가 `Ready`, 다음 실행 시각이 다음 평일 06:40·06:45로 나온다. 이미 등록돼 있으면 "이미 등록된 작업"으로 멈추고 아무것도 바꾸지 않는다.
+- 전제: **루트 `.env`에 `TRADE_MODE=PAPER` 한 줄**(사용자가 직접 확인·수정 — 작업 스케줄러에는 환경 변수가 없어 자동 운영이 이 줄로 모드를 확인하고, PAPER가 아니면 시작을 거부한다). `config\app.paper.toml`의 `[telegram] enabled = true`와 `.env.paper`의 텔레그램 두 줄(§3.3). 꺼져 있으면 자동 운영이 시작을 거부한다(알릴 수단이 없으므로).
+- PC는 켜 두고 로그인 상태를 유지한다(화면 잠금은 괜찮음, 로그아웃·재부팅 뒤 로그인 전에는 실행되지 않음). 절전·최대 절전·업데이트 재시작은 §3.1처럼 꺼 둔다.
+- 등록 확인만: `Get-ScheduledTask -TaskName 'TradingSystem-PAPER-*' | Format-Table TaskName, State` (관리자 아니어도 됨)
+
+**해제 (자동 운영을 그만둘 때, 관리자 권한 PowerShell)**:
+```
+cd C:\AI\trading_system\trading_system
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\schedule-unregister.ps1
+```
+기대 결과: 두 작업 "해제", "남은 TradingSystem-PAPER- 작업: 0개". 오늘 이미 돌고 있는 run은 멈추지 않는다(아래 "오늘 run 끝내기").
+
+**매일 볼 것 (텔레그램)**
+1. 06:50 전후 "시작 점검 통과, run 시작" — **안 오면 이상**: 자동 운영이 설정 오류로 시작하지 못했을 수 있다(그 경우 텔레그램을 못 쓰므로 로그에만 남음). 퇴근 후 `var\paper\logs\autopilot-YYYYMMDD.log`를 본다. 그날은 매매 없음(위험 아님).
+2. "K8 자동 재개 완료" — 09:25까지 안 오고 "K8 자동 재개 실패"·"사람 확인 정지 K…"가 왔으면 사유를 본다. 원하면 `/resume K8`(또는 `/resume K4`) → `/confirm <코드>`로 직접 풀 수 있다(§3.3). 08:55 "자동 재개 못 함 — 오늘 매매 없음"이 오면 자동 재시도는 끝났다.
+3. 09:35·14:35 `/status`(§3.2 무인 운영 주의와 같음).
+4. 16:00~16:30 "일일 요약" — 체결·정지·대조·실현 손익(기준 대비 %)·슬리피지(틱)·"확인 필요" 줄. **요약이 안 오면** 자동 운영이 도중에 멈춘 것이다 → 퇴근 후 `status`로 run이 아직 도는지 보고, 돌고 있으면 아래 "오늘 run 끝내기".
+- 긴급 알림 "run 프로세스가 종료됨"·"하트비트 멈춤"·"정지 요청 뒤 run이 끝나지 않음"은 퇴근 후 PC에서 `status`·`var\paper\logs\fatal.log`·`run-console-YYYYMMDD.log`를 확인한다(자동 재시작 없음).
+- 퇴근 후: 키움 앱 체결·잔고와 요약 대조(§3 5번), `var\paper\review\`의 오늘 집계 확인. paper-review·백업은 자동 운영이 이미 했다.
+
+**에이전트가 대화 지시로 실행할 수 있는 명령 (A-079, CP-029 D-159 — CP-029 효력 뒤, M1 PAPER만)**
+사용자가 대화로 명시적으로 지시한 경우에만 실행하고, 명령과 출력을 그대로 보고한다.
+| 지시 | 명령 (저장소 폴더) |
+|---|---|
+| 시작 | `.venv\Scripts\python scripts\autopilot.py --mode PAPER` (잠금·모드 검사 그대로, 수동 run이 켜져 있으면 거부) |
+| 정지 | `.venv\Scripts\python scripts\ops-stop.py --mode PAPER` |
+| 정지 재개 명령 기록 | `.venv\Scripts\python scripts\resume.py --mode PAPER K8` (K4·K1 등도 같은 형식 — 재개 판정은 시스템 기준 그대로) |
+| 조회·집계 | `scripts\status.py --mode PAPER`, `scripts\paper-review.py --mode PAPER`, `scripts\backup.py --mode PAPER` |
+- 하지 않는 것: LIVE 일체, 실전 주문, 불일치 해소 방법 선택(`reconcile-resolve` 방법은 사용자 판단), 결과 불명 확정, KILL 파일 삭제, 지시 없는 재개·시작·정지, 예약 작업 등록·해제.
+
+**수동으로 되돌리기**
+- 오늘 run 끝내기(창이 없으므로 Ctrl+C 대신): `.venv\Scripts\python scripts\ops-stop.py --mode PAPER` (저장소 폴더에서, 기대 결과 "정지 요청 파일 작성" → "run 종료 확인"). 같은 효과의 직접 방법: `New-Item -ItemType File -Force .\var\paper\STOP`. run이 Ctrl+C와 같은 순서로 끝나고, 자동 운영은 그것을 보고 paper-review·백업·요약 뒤 끝난다. 수동 run에서도 같은 파일로 끝낼 수 있다.
+- 긴급 정지는 종전과 같다: 텔레그램 `/kill` 또는 `kill.py`(K1, 자동 운영은 K1을 풀지 않는다).
+- 하루만 수동으로: 그날 06:45 전에 수동 `run`을 켜 두면 자동 운영은 "run이 이미 실행 중"으로 아무것도 하지 않는다. 또는 작업 스케줄러에서 `TradingSystem-PAPER-Autopilot`을 "사용 안 함"으로.
+- 완전히 되돌리기: 위 해제 명령 → §3·§3.2 수동 절차.
 
 ## 4. PV 항목별 방법
 | PV | 방법 | 누가 | 비고 |

@@ -1,4 +1,6 @@
 """`python -m trading_system.app` 진입점 (T-020, DP-23). 사람이 직접 실행한다. 자동 실행 등록은 하지 않는다.
+[CP-029 draft] 예외: PAPER 무인 자동 운영(app/autopilot.py)이 이 run을 자식 프로세스로 시작하고, 정지 요청 파일
+var/<mode>/STOP으로 정상 종료시킨다(Ctrl+C와 같은 경로). LIVE는 자동 시작 대상이 아니다.
 
   run       TRADE_MODE(환경 변수 → .env 한 줄)로 모드를 정해 엔진을 돌린다. 값이 없거나 틀리면 연결 없이 종료.
             LIVE는 거부(실전 경로 없음). PAPER는 config/app.paper.toml의 [paper] connection_approved = true
@@ -58,6 +60,21 @@ def record_fatal(path: Path, exc: BaseException) -> None:
 
 
 REQUERY_WAIT_SECONDS = 2.0   # 대조 불일치 재조회 전 대기 — 체결 통보 지연 확인 (01 장애 정책, 임시값 DP-37)
+STOP_REQUEST = "STOP"        # var/<mode>/STOP — 정상 종료 요청 파일 (CP-029 D-155, 무인 실행에는 Ctrl+C를 보낼 창이 없음)
+
+
+def take_stop_request(base: Path) -> bool:
+    """정지 요청 파일이 있으면 지우고 True. 판정·실행 스레드가 tick 사이에 본다 — Ctrl+C(SIGINT → stop 이벤트)와 같은
+    종료 경로(루프 종료 → 스레드 join → 닫기 → 저장소 닫기 → 잠금 해제)를 탄다. 진행 중 tick(주문 전송 포함)은 끝까지 한다.
+    지우기에 실패해도(다른 프로세스가 열고 있음 등) 요청은 따른다."""
+    path = base / STOP_REQUEST
+    if not path.exists():
+        return False
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    return True
 
 
 def start_summary(engine: Engine, rep) -> str:  # type: ignore[no-untyped-def]
@@ -191,6 +208,8 @@ def run_main(root: Path, environ: dict[str, str] | None = None, max_seconds: flo
     except InstanceLocked as exc:
         print(f"시작 거부(브로커 연결 없음): {exc}")
         return 2
+    if take_stop_request(base):   # 이전 실행 뒤 남은 요청 — 새 실행을 바로 멈추지 않게 지운다 (잠금을 잡은 뒤라 경합 없음)
+        print(f"이전 정지 요청 파일을 지움: {base / STOP_REQUEST}")
     fatal_log = base / "logs" / "fatal.log"
     prev_hook = threading.excepthook
 
@@ -270,6 +289,10 @@ def _run(root: Path, mode: Mode, base: Path, startup, app: AppSettings, gate_set
         started = time.monotonic()
         while not stop.is_set():
             engine.tick()
+            if take_stop_request(base):   # 정지 요청 파일 = Ctrl+C와 같은 종료 경로 (CP-029 D-155)
+                print("정지 요청 파일 확인 — 정상 종료 (Ctrl+C와 같은 순서)")
+                stop.set()
+                break
             if max_seconds is not None and time.monotonic() - started > max_seconds:
                 break
             stop.wait(float(app.loop_seconds))
@@ -430,4 +453,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     return run_main(root)
 
 
-__all__ = ["main", "run_main", "backtest_main", "load_daily_csv", "parse_trade_mode"]
+__all__ = ["main", "run_main", "backtest_main", "load_daily_csv", "parse_trade_mode", "STOP_REQUEST",
+           "take_stop_request"]
