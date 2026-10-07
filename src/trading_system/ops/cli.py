@@ -183,7 +183,7 @@ def status_main(argv: Sequence[str] | None = None, *, clock: Clock | None = None
         print(f"해제되지 않은 정지: {len(halts)}건")
         for h in halts:
             print(f"  {h['halt_type']} {h['state']} 계좌={h['account'] or '전체'} 종목={h['scope_instrument'] or '-'} "
-                  f"전략={h['scope_owner'] or '-'} 발동={h['created_at']} 사유={h['reason']}")
+                  f"전략={h['scope_owner'] or '-'} 발동={_kst(h['created_at'])} 사유={h['reason']}")
         pending = repo.pending_commands()
         print(f"처리 대기 명령: {len(pending)}건")
         items = repo.open_recon_items(ns.account)
