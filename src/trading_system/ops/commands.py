@@ -4,6 +4,7 @@
 - 운영 요청은 취소·감액·청산만 (신규 진입·증액 불가, R-21). 요청은 반드시 게이트를 거친다.
 - 원격 채널: 킬 스위치 발동·K1/K2 재개·취소·감액·청산·대조. K4/K8 재개는 명령 처리 중 새 대조를 거쳐서만 (CP-026).
   결과 불명 확정·불일치 해소는 로컬만.
+- 자동 운영 채널(AUTO, PAPER 무인 자동 운영 CP-029): K8 재개만. 원격 K8과 같은 새 대조 기준 + 명령의 시한(not_after).
 - 원격 인증(허용 채팅 ID·확인 코드)은 T-013. 이 처리기는 기록된 채널 값을 믿는다.
 """
 
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import Protocol
 from decimal import Decimal, InvalidOperation
 
-from trading_system.domain.clock import Clock
+from trading_system.domain.clock import Clock, from_iso
 from trading_system.domain.enums import GateResult, HaltType, OrderType, RequestSource, RequestType, Side
 from trading_system.domain.halts import REMOTE_FRESH_RECONCILE
 from trading_system.domain.models import GateRequest
@@ -26,6 +27,7 @@ from trading_system.storage.repository import Repository
 
 LOCAL_ONLY = frozenset({"CONFIRM_UNKNOWN", "RECONCILE_RESOLVE", "STRATEGY_SYNC"})
 REMOTE_RESUME_TRIGGER = "REMOTE_RESUME"   # 원격 K4·K8 재개 직전 대조의 사유 (CP-026)
+AUTO_RESUME_TRIGGER = "AUTO_RESUME"       # 자동 운영 K8 재개 직전 대조의 사유 (CP-029 D-152) — 감사에서 원격과 구분
 SUPERSEDED_BY_KILL = "뒤이은 KILL 명령이 있어 K1 재개 거부 (사용자의 마지막 의사 = KILL)"
 KNOWN = frozenset({"KILL", "RESUME", "CANCEL", "REDUCE", "EXIT", "CONFIRM_UNKNOWN", "RECONCILE", "RECONCILE_RESOLVE",
                    "STRATEGY_SYNC"})
@@ -123,8 +125,11 @@ class OpsProcessor:
             args = json.loads(cmd["args"])
             if name not in KNOWN:
                 raise CommandError(f"알 수 없는 명령 {name}")
-            if channel not in (Channel.LOCAL, Channel.REMOTE):
+            if channel not in (Channel.LOCAL, Channel.REMOTE, Channel.AUTO):
                 raise CommandError(f"알 수 없는 채널 {channel}")
+            if channel == Channel.AUTO and not (name == "RESUME" and isinstance(args, dict)
+                                                and args.get("halt_type") == HaltType.K8.value):
+                raise CommandError("자동 운영 채널(AUTO)은 K8 재개만 할 수 있음 (CP-029)")
             if name in LOCAL_ONLY and channel != Channel.LOCAL:
                 raise CommandError(f"{name}은 로컬에서만 가능")
             status, result = self._dispatch(cid, channel, actor, name, args, cmd.get("created_seq"))
@@ -154,13 +159,22 @@ class OpsProcessor:
         if name == "RESUME":
             halt_type = HaltType(args["halt_type"])
             fresh = None
-            if channel == Channel.REMOTE and halt_type in REMOTE_FRESH_RECONCILE:
-                fresh, refused = self._fresh_reconcile(account)
+            if channel == Channel.AUTO:
+                expired = self._auto_expired(args)   # 시한이 지난 자동 재개는 대조도 하지 않고 거부 (CP-029 D-153)
+                if expired:
+                    return "REJECTED", expired
+            if channel in (Channel.REMOTE, Channel.AUTO) and halt_type in REMOTE_FRESH_RECONCILE:
+                trigger = AUTO_RESUME_TRIGGER if channel == Channel.AUTO else REMOTE_RESUME_TRIGGER
+                fresh, refused = self._fresh_reconcile(account, trigger)
                 if refused:
                     return "REJECTED", refused
             # 대기 명령을 읽은 뒤 들어온 KILL(감시 스레드 fast_kill은 기존 K1을 보고 행을 남기지 않음)도 RESUME 적용
             # 저장 단위 안에서 다시 확인한다 — 풀린 K1로 같은 tick에 신규 진입이 나가지 않게 (3차 검토 #2)
             check = (lambda: self._later_kill(seq)) if halt_type is HaltType.K1 and seq is not None else None
+            if channel == Channel.AUTO:
+                # 새 대조가 오래 걸려 시한을 넘겼으면 재개 저장 단위 안에서 거부 — 자동 운영이 "08:55 시한 경과"를
+                # 알린 뒤 K8이 풀리지 않게 (CP-029 재검토 M2)
+                check = lambda: self._auto_expired(args)  # noqa: E731
             r = self._halts.resume(halt_type, account, channel, actor, superseded=check, fresh_recon=fresh)
             note = r.reason
             if self._kill_file is not None and self._kill_file.exists():
@@ -193,14 +207,30 @@ class OpsProcessor:
         state = self._executor.submit(d.approved)
         return "DONE", f"의도 {d.approved.intent_id} {state.value}"
 
-    def _fresh_reconcile(self, account: str | None) -> tuple[str | None, str | None]:
-        """원격 K4·K8 재개 직전에 대조를 새로 한 번 한다 (A-069 ①②). (대조 ID, 거부 사유). 일치·열린 불일치 0건만 통과.
-        K8은 대조 뒤 엔진의 복구 판정(engine._after_reconcile)이 이 대조 ID로 recovery_ok를 보고해야 재개된다."""
+    def _auto_expired(self, args: dict) -> str | None:
+        """자동 운영 K8 재개의 시한(args.not_after, ISO 시각). 없거나 지났으면 거부 사유 (CP-029 D-153).
+        자동 운영이 08:55 시한 뒤 알림을 보낸 다음에, 늦게 처리된 명령이 K8을 푸는 일을 막는다."""
+        raw = args.get("not_after")
+        if not isinstance(raw, str):
+            return "자동 재개 명령에 시한(not_after)이 없음 — 처리하지 않음"
+        try:
+            limit = from_iso(raw)
+        except ValueError:
+            return "자동 재개 시한 형식 오류 — 처리하지 않음"
+        if self._clock.now() > limit:
+            return f"자동 재개 시한 경과({raw}) — 처리하지 않음"
+        return None
+
+    def _fresh_reconcile(self, account: str | None,
+                         trigger: str = REMOTE_RESUME_TRIGGER) -> tuple[str | None, str | None]:
+        """원격·자동 K4·K8 재개 직전에 대조를 새로 한 번 한다 (A-069 ①②, CP-029). (대조 ID, 거부 사유).
+        일치·열린 불일치 0건만 통과. K8은 대조 뒤 엔진의 복구 판정(engine._after_reconcile)이 이 대조 ID로
+        recovery_ok를 보고해야 재개된다."""
         if not account:
-            raise CommandError("원격 K4·K8 재개에는 계좌가 필요")
+            raise CommandError("원격·자동 K4·K8 재개에는 계좌가 필요")
         if self._reconciler is None:
             raise CommandError("대조기가 연결되지 않음")
-        r = self._reconciler.run(account, REMOTE_RESUME_TRIGGER)
+        r = self._reconciler.run(account, trigger)
         result, rid = getattr(r, "result", None), getattr(r, "recon_id", None)
         open_items = len(self._repo.open_recon_items(account))
         if result != "MATCH" or open_items or not rid:

@@ -18,8 +18,8 @@ from decimal import Decimal
 
 from trading_system.domain.clock import Clock, from_iso, next_kst_time_after
 from trading_system.domain.enums import GateResult, HaltType, IntentState, RequestSource, Side
-from trading_system.domain.halts import (AUTO_RELEASE, CANCELS_OPEN_BUYS, EMERGENCY, REMOTE_FRESH_RECONCILE,
-                                         REMOTE_RESUMABLE, HaltState)
+from trading_system.domain.halts import (AUTO_RELEASE, AUTO_RESUMABLE, CANCELS_OPEN_BUYS, EMERGENCY,
+                                         REMOTE_FRESH_RECONCILE, REMOTE_RESUMABLE, HaltState)
 from trading_system.domain.market import DailyRisk
 from trading_system.domain.models import GateRequest
 from trading_system.execution.executor import ExecutionBlocked, Executor
@@ -61,6 +61,8 @@ _K5_LINK_OF_ACTOR = {"realtime": K5_LINK_REALTIME, "thread": K5_LINK_THREAD}   #
 class Channel:
     LOCAL = "LOCAL"
     REMOTE = "REMOTE"
+    # PAPER 무인 자동 운영(app/autopilot.py, CP-029 D-152). K8 재개만, 원격 K8과 같은 새 대조 기준. 감사에서 구분된다
+    AUTO = "AUTO"
 
 
 @dataclass(frozen=True)
@@ -273,8 +275,11 @@ class HaltManager:
                 result = ResumeResult(True, result.reason, tuple(r["halt_id"] for r in rows))
             self._repo.audit(now, "HALT_RESUME", actor, halt_type.value, {
                 "account": account, "channel": channel, "ok": result.ok, "reason": result.reason})
-            self._alert("INFO" if result.ok else "WARNING",
-                        f"정지 {halt_type.value} 재개 {'완료' if result.ok else '거부'}: {result.reason}", None)
+            if result.ok or channel != Channel.AUTO:
+                # 자동 운영의 재개 거부는 알림(텔레그램)으로 보내지 않는다 — 5분마다 재시도하므로 자동 운영이 첫 실패·시한만
+                # 묶어 알린다(CP-029 D-154). 감사 기록(HALT_RESUME)은 그대로 남는다
+                self._alert("INFO" if result.ok else "WARNING",
+                            f"정지 {halt_type.value} 재개 {'완료' if result.ok else '거부'}: {result.reason}", None)
         if result.ok:
             self._retry_after_release(f"재개 {halt_type.value}", auto=False)
         return result
@@ -313,6 +318,8 @@ class HaltManager:
 
     def _check_resume(self, halt_type: HaltType, rows: list[dict], channel: str,
                       fresh_recon: str | None = None) -> ResumeResult:
+        if channel == Channel.AUTO and halt_type not in AUTO_RESUMABLE:
+            return ResumeResult(False, f"자동 운영은 K8만 재개한다 — {halt_type.value}는 사람이 재개 (CP-029)")
         fresh_name = REMOTE_FRESH_RECONCILE.get(halt_type) if channel != Channel.LOCAL else None
         if channel != Channel.LOCAL and halt_type not in REMOTE_RESUMABLE and fresh_name is None:
             return ResumeResult(False, f"{halt_type.value}는 로컬에서만 재개할 수 있음 (01 §2.9)")

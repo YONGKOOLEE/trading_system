@@ -43,7 +43,7 @@ from trading_system.evaluation.runner import run_evaluation
 from trading_system.execution.executor import ExecutionBlocked, Executor
 from trading_system.execution.resolver import ResolveOutcome, ResolveProgress, UnknownResolver
 from trading_system.gate.gate import Gate
-from trading_system.halt.manager import K5_LINK_THREAD, HaltManager
+from trading_system.halt.manager import K5_LINK_REST, K5_LINK_THREAD, HaltManager
 from trading_system.marketdata.store import MarketDataStore
 from trading_system.monitoring.watchers import AlertWatcher, DailyRiskTracker
 from trading_system.ops.commands import OpsProcessor
@@ -95,6 +95,8 @@ class AccountState:
 EXEC_RETRY = timedelta(minutes=1)   # 실행 정책 취소가 게이트에 막혔을 때 재판정 간격 (6차 검토 F-3)
 BASE_RETRY_WINDOW = timedelta(minutes=10)   # 일일 기준 금액 실패 시 tick마다 재시도하는 기간 (재검토 F5, 임시값)
 BASE_SLOW_RETRY = timedelta(minutes=5)      # 그 뒤 재시도 간격 (재검토2 #3, 임시값)
+K5_RETRY_EVERY = timedelta(minutes=5)       # 장 밖 K5 대조 재시도 간격 (CP-028 D-150, A-074 Q-6 A — 값 변경은 사용자)
+K5_RETRY_MAX = 12                           # 장 밖 K5 대조 재시도 최대 횟수 (5분 × 12 = 1시간, CLAUDE.md §8-7 종료 조건)
 
 
 @dataclass
@@ -139,6 +141,7 @@ class Engine:
     last_progress: float = 0.0                   # 판정·실행 스레드 마지막 진행(단조 시각) — 감시 스레드가 읽음
     _fast_killed: set[str] = field(default_factory=set)
     _closed_reconciled: date | None = None       # 장 마감 후 1회 대조를 한 거래일 (RV-25)
+    _k5_retries: int = 0                         # 장 밖 K5 대조 재시도 횟수 (CP-028 D-150, 메모리 — 재시작 시 0)
     _last_cash_observed: tuple | None = None      # 직전 CASH_OBSERVED 값 (같은 값 반복 기록 방지)
     _report_at: datetime | None = None           # 마지막으로 지난 보고 시각 (RV-21)
 
@@ -403,18 +406,26 @@ class Engine:
 
     def _reconcile_if_due(self, now: datetime) -> None:
         """대조 주기 (01 "장중 주기 대조, 체결 통보 후, 장 마감 후 1회", RV-25): 주기 대조는 정규장 안에서만,
-        장 마감 뒤 한 번, 요청(재접속·체결 통보 후 등 request_reconcile)은 언제든."""
+        장 마감 뒤 한 번, 요청(재접속·체결 통보 후 등 request_reconcile)은 언제든.
+        장 밖에서 K5가 대조만 남았으면 5분 간격 최대 12회 재시도 (CP-028 D-150)."""
         requested = self._reconcile_requested.is_set()
         today = now.astimezone(KST).date()
         s = self.store.session(today)
         is_open = s is not None and s.is_open and s.regular_open is not None and s.regular_close is not None
         in_session = is_open and s.regular_open <= now <= s.regular_close  # type: ignore[union-attr,operator]
         after_close = is_open and now > s.regular_close  # type: ignore[union-attr,operator]
-        periodic = in_session and (self._last_reconcile is None or now - self._last_reconcile >= self.reconcile_every)
-        # 마감 후 1회 대조: 조회가 실패하면 완료로 치지 않고 대조 주기 간격으로 다시 (4차 검토 F-C)
-        closing = after_close and self._closed_reconciled != today and (
-            self._last_reconcile is None or now - self._last_reconcile >= self.reconcile_every)
-        if not (requested or periodic or closing):
+        interval_due = self._last_reconcile is None or now - self._last_reconcile >= self.reconcile_every
+        periodic = in_session and interval_due
+        # 마감 후 1회 대조(CLOSE): 그날 CLOSE를 아직 완료하지 않았으면 마감 뒤 첫 대조(요청 대조 포함)를 CLOSE로
+        # (CP-028 D-149 — 요청 대조가 CLOSE를 밀거나 소멸 주문을 PERIODIC으로 보아 오탐 K4를 내지 않게).
+        # 요청이 없으면 종전처럼 간격 조건. 조회가 실패하면 완료로 치지 않고 다음 대조를 다시 CLOSE로 (4차 검토 F-C)
+        closing = after_close and self._closed_reconciled != today and (requested or interval_due)
+        k5_retry = False
+        if in_session:
+            self._k5_retries = 0                      # 정규장: 정기 대조가 넘겨받는다 (D-150)
+        elif not (requested or closing):
+            k5_retry = self._k5_retry_due(now)
+        if not (requested or periodic or closing or k5_retry):
             return
         self._reconcile_requested.clear()
         self._last_reconcile = now
@@ -423,6 +434,39 @@ class Engine:
         result = self.reconciler.run(self.account, CLOSE_TRIGGER if closing else "PERIODIC")
         if closing and getattr(result, "result", None) != "QUERY_FAILED":
             self._closed_reconciled = today
+        if k5_retry:
+            self._k5_retries += 1
+            if self._k5_retries >= K5_RETRY_MAX and self._k5_awaits_reconcile():
+                self.alerts.alert("WARNING", f"장 밖 K5 대조 재시도 {K5_RETRY_MAX}회 실패 — 재시도 중단, "
+                                             f"정규장 정기 대조까지 K5 유지", None)
+
+    def _k5_retry_due(self, now: datetime) -> bool:
+        """장 밖 K5 대조 재시도 시점인지 (CP-028 D-150, A-074 Q-6 A). 대조 실행 시점만 정한다 — 해제 조건은 불변.
+
+        조건: 이 계좌 K5의 남은 해제 조건이 대조로 풀리는 것뿐(실시간·스레드 경로 정상, reconciled 미충족 —
+        조회 경로 link:rest 끊김은 대조 성공이 풀므로 허용, 보완 A-076) + 재시도 횟수 < 12
+        + 마지막 대조 뒤 5분. K5가 없거나 다른 조건이 남으면 횟수를 0으로(다음 K5는 새로 12회). 횟수는 메모리."""
+        if not self._k5_awaits_reconcile():
+            self._k5_retries = 0
+            return False
+        if self._k5_retries >= K5_RETRY_MAX:
+            return False
+        return self._last_reconcile is None or now - self._last_reconcile >= K5_RETRY_EVERY
+
+    def _k5_awaits_reconcile(self) -> bool:
+        """K5의 남은 해제 조건이 모두 대조 성공으로 풀리는 것인지 (D-150, 보완 A-076).
+
+        대조로 풀리는 조건: reconciled(경로 복구 이후 대조 포함)와 조회 경로 link:rest — 대조기가 조회 3종 성공 시
+        link:rest 정상을 보고한다(조회 연속 3회 실패로 끊김 기록된 경우 포함). 실시간(link:realtime)·스레드
+        (link:thread)·경로 구분 없는 이전 행(broker_connected)이 남아 있으면 대조로 풀 수 없으므로 False."""
+        for row in self.repo.halt_rows(self.account):
+            if row["halt_type"] != HaltType.K5.value:
+                continue
+            missing = HaltManager._k5_missing(json.loads(row["conditions"] or "{}"))  # noqa: SLF001
+            if missing and all(m.startswith("reconciled") or m == f"broker_connected({K5_LINK_REST})"
+                               for m in missing):
+                return True
+        return False
 
     # 판정 ---------------------------------------------------------------------------
     def _blocked_globally(self) -> bool:

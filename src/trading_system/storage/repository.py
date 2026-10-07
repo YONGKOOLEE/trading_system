@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -248,6 +249,7 @@ class Repository:
         self._lock = threading.RLock()
         self._depth = 0
         self._tx_thread: int | None = None
+        self._after_tx: list[Callable[[bool], None]] = []   # 가장 바깥 저장 단위 종료 뒤 부를 일 (CP-028 D-148)
         self.fail_next_transaction = False  # 테스트용 저장 실패 주입 (V-26)
         # busy_timeout: 다른 프로세스(scripts)가 쓰기 잠금을 쥐고 있을 때 기다리는 최대 초 (CP-018 L-3)
         self.connection = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False,
@@ -286,36 +288,60 @@ class Repository:
     # --- 트랜잭션 ---------------------------------------------------------
     @contextmanager
     def tx(self) -> Iterator[None]:
-        """하나의 저장 단위. 중첩 호출은 바깥 트랜잭션에 합쳐진다."""
-        with self._lock:
-            if self._depth:
-                self._depth += 1
+        """하나의 저장 단위. 중첩 호출은 바깥 트랜잭션에 합쳐진다.
+
+        가장 바깥 저장 단위가 끝나면(커밋·롤백 모두) call_after_tx로 맡긴 일을 같은 스레드에서 잠금 밖에서 부른다
+        (CP-028 D-148: 저장 단위 안에서 낸 알림의 기록)."""
+        after: list[Callable[[bool], None]] = []
+        committed = False
+        try:
+            with self._lock:
+                if self._depth:
+                    self._depth += 1
+                    try:
+                        yield
+                    finally:
+                        self._depth -= 1
+                    return
+                if self.fail_next_transaction:
+                    self.fail_next_transaction = False
+                    raise StorageFailure("주입된 저장 실패")
+                try:
+                    self.connection.execute("BEGIN IMMEDIATE")
+                except sqlite3.Error as exc:
+                    raise StorageFailure(str(exc)) from exc
+                self._depth = 1
+                self._tx_thread = threading.get_ident()
                 try:
                     yield
+                    self.connection.execute("COMMIT")
+                    committed = True
+                except sqlite3.Error as exc:
+                    self.connection.execute("ROLLBACK")
+                    raise StorageFailure(str(exc)) from exc
+                except BaseException:
+                    self.connection.execute("ROLLBACK")
+                    raise
                 finally:
-                    self._depth -= 1
-                return
-            if self.fail_next_transaction:
-                self.fail_next_transaction = False
-                raise StorageFailure("주입된 저장 실패")
-            try:
-                self.connection.execute("BEGIN IMMEDIATE")
-            except sqlite3.Error as exc:
-                raise StorageFailure(str(exc)) from exc
-            self._depth = 1
-            self._tx_thread = threading.get_ident()
-            try:
-                yield
-                self.connection.execute("COMMIT")
-            except sqlite3.Error as exc:
-                self.connection.execute("ROLLBACK")
-                raise StorageFailure(str(exc)) from exc
-            except BaseException:
-                self.connection.execute("ROLLBACK")
-                raise
-            finally:
-                self._depth = 0
-                self._tx_thread = None
+                    self._depth = 0
+                    self._tx_thread = None
+                    after, self._after_tx = self._after_tx, []
+        finally:
+            for fn in after:
+                try:
+                    fn(committed)
+                except Exception as exc:  # noqa: BLE001 — 종료 뒤 일의 실패가 저장 단위 결과(예외)를 가리지 않게
+                    sys.stderr.write(f"저장 단위 종료 뒤 처리 실패: {type(exc).__name__}\n")
+
+    def call_after_tx(self, fn: Callable[[bool], None]) -> bool:
+        """현재 스레드가 저장 단위 안이면 fn을 가장 바깥 저장 단위가 끝난 뒤 부르도록 맡기고 True.
+
+        fn(committed): 커밋이면 True, 롤백(커밋 실패 포함)이면 False. 같은 스레드에서 저장소 잠금 밖에서 부른다.
+        저장 단위 밖이면 아무것도 하지 않고 False — 호출자가 바로 처리한다 (CP-028 D-148)."""
+        if not self.in_transaction:
+            return False
+        self._after_tx.append(fn)
+        return True
 
     def _x(self, sql: str, params: tuple = ()) -> _Result:
         """모든 읽기·쓰기를 같은 잠금 아래에서 끝낸다.
