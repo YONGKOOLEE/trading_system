@@ -1,38 +1,27 @@
 # 세션 인계 (짧게 유지 — 작업이 끝날 때마다 덮어쓴다)
 
-- 갱신: 2026-10-07 새벽 / CP-026 승인(A-070)·문서 반영, T-017 시험 공백·개선 브랜치, 2일차 조회 목록 / **다음: ① 2일차 결과 분석(`docs/strategies/paper0-verify/day2-analysis.md`) ② main 병합 여부(T-017 → T-022 → T-017 시험 공백·개선) ③ 저녁 v2 전환 ④ 아래 "결정 필요" ⑤ 문서 승인 묶음**
+- 갱신: 2026-10-07 밤 / PAPER-0 2일차 정상(F-1·F-3 수정 실측 확인), **main 병합 완료**(A-075), v2 전환 완료(사용자 명령 4개), 일봉 30종목 수집 / **다음: ① 3일차(10-08) 결과 분석 ② 추세추종 30종목 백테스트 결과 보고(진행 중, 브랜치 feat/T-018-multi-backtest) ③ CP-028(P1~P4) 구현(승인 A-074, 병합 뒤 착수 조건 충족) ④ 아래 "결정 필요" ⑤ 문서 승인 묶음**
+- **체크아웃: `main`** (HEAD acb839b 이후). PAPER는 이제 main으로 실행. 병합된 것: T-017 수정·시험 보충·개선(status KST, 텔레그램 스레드 감시), T-022 원격 운영(CP-026), T-023 시세 기록(CP-027), T-018 trend-sma 초안·fetch-daily, VI 영문 코드 무시·PAPER 수수료 0.35%(639f531), 배포 설정 v2(acb839b). 전체 시험 1182 passed. push 없음.
+- 별도 유지(미병합): M2 `feat/T-M2-01-min-e2e`(worktree m2-binance, 1919a8a), `feat/T-M2-10-adapter`(m2-adapter, 2a9f9ba). 정리 가능한 worktree: remote-ops, t017-tests, t017-followups, t018-trend, t018-data, t023-mdlog, merge-dryrun(tmp/merge-dryrun) — 병합 끝, 삭제는 사용자 확인 뒤.
+- 승인본(게이트): 업무정의서 v0.6, 00 v0.4, 01 v0.8, 02 v0.7, 03 v0.9, 04 v0.8, 05 v0.5. **마지막 기록 A-075.** 운영 카드(3일차): https://claude.ai/artifact/XXZrAhidXPAFo1hUDRgVdw 실전 주문 코드·LIVE 승인 없음.
 
-## 작업 브랜치 (로컬만, 모두 커밋됨, 실행 브랜치 코드는 그대로)
-| 폴더(git worktree) | 브랜치 | 내용 | 시험 |
-|---|---|---|---|
-| `C:\AI\trading_system\trading_system` | feat/T-017-paper0-day1-fixes | **PAPER 실행용**. 문서만 추가(A-070, day2-analysis) | 코드 변경 없음 |
-| `C:\AI\trading_system\remote-ops` | feat/T-022-remote-ops | T-022 원격 운영(CP-026 승인 A-070) + 01·03·04·05·pv-procedure v0.5 draft 반영 | 전체 1083 passed |
-| `C:\AI\trading_system\t017-tests` | feat/T-017-test-gaps | CP-025 시험 공백 20건(V-171·173·177(c)·179·180), src 변경 없음 | 커밋 메시지 참고 |
-| `C:\AI\trading_system\t017-followups` | feat/T-017-followups | status 정지 시각 KST, 텔레그램 스레드 종료 감시(알림만, 정지 없음) | 커밋 메시지 참고 |
-- 병합 권장 순서: 2일차 확인 → 실행 브랜치를 main에 → T-022 → test-gaps → followups(각각 사용자 지시). 병합 뒤 다음 PAPER 실행일 아침 절차는 pv-procedure v0.5(원격 `/resume K8`·`/resume K4` 가능).
-
-## 결정 필요 (2026-10-07 작업에서 나온 것)
-1. CP-026 병합 시점(Q-2) — 위 권장 순서인지.
-2. V-180: v1 보유 중 v2 교체를 시스템이 거부·경고할지(현재 받아들임), 교체 뒤 v1 소유 보유 정리 경로(배포 설정에서 v1이 빠지면 v1 청산 신호가 안 나옴 — 01 K9 "교체: v1 감액·청산 허용"과 차이). 운영 규칙은 "보유 있으면 교체 안 함"으로 유지 중.
-3. CP-025 D-130 "등급 우선순위 없음" 문구 vs 코드(긴급 알림 먼저 전송, 시험 `test_emergency_sent_before_backlog`) — 문서를 코드에 맞출지(권장).
-4. 개선 제안 P1 텔레그램 스레드 사망·반복 예외를 K11로 볼지, P2 알림 롤백 유실(F8) 처리, P3 장 마감 후 CLOSE 대조가 요청 대조에 밀림(만료 종결 시점 변경).
-5. 04 §3.7 표 머리 5열 vs CP-025·026 행 6열, 원격 운영 V를 §3.8로 옮길지(문서 정리).
-- 브랜치(로컬만, push 없음): 체크아웃 **`feat/T-017-paper0-day1-fixes`** (HEAD f73baa8) = main(4e502a5) + T-017 수정 + docs/m2-binance-design 병합. **PAPER-0는 이 브랜치로 실행.** main 병합은 2일차에서 수정 확인 뒤 사용자 지시로(A-067 B-7).
-- 테스트: 2026-10-06 빠른 회귀 1052 passed(324초, 예행연습 2파일 제외) + 예행연습 9 passed(447초). 전체 `.venv\Scripts\python -m pytest -q`(약 13분).
-- 승인본(게이트): 업무정의서 v0.6, 00 v0.4, 01 v0.8, 02 v0.7, 03 v0.9, 04 v0.8, 05 v0.5 (archive에 보존, 현 파일은 draft). **마지막 기록 A-070.** 2일차 운영 카드(비공개 페이지): https://claude.ai/artifact/XXZrAhidXPAFo1hUDRgVdw 실전 주문 코드·LIVE 승인 없음.
+## 결정 필요
+1. V-180: v1 보유 중 v2 교체를 시스템이 거부·경고할지, 교체 뒤 v1 소유 보유 정리 경로(01 K9 "교체: v1 감액·청산 허용"과 차이).
+2. CP-027 호가 단위: 시세 모를 때 코드는 사건 가격 기준으로 채움, CP C-3은 빈 값 — 문서를 코드에 맞출지(측정 영향 없음).
+3. M2 어댑터 [제안] 6건(우선순위 예산 비율, 429 기본 60초, MARKET_LOT_SIZE 0 대체, isSpotTradingAllowed=false → HALTED, WS 23시간 교체, 실패 주문 weight 1).
+4. 추세추종: 파라미터·진입 방식·추적 손절·운용 규모(L7·L2·L3) — 30종목 백테스트 보고 뒤.
+5. 장외 시세 조회(19:43 ka10001 HTTP 302) 줄이기 — 개선 후보.
 
 ## 다음 세션 첫 행동
-1. `git status`·이 파일·`docs/.status`·`docs/approvals.md` 끝 3행·`docs/worklog.md` 마지막 항목 확인.
-2. 사용자가 "2일차 끝"·결과를 주면: `docs/strategies/paper0-verify/day2-analysis.md`(a~k 조회, 1일차 DB로 실행 검증됨)와 `status` 출력·텔레그램·`var/paper/review/`·`var/paper/logs/ops-20261007.jsonl`로 분석 → `docs/07-paper-review.md` 2일차 추가, `docs/broker-specs/kiwoom-kr.md` §7c 보강. **확인할 것**: 시작 대조가 1일차 항목을 AUTO_MATCHED로 종결했는지, 09:30 v1 매도 체결 뒤 K4 재발 없음(K-U14 수정 확인), VI `_AL`/`_NX` 경고 사라짐, 불일치 알림 반복 없음, 07:50~09:00 서버 구간, 사용자가 `/kill` 보냈는지.
-3. 수정이 확인되면 사용자에게 main 병합 여부를 묻는다.
-4. 사용자는 터미널 명령에 익숙하지 않다 — 실행 안내는 **복사해 붙일 전체 명령**, 용어는 풀어서.
+1. `git status`(main)·이 파일·`docs/approvals.md` 끝 3행·`docs/worklog.md` 마지막 항목 확인.
+2. "3일차 끝"이면: `docs/strategies/paper0-verify/day2-analysis.md` 조회(날짜만 2026-10-08로)·status·paper-review(이제 슬리피지·조회 주기 포함)로 분석 → 07-paper-review 3일차. **확인할 것**: 시작 때 STRATEGY_SYNC 3건 처리·K9(paper0-verify:1) 1건, K8·K1 재개, 09:30 v2 매수·14:30 v2 매도, 시세 기록(quote_snapshot) 행 생성, VI 영문 코드 경고 0건, 07:53 K5 재현 여부, 원격 명령 사용 여부.
+3. 사용자는 터미널 명령에 익숙하지 않다 — 실행 안내는 **복사해 붙일 전체 명령**, 용어는 풀어서.
 
-## 2일차(2026-10-07) 사용자 절차 — 안내 완료
-- 06:43 시간 동기화 → `preflight` → `run` → 두 번째 창 `status`("열린 대조 불일치: 0건") → `resume.py --mode PAPER K8`, `resume.py --mode PAPER K4` → `status`("해제되지 않은 정지: 0건").
-- 09:35 `/status`: 보유 0건이면 **`/kill`**(14:30 매수 차단, 매매 순서 복구용). 14:35 `/status`.
-- 저녁: `status` → `paper-review` → `backup` → Ctrl+C → "2일차 끝".
-- (선택) 방법 2: run 뒤 VS Code 대화창 `/remote-control`(안 되면 터미널 `claude remote-control`) → 휴대폰 Claude 앱 Code 탭에서 연결.
-- 상세: `docs/strategies/paper0-verify/pv-procedure.md` v0.4 §3.2·§3.4.
+## 3일차(2026-10-08) 사용자 절차 — 운영 카드에 안내
+- 06:43 시간 동기화 → `preflight` → `run` → 두 번째 창 `status` → `resume.py --mode PAPER K8`, `resume.py --mode PAPER K1` → `status`(K9 1건만 남으면 정상).
+- 09:35 `/review`: 보유 1건 정상(v2 매수). 14:35 `/review`: 보유 0건 정상. **/kill 보내지 않음.**
+- 장중 K4·K8 → 텔레그램 `/resume K4|K8` → `/confirm 코드`(새 대조 일치 시만).
+- 저녁: 키움 앱 → `status` → `paper-review` → `backup` → Ctrl+C → "3일차 끝".
 
 ## 진행 중 결정·작업
 ### 원격 운영 (사용자 요청 2026-10-06 — 회사에서 장중 조치 불가)

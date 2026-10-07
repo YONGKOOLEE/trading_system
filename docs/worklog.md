@@ -365,3 +365,11 @@
 - 문서: day2 오전 분석 07-paper-review v0.2(d3f188b), D-130 정정(d14f952), 04 표 정리(6ecca07), CP-028 승인·P4(30f8970).
 - 관찰: VI 1h 통보 영문 종목코드 '0218L0_AL' 해석 불가 경고 1건(유니버스 밖, 매매 영향 없음) — 수정은 저녁 병합 때 결정.
 - 다음: "2일차 끝" → 마감 분석 → 병합 순서 → v2 전환 → fetch-daily(run 종료 뒤) → CP-028 구현.
+
+## 2026-10-07 (37) — 2일차 마감, main 병합, v2 전환, 일봉 30종목
+- 2일차 마감: 14:30 EVALUATION_SKIPPED(K1), CLOSE 대조 MATCH, 실현 손익 실제 −2,246원(키움 수수료 970×2·세금 556) vs 시스템 추정 −348원(수수료 설정 0.015%). VI 영문 코드 경고 9건, 19:43 ka10001 HTTP 302(장외).
+- A-075: main 병합(실행 브랜치 ff + T-022·test-gaps·followups·T-023·fetch-daily·trend-sma). T-023 병합에서 03·04·05 문서 충돌(양쪽 추가) → 둘 다 살려 해결.
+- 수정 639f531: VI 1h 영문 코드(유니버스 밖) 무시, PAPER 수수료 0.35%. 시험 변경: test_config_parity(PAPER 수수료만 차이 허용, A-075).
+- v2 배포 설정 acb839b. 시험 변경: e2e·예행연습 make_root가 복사본 전략을 v1로 고정. 전체 1182 passed.
+- 사용자: strategy register·transition 3건 정상(v2 PAPER, v1 STOPPED REPLACE), fetch-daily 30종목 성공(mac 교차 확인 30/30).
+- 진행 중: trend-sma 30종목 백테스트(TRAIN·VALIDATION만, 브랜치 feat/T-018-multi-backtest). 운영 카드 3일차 갱신.
