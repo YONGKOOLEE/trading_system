@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import random
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -35,6 +36,33 @@ class FakeBehavior(StrEnum):
     LOST_FILL = "LOST_FILL"        # 브로커는 접수·전량 체결, 응답 유실
 
 
+@dataclass(frozen=True)
+class FakeSpotFees:
+    """가상 현물 체결 수수료 (M2, A-062③·D-101). 요율·자산 쌍은 시험이 정하는 가상값이다.
+
+    매수 수수료는 받는 자산(기초 자산)에서 체결 수량 × 요율, 매도 수수료는 받는 자산(호가 자산)에서 체결 금액 × 요율.
+    asset_override: 시험용 — 수수료 자산을 강제로 바꾼다(기초·호가 외 자산 납부 경로 재현, V-130).
+    """
+
+    rate: Decimal
+    pairs: Mapping[str, tuple[str, str]]  # 종목 → (기초 자산, 호가 자산)
+    asset_override: str | None = None
+
+    def commission(self, instrument: str, side: str, quantity: Decimal, price: Decimal) -> tuple[Decimal, str]:
+        base, quote = self.pairs[instrument]
+        if side == "BUY":
+            fee, asset = quantity * self.rate, base
+        else:
+            fee, asset = quantity * price * self.rate, quote
+        return fee, self.asset_override or asset
+
+    def base_change(self, instrument: str, side: str, quantity: Decimal, fee: Decimal, asset: str) -> Decimal:
+        """거래소 잔고 기준 기초 자산 변화 (fake 거래소의 사실). 기초 자산으로 낸 수수료는 기초 잔고에서 빠진다."""
+        base, _ = self.pairs[instrument]
+        change = quantity if side == "BUY" else -quantity
+        return change - fee if asset == base else change
+
+
 @dataclass
 class _Order:
     account: str
@@ -56,6 +84,8 @@ class FakeBroker:
         self.cash: dict[str, CashView] = {}  # 계좌별 예수금·주문가능현금 (시험이 지정)
         self.disconnected = False           # 단절: 주문은 전송 전 실패, 조회는 실패
         self.raise_after_send = False       # 브로커는 받았지만 응답 전에 연결이 끊김 → 어댑터 예외
+        self.spot_fees: FakeSpotFees | None = None  # M2 현물 수수료 (없으면 수수료 없음 — M1 시험 동작 그대로)
+        self._fees: dict[str, tuple[Decimal, str]] = {}  # 체결번호 → (수수료, 수수료 자산)
         self._seq = 0
         self._day = 0
         self._fill_seq = 0
@@ -155,7 +185,12 @@ class FakeBroker:
         self._set(order_no, filled_quantity=filled, state="FILLED" if filled == o.quantity else "PARTIAL")
         at = _EPOCH
         self._fills.append((self._book[order_no].account, self._day, FillRecord(order_no, fill_id, qty, px, at)))
-        self._events.append(OrderEvent(kind="FILL", order_no=order_no, fill_id=fill_id, quantity=qty, price=px))
+        fee: tuple[Decimal, str] | None = None
+        if self.spot_fees is not None:
+            fee = self.spot_fees.commission(o.instrument, o.side, qty, px)
+            self._fees[fill_id] = fee
+        self._events.append(OrderEvent(kind="FILL", order_no=order_no, fill_id=fill_id, quantity=qty, price=px,
+                                       commission=fee[0] if fee else None, commission_asset=fee[1] if fee else None))
 
     def expire_open(self) -> list[str]:
         """장 마감: 미체결 잔량을 소멸시킨다 (03 §6.4)."""
@@ -231,7 +266,11 @@ class FakeBroker:
                 continue
             o = self._find(d, f.order_no)
             sign = Decimal("1") if o.record.side == "BUY" else Decimal("-1")
-            qty[o.record.instrument] = qty.get(o.record.instrument, Decimal("0")) + sign * f.quantity
+            change = sign * f.quantity
+            if self.spot_fees is not None and f.fill_id in self._fees:
+                fee, asset = self._fees[f.fill_id]
+                change = self.spot_fees.base_change(o.record.instrument, o.record.side, f.quantity, fee, asset)
+            qty[o.record.instrument] = qty.get(o.record.instrument, Decimal("0")) + change
         return {k: v for k, v in qty.items() if v != 0}
 
     def _find(self, day: int, order_no: str) -> _Order:

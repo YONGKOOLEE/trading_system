@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
@@ -18,6 +19,7 @@ from pathlib import Path
 from trading_system.broker.base import BrokerAdapter
 from trading_system.domain.clock import Clock, from_iso
 from trading_system.domain.enums import HaltType
+from trading_system.domain.fees import position_delta
 from trading_system.domain.halts import HaltView, RequestView, halt_rejection
 from trading_system.domain.sinks import AlertSink, HaltSink
 from trading_system.domain.enums import IntentState, OrderType, RequestType, Side, SubmitOutcome
@@ -36,8 +38,11 @@ class ExecutionBlocked(RuntimeError):
 
 class Executor:
     def __init__(self, repo: Repository, broker: BrokerAdapter, clock: Clock, kill_file: Path, *,
-                 alerts: AlertSink | None = None) -> None:
+                 alerts: AlertSink | None = None,
+                 asset_pair: Callable[[str], tuple[str, str] | None] | None = None) -> None:
         self._repo = repo
+        # 종목 → (기초 자산, 호가 자산). 수수료 자산이 있는 체결(M2 현물)의 순 수령 반영에만 쓴다 (D-101). M1은 None
+        self._asset_pair = asset_pair
         self._alerts: AlertSink = alerts or AuditAlertSink(repo, clock, actor="executor")
         self._halts: HaltSink | None = None
         self._broker = broker
@@ -337,13 +342,22 @@ class Executor:
             held = self._repo.position(intent.account, intent.instrument).quantity
             if ev.quantity > held:
                 return self._anomaly(ev, f"내부 보유({held})보다 큰 매도 체결 — 외부 거래 의심", order.account)
+        # 포지션 변화: 수수료 정보가 없으면 ±체결 수량(M1 그대로), 기초 자산 수수료 매수는 순 수령 (D-101)
+        delta = position_delta(intent.side, ev.quantity, ev.commission, ev.commission_asset,
+                               self._asset_pair(intent.instrument) if self._asset_pair is not None else None)
+        if delta is None:
+            return self._anomaly(ev, f"반영할 수 없는 체결 수수료 ({ev.commission} {ev.commission_asset}) — "
+                                     "기초·호가 자산 외 수수료 자산 등 (D-101)", order.account)
         if not self._repo.insert_fill(order.order_key, ev.fill_id, ev.quantity, ev.price, ev.at or now):
             return None  # 중복 통보
         order_open = order.state in ("ACCEPTED", "PARTIAL")
         # 종결된 주문(취소·만료·정정됨)에 늦게 온 체결은 수량만 기록하고 주문을 다시 열지 않는다
         new_state = ("FILLED" if filled >= order.quantity else "PARTIAL") if order_open else order.state
         self._repo.update_broker_order(order.order_key, filled, new_state)
-        self._repo.audit(now, "FILL", "tracker", order.order_key, {"quantity": str(ev.quantity), "price": str(ev.price)})
+        fill_audit = {"quantity": str(ev.quantity), "price": str(ev.price)}
+        if ev.commission_asset is not None:  # M2: 수수료·수수료 자산 기록 (스키마 필드는 T-M2-04, 그 전까지 감사 기록)
+            fill_audit.update(commission=str(ev.commission), commission_asset=ev.commission_asset)
+        self._repo.audit(now, "FILL", "tracker", order.order_key, fill_audit)
         if intent.state.is_terminal or not order_open:
             # INV-11: 종결된 의도는 다시 열지 않는다. 포지션 반영은 대조에서 사람이 정한다 (02 D-035, T-008)
             self._repo.audit(now, "LATE_FILL", "tracker", intent.intent_id, {"order": order.order_key})
@@ -354,11 +368,11 @@ class Executor:
         intent_filled = intent.filled_quantity + ev.quantity
         self._repo.set_intent_filled(intent.intent_id, intent_filled)
         pos = self._repo.position(intent.account, intent.instrument)
+        qty = pos.quantity + delta
         if intent.side == Side.BUY.value:
-            qty = pos.quantity + ev.quantity
+            # 평균가 = 지급 금액 합 ÷ 보유 수량 (순 수령이면 기초 자산 수수료가 단가에 들어간다)
             avg = (pos.quantity * pos.avg_price + ev.quantity * ev.price) / qty
         else:
-            qty = pos.quantity - ev.quantity
             avg = pos.avg_price if qty > 0 else Decimal("0")
         self._repo.set_position(intent.account, intent.instrument, qty, avg)
 
