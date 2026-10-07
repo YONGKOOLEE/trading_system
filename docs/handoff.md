@@ -3,7 +3,7 @@
 - 갱신: 2026-10-07 밤 / PAPER-0 2일차 정상(F-1·F-3 수정 실측 확인), **main 병합 완료**(A-075), v2 전환 완료(사용자 명령 4개), 일봉 30종목 수집 / **다음: ① 3일차(10-08) 결과 분석 ② 추세추종 30종목 백테스트 결과 보고(진행 중, 브랜치 feat/T-018-multi-backtest) ③ CP-028(P1~P4) 구현(승인 A-074, 병합 뒤 착수 조건 충족) ④ 아래 "결정 필요" ⑤ 문서 승인 묶음**
 - **체크아웃: `main`** (HEAD acb839b 이후). PAPER는 이제 main으로 실행. 병합된 것: T-017 수정·시험 보충·개선(status KST, 텔레그램 스레드 감시), T-022 원격 운영(CP-026), T-023 시세 기록(CP-027), T-018 trend-sma 초안·fetch-daily, VI 영문 코드 무시·PAPER 수수료 0.35%(639f531), 배포 설정 v2(acb839b). 전체 시험 1182 passed. push 없음.
 - 별도 유지(미병합): M2 `feat/T-M2-01-min-e2e`(worktree m2-binance, 1919a8a), `feat/T-M2-10-adapter`(m2-adapter, 2a9f9ba). 정리 가능한 worktree: remote-ops, t017-tests, t017-followups, t018-trend, t018-data, t023-mdlog, merge-dryrun(tmp/merge-dryrun) — 병합 끝, 삭제는 사용자 확인 뒤.
-- 승인본(게이트): 업무정의서 v0.6, 00 v0.4, 01 v0.8, 02 v0.7, 03 v0.9, 04 v0.8, 05 v0.5. **마지막 기록 A-075.** 운영 카드(3일차): https://claude.ai/artifact/XXZrAhidXPAFo1hUDRgVdw 실전 주문 코드·LIVE 승인 없음.
+- 승인본(게이트): 업무정의서 v0.6, 00 v0.4, 01 v0.8, 02 v0.7, 03 v0.9, 04 v0.8, 05 v0.5. **마지막 기록 A-076.** 운영 카드(3일차): https://claude.ai/artifact/XXZrAhidXPAFo1hUDRgVdw 실전 주문 코드·LIVE 승인 없음.
 
 ## 결정 필요
 1. V-180: v1 보유 중 v2 교체를 시스템이 거부·경고할지, 교체 뒤 v1 소유 보유 정리 경로(01 K9 "교체: v1 감액·청산 허용"과 차이).
