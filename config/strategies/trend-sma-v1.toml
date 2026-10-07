@@ -1,0 +1,14 @@
+# trend-sma v1 — 이동평균 추세추종 (T-018, A-071). 상태: 초안, 사용자 미승인. PAPER 사용 금지(상태 전환 승인 전).
+# 명세: docs/strategies/trend-sma/strategy.md. 값은 모두 **에이전트 제안값 — 사용자 결정**.
+# 값을 하나라도 바꾸면 전략 버전을 올린다(D-011, R-19). 소수는 문자열로 적는다.
+strategy = "trend-sma"
+version = 1
+
+[params]
+fast = 20            # 단기 SMA (거래일). 후보 cand-trend-sma와 같음
+slow = 60            # 장기 SMA (거래일). fast < slow
+atr_n = 14           # ATR 기간 (거래일)
+atr_mult = "2"       # 손절 = 평균가(진입 시 종가) − 2×ATR
+reentry_wait = 5     # 청산 뒤 확정 일봉 5개 전에는 재진입 안 함 (0 = 제한 없음)
+risk_ratio = "0.004" # S-3: 1회 위험 = 기준 금액 × 0.4% (계좌 L1 0.5% 이하)
+max_weight = "0.09"  # 종목 비중 상한 9% (계좌 L2 10% 이하)
