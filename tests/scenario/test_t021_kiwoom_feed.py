@@ -13,6 +13,7 @@ import pytest
 
 from tests.scenario.test_t014_kiwoom import ALIAS, adapter, realtime, wait_until
 from tests.support.kiwoom_sim import Sim, _md_init, push_real
+from trading_system.broker.kiwoom import parse
 from trading_system.broker.kiwoom.realtime import WsState
 from trading_system.broker.ratelimit import Priority
 from trading_system.domain.clock import KST, FixedClock
@@ -187,6 +188,19 @@ def test_realtime_vi_code_with_venue_suffix(sim: Sim, clock: FixedClock) -> None
     f.tick()
     h["1h"](B, {"9001": f"{B}_NX", "1223": "100500", "1224": ""})
     assert store.trading_status(B) == {TradingStatus.VI}
+
+
+@pytest.mark.parametrize("raw", ["0218L0_AL", "28513K_AL", "0011T0", "0091P0_NX"])
+def test_realtime_vi_alphanumeric_code_outside_universe_ignored(sim: Sim, clock: FixedClock, raw: str) -> None:
+    """PAPER-0 2일차(2026-10-07) 실측: 1h 9001에 영문이 섞인 6자리 종목코드('0218L0_AL' 등, 신규 상장 단축코드 [추정])가
+    온다. 유니버스 밖이면 해석 실패 경고 없이 무시한다(A-075). 우리 종목의 형식 검사는 그대로 엄격하다."""
+    _, store, f = feed(sim, clock)
+    f._master.update({A: frozenset(), B: frozenset()})  # noqa: SLF001
+    h = f.handlers()
+    h["1h"](raw, {"9001": raw, "1223": "100200", "1224": ""})      # 예외 없이 무시
+    assert TradingStatus.VI not in (store.trading_status(A) or frozenset())
+    with pytest.raises(parse.KiwoomParseError):                    # 우리 종목에 모르는 접미사 → 그대로 해석 실패
+        h["1h"](A, {"9001": f"{A}_XX", "1223": "100200", "1224": ""})
 
 
 def test_realtime_0g_limits_and_0s_calendar_conflict(sim: Sim, clock: FixedClock) -> None:

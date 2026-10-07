@@ -277,7 +277,16 @@ class KiwoomMarketFeed:
         def h1h(item: str, values: dict) -> None:
             # T-017: 9001에 거래소 접미사(_AL·_NX)가 붙어 온다(1일차 실측). 우리 종목이면 거래소와 무관하게
             # VI로 반영(보수적 — 위험 확대 거부), 유니버스 밖이면 해석 실패 경고 없이 무시한다
-            code, _venue = parse.stock_code_with_venue(values.get("9001") or item, "9001")
+            raw = values.get("9001") or item
+            try:
+                code, _venue = parse.stock_code_with_venue(raw, "9001")
+            except parse.KiwoomParseError:
+                # 2일차 실측: 영문이 섞인 6자리 코드('0218L0_AL' 등)도 온다. 우리 종목이 아니면 경고 없이 무시하고,
+                # 우리 종목 코드로 시작하면 그대로 해석 실패로 올린다(형식 검사는 엄격하게 유지, A-075)
+                base = str(raw).split("_", 1)[0]
+                if base[1:] in self.infos and base[:1] in ("A", "Q", "J") or base in self.infos:
+                    raise
+                return
             if code in self.infos:
                 self._vi(code, values.get("1224"), values.get("1223"), self._today())
                 self._compose(code)
