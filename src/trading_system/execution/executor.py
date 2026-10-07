@@ -280,8 +280,8 @@ class Executor:
                      "REJECTED": IntentState.REJECTED}[ev.kind]
             self._repo.update_broker_order(order.order_key, order.filled_quantity, ev.kind)
             if not intent.state.is_terminal:
-                self._close(intent, state, {"CANCELLED": "취소 확인", "EXPIRED": "장 마감 소멸",
-                                            "REJECTED": "접수 후 거부"}[ev.kind])
+                self._close(intent, state, ev.reason or {"CANCELLED": "취소 확인", "EXPIRED": "장 마감 소멸",
+                                                         "REJECTED": "접수 후 거부"}[ev.kind])
             self._close_changes_for(order, f"대상 주문 {ev.kind}")
         elif ev.kind == "MODIFIED":
             self._apply_modified(order, intent, ev, now)

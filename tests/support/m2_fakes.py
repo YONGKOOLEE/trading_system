@@ -2,28 +2,32 @@
 
 - 가상 심볼 TSTA-USDT·TSTB-USDT·TSTC-USDT (실제 심볼 아님), 가상 계좌 BN-BT-01, 가상 기준 금액 10,000 USDT.
 - 거래 규칙(tickSize·stepSize·minNotional)은 가상값이다. 바이낸스 실제 규칙값은 미확인(BN B-U4)이라 쓰지 않는다.
-  게이트는 아직 stepSize(수량 단위)·tickSize(호가 단위)만 검사한다. minNotional 등 필터 사전 검사는 T-M2-03(D-106).
-- 24/7 세션: 매일 한 구간. 주문 허용 창(L8)·일일 기준 시각은 아직 KST 기준 검사(T-M2-02에서 시장별 분리)라
-  여기서는 시험 시각을 덮는 자리표시 값을 쓴다. 일일 기준 시각 09:00 KST = UTC 00:00 (A-055).
+  게이트 G10은 SymbolRules(PRICE_FILTER·LOT_SIZE·MARKET_LOT_SIZE·NOTIONAL) 사전 검사를 한다(T-M2-03, D-106).
+- 24/7 세션: 매일 UTC 00:00~24:00 한 구간(session_247). 게이트는 M2_TIME(UTC)으로 L8 창·L5 일일 집계를 판정한다
+  (T-M2-02, D-108). 시험 시각 값은 A-064와 같은 UTC 00:10~23:50 창, 일일 기준 UTC 00:00.
+- IOC: build_m2_env(ioc=True)이면 fake 브로커가 지정가를 IOC로 처리한다(D-104). 기본 False(T-M2-01 시험은 미체결 예약 합산에 ACCEPT_ONLY를 씀).
 - 한도는 시나리오 가상값이다. M2 PAPER 값(A-064)은 설정 파일(config/m2/, T-M2-02·T-M2-08)로 들어간다.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
-from decimal import ROUND_FLOOR, Decimal
+from decimal import Decimal
 from pathlib import Path
 
 from tests.support.gate_fakes import FakeAccount, FakeClockHealth, FakeLimits, FakeStrategies
 from trading_system.broker.fake.broker import FakeBroker, FakeSpotFees
-from trading_system.domain.clock import KST, FixedClock
+from trading_system.domain.clock import FixedClock
 from trading_system.domain.enums import Mode
 from trading_system.domain.limits import AccountLimits
 from trading_system.domain.market import (
     CashView, CostRates, DailyRisk, InstrumentInfo, InstrumentKind, Quote, SessionInfo, TradingStatus,
 )
+from trading_system.domain.market_time import M2_TIME, session_247
+from trading_system.domain.trading_rules import SpotOrderPolicy, SymbolRules
+from trading_system.domain.trading_rules import ioc_buy_price as _ioc_buy_price
 from trading_system.domain.models import Account
 from trading_system.execution.executor import Executor
 from trading_system.gate.gate import Gate
@@ -61,16 +65,30 @@ M2_POLICY = GatePolicy(
     quote_max_age=timedelta(seconds=60),   # 시세 신선도 60초 (A-064)
     price_limit_ratio=Decimal("0.05"),     # M2에는 가격제한폭·시장가 매수가 없다(D-104). 시장가 매도는 G7 대상 아님 → 쓰이지 않는 자리 값
     cost_rates=CostRates(commission_rate=FEE_RATE, sell_tax_rate=Decimal("0")),
+    market_time=M2_TIME,                   # L8·L5·달력 = UTC (D-108)
 )
+# 매수 완충 0.5%(A-064), 지연 매도 완충 0.5%(A-065 Q4), 시세 신선도 60초(A-064)
+M2_ORDER_POLICY = SpotOrderPolicy(buy_buffer=BUY_BUFFER, sell_buffer=Decimal("0.005"),
+                                  quote_max_age=timedelta(seconds=60))
 
 
 def asset_pair(instrument: str) -> tuple[str, str] | None:
     return PAIRS.get(instrument)
 
 
+def symbol_rules(instrument: str) -> SymbolRules:
+    """가상 SpotRule → SymbolRules. 최소 수량 = stepSize, 시장가 수량 규칙 = 지정가와 같음, maxNotional 없음."""
+    r = RULES[instrument]
+    return SymbolRules(instrument=instrument, tick_size=r.tick_size, min_price=r.tick_size,
+                       max_price=Decimal("1000000"), lot_min_qty=r.step_size, lot_max_qty=Decimal("9000000"),
+                       lot_step=r.step_size, market_min_qty=r.step_size, market_max_qty=Decimal("9000000"),
+                       market_step=r.step_size, min_notional=r.min_notional, max_notional=None,
+                       apply_min_to_market=True, apply_max_to_market=False)
+
+
 def ioc_buy_price(last: Decimal, tick: Decimal, buffer: Decimal = BUY_BUFFER) -> Decimal:
-    """IOC 지정가 매수 가격 = 최근가 × (1 + 완충), tickSize로 내림 (D-104). 시험 전용 — 제품 코드는 T-M2-03."""
-    return (last * (1 + buffer) / tick).to_integral_value(rounding=ROUND_FLOOR) * tick
+    """IOC 지정가 매수 가격 (D-104) — 제품 규칙(domain.trading_rules.ioc_buy_price)에 위임. tickSize로 내림."""
+    return _ioc_buy_price(last, replace(symbol_rules("TSTA-USDT"), tick_size=tick), buffer)
 
 
 def m2_limits(**over: object) -> AccountLimits:
@@ -79,10 +97,10 @@ def m2_limits(**over: object) -> AccountLimits:
         l1_max_loss_ratio=Decimal("0.20"), l2_max_symbol_ratio=Decimal("0.20"), l3_max_total_ratio=Decimal("0.50"),
         l4_daily_loss_ratio=Decimal("0.02"), l5_daily_new_orders=10, l6_max_positions=5,
         l7_max_order_amount=Decimal("5000"), l10_leverage_total_ratio=None, warn_usage_ratio=Decimal("0.80"),
-        # 자리표시: 게이트 L8 검사가 아직 KST 시각 비교(T-M2-02 전) — 시험 시각(KST 10:00 전후)을 덮는다
-        order_window_start=time(0, 0), order_window_end=time(23, 59),
-        daily_reference_time=time(9, 0),   # KST 09:00 = UTC 00:00 (A-055)
-        report_time=time(9, 10),
+        # UTC (A-064 값과 같은 형태): 주문 창 00:10~23:50, 일일 기준 00:00, 보고 00:10
+        order_window_start=time(0, 10), order_window_end=time(23, 50),
+        daily_reference_time=time(0, 0),
+        report_time=time(0, 10),
     )
     values.update(over)
     return AccountLimits(**values)  # type: ignore[arg-type]
@@ -113,13 +131,26 @@ class SpotMarket:
         return frozenset() if instrument in RULES else None
 
     def session(self, trade_date: date) -> SessionInfo:
-        # 24/7: 하루 전체 한 구간 (게이트가 KST 날짜로 묻는다 — 시장별 달력은 T-M2-02)
-        start = datetime.combine(trade_date, time(0, 0), tzinfo=KST)
-        return SessionInfo(True, start.astimezone(UTC), (start + timedelta(days=1)).astimezone(UTC))
+        return session_247(trade_date)  # 24/7: UTC 날짜 하루 전체 한 구간 (D-108)
 
     def tick_valid(self, instrument: str, price: Decimal) -> bool | None:
         rule = RULES.get(instrument)
         return None if rule is None else price % rule.tick_size == 0
+
+
+@dataclass
+class SpotRulesFake:
+    """가상 거래 규칙 공급자 (gate/ports.SymbolRulesSource). table에서 빼면 "규칙 미적재"(V-134)."""
+
+    market: SpotMarket
+    table: dict[str, SymbolRules] = field(default_factory=lambda: {s: symbol_rules(s) for s in RULES})
+
+    def rules(self, instrument: str) -> SymbolRules | None:
+        return self.table.get(instrument)
+
+    def market_prices(self, instrument: str) -> tuple[Decimal, ...]:
+        q = self.market.quote(instrument)
+        return () if q is None else (q.price,)
 
 
 @dataclass
@@ -133,25 +164,31 @@ class M2Env:
     kill_file: Path
     market: SpotMarket
     account: FakeAccount
+    rules: SpotRulesFake
 
 
-def build_m2_env(tmp_path: Path, broker_env: str = "fake") -> M2Env:
+def build_m2_env(tmp_path: Path, broker_env: str = "fake", *, limits: AccountLimits | None = None,
+                 ioc: bool = False, spot_rules: bool = True) -> M2Env:
     repo = Repository(tmp_path / "trading.db", Mode.BACKTEST)
     repo.register_account(Account(alias=ACCOUNT, mode=Mode.BACKTEST, broker_env=broker_env))
     clock = FixedClock(T0)
     broker = FakeBroker()
     broker.spot_fees = FakeSpotFees(rate=FEE_RATE, pairs=PAIRS)
+    broker.ioc_limit = ioc
     market = SpotMarket(now=clock.now)
+    rules = SpotRulesFake(market)
     account = FakeAccount(
         daily={ACCOUNT: DailyRisk(BASE_AMOUNT, Decimal("0"), Decimal("0"), Decimal("0"))},
         cashes={ACCOUNT: CashView(BASE_AMOUNT, BASE_AMOUNT)},
     )
-    limits = FakeLimits({ACCOUNT: m2_limits()})
-    inputs = GateInputs(limits, market, account, FakeStrategies(), FakeClockHealth())
+    limits = FakeLimits({ACCOUNT: limits or m2_limits()})
+    inputs = GateInputs(limits, market, account, FakeStrategies(), FakeClockHealth(),
+                        spot_rules=rules if spot_rules else None)
     gate = Gate(repo, clock, inputs, M2_POLICY)
     kill_file = tmp_path / "KILL"
     executor = Executor(repo, broker, clock, kill_file, asset_pair=asset_pair)
     halts = HaltManager(repo, gate, executor, clock,
                         reference_time_of=lambda a: (lim.daily_reference_time
-                                                     if (lim := limits.by_account.get(a)) else None))
-    return M2Env(repo, clock, broker, gate, executor, halts, kill_file, market, account)
+                                                     if (lim := limits.by_account.get(a)) else None),
+                        market_time=M2_TIME)
+    return M2Env(repo, clock, broker, gate, executor, halts, kill_file, market, account, rules)

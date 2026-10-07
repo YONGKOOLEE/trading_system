@@ -12,10 +12,13 @@ from dataclasses import dataclass
 from datetime import time
 from decimal import Decimal
 
+from .market_time import Market
 
 # M1 KRX 정규장 (docs/broker-specs/krx-market.md §1 확인). 시장 달력·시장별 값은 T-010·M2·M3에서 확장.
 KRX_REGULAR_OPEN = time(9, 0)
 KRX_REGULAR_CLOSE = time(15, 30)
+# M2 일 경계 UTC 00:00 (A-055, CP-024 D-108)
+M2_DAY_BOUNDARY = time(0, 0)
 
 RATIO_FIELDS = (
     "l1_max_loss_ratio", "l2_max_symbol_ratio", "l3_max_total_ratio", "l4_daily_loss_ratio",
@@ -103,8 +106,13 @@ def _require_decimal(name: str, value: object) -> None:
         raise ValueError(f"{name}이 유한한 값이 아니다")
 
 
-def check_limits(lim: AccountLimits) -> tuple[list[str], list[str]]:
-    """논리 제약(01 §2.3.1-3)을 검사한다. (오류, 경고)를 돌려준다."""
+def check_limits(lim: AccountLimits, market: str | Market = Market.M1) -> tuple[list[str], list[str]]:
+    """논리 제약(01 §2.3.1-3)을 검사한다. (오류, 경고)를 돌려준다.
+
+    한도 값 제약은 시장 공통, 시간 제약은 시장별이다(CP-024 D-108): M1 = KRX 정규장 기준(기존 그대로),
+    M2 = UTC 24/7 기준. 시장 기본값은 M1이다(M1 호출부 변경 없음).
+    """
+    market = Market(market)  # 알 수 없는 시장이면 ValueError
     problems: list[str] = []
     warnings: list[str] = []
 
@@ -129,6 +137,24 @@ def check_limits(lim: AccountLimits) -> tuple[list[str], list[str]]:
     if lim.l7_max_order_amount <= 0:
         problems.append("l7_max_order_amount: 0보다 커야 한다")
 
+    if market is Market.M2:
+        problems.extend(_utc_247_time_problems(lim))
+    else:
+        problems.extend(_krx_time_problems(lim))
+
+    if lim.l3_max_total_ratio > 1:
+        warnings.append("l3_max_total_ratio: 100% 초과 (레버리지 배수 반영 노출 기준인지 확인)")
+    for name in ("l1_max_loss_ratio", "l2_max_symbol_ratio", "l4_daily_loss_ratio"):
+        if getattr(lim, name) > 1:
+            warnings.append(f"{name}: 100% 초과")
+    if lim.l10_leverage_total_ratio is not None and lim.l10_leverage_total_ratio > 1:
+        warnings.append("l10_leverage_total_ratio: 100% 초과")
+    return problems, warnings
+
+
+def _krx_time_problems(lim: AccountLimits) -> list[str]:
+    """M1(KRX) 시간 제약 — 기존 검사 그대로 (문구·순서 불변, V-152)."""
+    problems: list[str] = []
     if not lim.order_window_start < lim.order_window_end:
         problems.append("order_window: 시작이 종료보다 빨라야 한다")
     if lim.order_window_start < KRX_REGULAR_OPEN:
@@ -139,12 +165,25 @@ def check_limits(lim: AccountLimits) -> tuple[list[str], list[str]]:
         problems.append(f"daily_reference_time: 장 시작({KRX_REGULAR_OPEN:%H:%M}) 전이어야 한다")
     if not lim.report_time > KRX_REGULAR_CLOSE:
         problems.append(f"report_time: 장 마감({KRX_REGULAR_CLOSE:%H:%M}) 후여야 한다")
+    return problems
 
-    if lim.l3_max_total_ratio > 1:
-        warnings.append("l3_max_total_ratio: 100% 초과 (레버리지 배수 반영 노출 기준인지 확인)")
-    for name in ("l1_max_loss_ratio", "l2_max_symbol_ratio", "l4_daily_loss_ratio"):
-        if getattr(lim, name) > 1:
-            warnings.append(f"{name}: 100% 초과")
-    if lim.l10_leverage_total_ratio is not None and lim.l10_leverage_total_ratio > 1:
-        warnings.append("l10_leverage_total_ratio: 100% 초과")
-    return problems, warnings
+
+def _utc_247_time_problems(lim: AccountLimits) -> list[str]:
+    """M2(UTC 24/7) 시간 제약 (CP-024 D-108, A-055·A-064). 시각은 모두 UTC.
+
+    - 일일 기준 시각 = UTC 00:00 [결정 A-055]. 거래일 = UTC 날짜.
+    - 주문 창(L8)은 한 거래일 안의 한 구간: 시작 < 종료. 시작 > 종료(자정을 넘는 창)는 일 경계를 넘어
+      L4·L5 집계 구간이 갈리므로 거부한다 [제안].
+    - 주문 창 시작은 일일 기준 시각 뒤 [제안]: 일 경계 직후 일일 확정·대조(D-109) 전 위험 확대 방지 (M1 "기준 시각 < 장 시작"과 같은 취지).
+    - 보고 시각: 제약 없음(24/7에는 장 마감이 없다).
+    """
+    problems: list[str] = []
+    if lim.daily_reference_time != M2_DAY_BOUNDARY:
+        problems.append(f"daily_reference_time: M2 일일 기준 시각은 UTC {M2_DAY_BOUNDARY:%H:%M}이어야 한다 (A-055, D-108)")
+    if lim.order_window_start > lim.order_window_end:
+        problems.append("order_window: 자정(UTC)을 넘는 주문 창은 일 경계를 넘으므로 허용하지 않는다 — 시작이 종료보다 빨라야 한다")
+    elif lim.order_window_start == lim.order_window_end:
+        problems.append("order_window: 시작이 종료보다 빨라야 한다 (빈 주문 창)")
+    if not lim.order_window_start > M2_DAY_BOUNDARY:
+        problems.append(f"order_window_start: 일일 기준 시각(UTC {M2_DAY_BOUNDARY:%H:%M}) 뒤여야 한다 (일 경계 확정 전 주문 방지)")
+    return problems

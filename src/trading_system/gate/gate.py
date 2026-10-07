@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 
-from trading_system.domain.clock import KST, Clock, last_kst_time_at_or_before, to_iso
+from trading_system.domain.clock import Clock, to_iso
 from trading_system.domain.enums import (
     Check, GateResult, HaltType, IntentState, Mode, OrderType, RequestSource, RequestType, Side,
 )
@@ -24,6 +24,7 @@ from trading_system.domain.halts import HaltView, RequestView, halt_rejection
 from trading_system.domain.limits import AccountLimits
 from trading_system.domain.market import BLOCKS_RISK_REDUCTION, InstrumentInfo, Quote, estimate_cost
 from trading_system.domain.models import ApprovedIntent, GateDecision, GateRequest
+from trading_system.domain.trading_rules import filter_violation
 from trading_system.storage.repository import BrokerOrderRow, Repository, new_id
 
 from .ports import GateInputs, GatePolicy
@@ -276,7 +277,7 @@ class Gate:
         if daily.loss_ratio >= lim.l4_daily_loss_ratio:
             raise _Reject(Check.G7, f"L4 일일 손실 한도 도달 ({daily.loss_ratio} ≥ {lim.l4_daily_loss_ratio})")
         if req.request_type in (RequestType.ENTRY, RequestType.INCREASE):
-            day_start = last_kst_time_at_or_before(ctx.now, lim.daily_reference_time)
+            day_start = self._policy.market_time.last_at_or_before(ctx.now, lim.daily_reference_time)
             count = self._repo.risk_increasing_order_count(req.account, day_start)
             s["orders_today"] = str(count)
             if count + 1 > lim.l5_daily_new_orders:
@@ -358,6 +359,8 @@ class Gate:
         req = ctx.req
         if req.request_type is RequestType.CANCEL:
             return
+        if self._in.spot_rules is not None and self._g10_spot(ctx):
+            return
         if req.quantity <= 0:
             raise _Reject(Check.G10, f"수량이 0 이하: {req.quantity}")
         info = self._info(req.instrument, Check.G10)
@@ -387,6 +390,32 @@ class Gate:
                               or (q.lower_limit is not None and req.price < q.lower_limit)):
             raise _Reject(Check.G10, f"가격제한폭 밖의 가격: {req.price}")
 
+    def _g10_spot(self, ctx: _Ctx) -> bool:
+        """M2 현물 거래 규칙 사전 검사 (CP-024 D-104·D-106, V-133·V-134). 판정을 끝냈으면 True.
+
+        규칙이 없으면(미적재·적재 실패) 위험 확대는 거부, 위험 축소는 기존 수량 단위 검사로 넘긴다(False).
+        """
+        req = ctx.req
+        spot = self._in.spot_rules
+        if spot is None:
+            return False
+        if req.request_type is RequestType.MODIFY:
+            raise _Reject(Check.G10, "M2는 정정 미지원 (D-104)")
+        if req.quantity <= 0:
+            raise _Reject(Check.G10, f"수량이 0 이하: {req.quantity}")
+        if req.price <= 0:
+            raise _Reject(Check.G10, f"가격이 0 이하: {req.price}")
+        rules = spot.rules(req.instrument)
+        if rules is None:
+            if req.is_risk_increasing:
+                raise _Reject(Check.G10, f"거래 규칙 미적재 — 위험 확대 거부 (D-106): {req.instrument}")
+            return False
+        reason = filter_violation(rules, req.side, req.order_type, req.quantity, req.price,
+                                  spot.market_prices(req.instrument))
+        if reason:
+            raise _Reject(Check.G10, f"거래 규칙 위반 {reason}")
+        return True
+
     def _g11_freshness(self, ctx: _Ctx) -> None:
         """시세 신선도 (01 G11, Q-C): 위험 확대는 지연 시 거부, 위험 축소는 시장가만 거부."""
         req = ctx.req
@@ -399,7 +428,7 @@ class Gate:
     def _g12_session(self, ctx: _Ctx) -> None:
         """거래 가능 시간·시장 달력 (01 G12, L8, R-14)."""
         req = ctx.req
-        local = ctx.now.astimezone(KST)
+        local = self._policy.market_time.local(ctx.now)
         session = self._in.market.session(local.date())
         if session is None:
             raise _Reject(Check.G12, "시장 달력 정보 없음")

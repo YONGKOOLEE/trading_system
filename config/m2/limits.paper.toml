@@ -1,0 +1,25 @@
+# M2(크립토 현물, 바이낸스 Spot 테스트넷) PAPER 한도·시간 설정 (01 D-026 방식, CP-024 D-097·D-108).
+# 값: 사용자 결정 A-064 (2026-10-05, "확정"). M2 PAPER용 값이며 LIVE 허용 규모가 아니다. L4는 M2 PAPER-0 결과로 재검토 예정.
+# 금액 단위: USDT(계좌 기준 통화, A-055). 시각: UTC. 비율은 소수(0.005 = 0.5%). 비밀정보 없음.
+# 로더: trading_system.config.limits_file.load_limits_file(path, market="M2") — M1 로더(기본 M1)로 읽으면 KRX 시간 검사로 거부된다.
+# 변경: 더 엄격해지면 즉시, 완화·혼합·기준 시각 변경은 다음 일일 기준 시각(UTC 00:00)부터. 메신저로는 바꿀 수 없다.
+# 테스트넷 최소 주문 금액 등 거래 규칙 값은 미확인(B-U4) — L7과의 정합은 시작 점검에서 확인한다(A-064).
+
+account = "BN-PAPER-01"
+
+[limits]
+l1_max_loss_ratio = "0.005"        # L1 1회 최대 손실 0.5%
+l2_max_symbol_ratio = "0.10"       # L2 종목 비중 10%
+l3_max_total_ratio = "0.50"        # L3 총 노출 50%
+l4_daily_loss_ratio = "0.01"       # L4 일일 손실 1% → K2
+l5_daily_new_orders = 5            # L5 일일 신규 주문 5건
+l6_max_positions = 3               # L6 보유 종목 3개
+l7_max_order_amount = "100"        # L7 1회 주문 최대 100 USDT
+l10_leverage_total_ratio = "none"  # 레버리지 상품 없음 (현물만)
+warn_usage_ratio = "0.80"          # 한도 80% 사용 시 경고
+
+[time]
+order_window_start = "00:10"       # 주문 허용 UTC 00:10 (신규·증액만, L8)
+order_window_end = "23:50"         # UTC 23:50
+daily_reference_time = "00:00"     # 일일 기준 UTC 00:00 = KST 09:00 (A-055)
+report_time = "00:10"              # 일일 보고 UTC 00:10

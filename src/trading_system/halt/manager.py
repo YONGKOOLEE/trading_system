@@ -16,7 +16,8 @@ from dataclasses import dataclass
 from datetime import time as dtime
 from decimal import Decimal
 
-from trading_system.domain.clock import Clock, from_iso, next_kst_time_after
+from trading_system.domain.clock import Clock, from_iso
+from trading_system.domain.market_time import M1_TIME, MarketTime
 from trading_system.domain.enums import GateResult, HaltType, IntentState, RequestSource, Side
 from trading_system.domain.halts import AUTO_RELEASE, CANCELS_OPEN_BUYS, EMERGENCY, REMOTE_RESUMABLE, HaltState
 from trading_system.domain.market import DailyRisk
@@ -70,8 +71,10 @@ class ResumeResult:
 class HaltManager:
     def __init__(self, repo: Repository, gate: Gate, executor: Executor, clock: Clock,
                  reference_time_of: Callable[[str], dtime | None] | None = None,
-                 alerts: AlertSink | None = None) -> None:
+                 alerts: AlertSink | None = None, *, market_time: MarketTime = M1_TIME) -> None:
         self._repo = repo
+        # K2 재개 "다음 일일 기준 시각"을 셀 시장 시각대 (CP-024 D-108). 기본 M1(KST) — M1 호출부 그대로
+        self._market_time = market_time
         self.send_thread: int | None = None   # 주문(취소) 송신 스레드 = 판정·실행 스레드 ID (engine.start가 설정, D-038)
         self._gate = gate
         self._executor = executor
@@ -320,7 +323,7 @@ class HaltManager:
             ref = self._reference_time_of(row["account"]) if row["account"] else None
             if ref is None:
                 missing.append("일일 기준 시각 설정 없음")
-            elif self._clock.now() < next_kst_time_after(from_iso(row["created_at"]), ref):
+            elif self._clock.now() < self._market_time.next_after(from_iso(row["created_at"]), ref):
                 missing.append("다음 일일 기준 시각 전")
         if halt_type is HaltType.K3:
             accounts = [row["account"]] if row["account"] else self._repo.accounts()

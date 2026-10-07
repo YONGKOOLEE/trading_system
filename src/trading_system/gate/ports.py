@@ -13,6 +13,8 @@ from typing import Protocol
 
 from trading_system.domain.enums import RequestType
 from trading_system.domain.limits import AccountLimits
+from trading_system.domain.market_time import M1_TIME, MarketTime
+from trading_system.domain.trading_rules import SymbolRules
 from trading_system.domain.strategy import StrategyLimits
 from trading_system.domain.market import (
     CashView, CostRates, DailyRisk, GateSettings, InstrumentInfo, Quote, SessionInfo, TradingStatus,
@@ -30,6 +32,18 @@ class MarketFacts(Protocol):
 
     def tick_valid(self, instrument: str, price: Decimal) -> bool | None:
         """호가 단위에 맞는 가격인지. 규칙을 모르면 None (T-010 호가 단위 설정)."""
+        ...
+
+
+class SymbolRulesSource(Protocol):
+    """현물 심볼 거래 규칙 (M2, CP-024 D-106). M1은 이 입력이 없다(GateInputs.spot_rules = None)."""
+
+    def rules(self, instrument: str) -> SymbolRules | None:
+        """적재된 규칙. 없거나 직전 적재가 실패했으면 None → 위험 확대 거부, 위험 축소 허용."""
+        ...
+
+    def market_prices(self, instrument: str) -> tuple[Decimal, ...]:
+        """시장가 명목가 판정용 참조가들(최근가·avgPrice·referencePrice 중 아는 것). 모르면 빈 튜플."""
         ...
 
 
@@ -66,11 +80,14 @@ class GatePolicy:
     - quote_max_age: 시세 신선도 기준 (01 G11). 값은 사용자 결정 항목.
     - price_limit_ratio: 상한가를 모를 때 시장가 예약 가격 = 최근가 × (1 + 이 값) (03 §6.2, KRX ±30% 확인).
     - cost_rates: 비용 추정 요율 (03 D-065).
+    - market_time: 시장 시각 기준(CP-024 D-108). L8 주문 창·L5 일일 집계·달력 날짜를 이 시각대로 판정한다.
+      기본값 M1(KST)은 기존 M1 호출부를 바꾸지 않기 위한 것이다. M2는 M2_TIME(UTC)을 명시한다.
     """
 
     quote_max_age: timedelta
     price_limit_ratio: Decimal
     cost_rates: CostRates
+    market_time: MarketTime = M1_TIME
 
     @classmethod
     def from_settings(cls, settings: GateSettings) -> GatePolicy:
@@ -92,3 +109,4 @@ class GateInputs:
     account: AccountFacts
     strategies: StrategyFacts
     clock_health: ClockHealth
+    spot_rules: SymbolRulesSource | None = None  # M2 현물 거래 규칙 (D-106). None = M1 (기존 G10 검사만)

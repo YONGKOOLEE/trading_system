@@ -196,6 +196,8 @@ class OrderEvent:
     # 체결 수수료와 수수료 자산 (M2 현물, D-101). 둘 다 없으면 수수료를 포지션에 반영하지 않는다(M1 동작 그대로)
     commission: Decimal | None = None
     commission_asset: str | None = None
+    # 종결 통보(CANCELLED·EXPIRED·REJECTED)의 사유 (예: M2 IOC 미체결분 소멸, D-104). 없으면 종류별 기본 문구(M1 그대로)
+    reason: str | None = None
 
 
 @dataclass(frozen=True)

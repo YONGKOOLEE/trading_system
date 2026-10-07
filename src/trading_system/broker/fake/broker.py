@@ -4,6 +4,8 @@
 - 응답 유실: 브로커는 받았지만(또는 받지 않았지만) 호출자는 응답을 못 받은 상황을 만든다 (E-1, V-40·V-41).
 - 조회 실패·조회 반영 지연을 주입한다 (V-42, PV-05).
 - 단절(연결 수립 전 실패·조회 실패), 전송 후 연결 끊김(어댑터 예외), 통보 중복·순서 뒤바뀜·유실 (T-006, D-062).
+- M2 IOC 지정가(ioc_limit=True, CP-024 D-104·D-120): 접수 즉시 가능한 수량(ioc_liquidity)만 체결하고 남은 수량은
+  EXPIRED로 소멸한다. 기본 꺼짐 — M1 시험 동작 그대로.
 """
 
 from __future__ import annotations
@@ -85,6 +87,9 @@ class FakeBroker:
         self.disconnected = False           # 단절: 주문은 전송 전 실패, 조회는 실패
         self.raise_after_send = False       # 브로커는 받았지만 응답 전에 연결이 끊김 → 어댑터 예외
         self.spot_fees: FakeSpotFees | None = None  # M2 현물 수수료 (없으면 수수료 없음 — M1 시험 동작 그대로)
+        # M2: 지정가 주문을 IOC로 처리 (기본 False — M1 동작 그대로). 종목별 즉시 체결 가능 수량(없으면 전량 체결 가능)
+        self.ioc_limit = False
+        self.ioc_liquidity: dict[str, Decimal] = {}
         self._fees: dict[str, tuple[Decimal, str]] = {}  # 체결번호 → (수수료, 수수료 자산)
         self._seq = 0
         self._day = 0
@@ -108,7 +113,9 @@ class FakeBroker:
             return SubmitResult(SubmitOutcome.UNKNOWN, reason="fake: 응답 없음")
         order_no = self._new_order(request.account, "NEW", request.instrument, request.side, request.quantity,
                                    request.price, request.order_type, None)
-        if self.behavior in (FakeBehavior.FILL, FakeBehavior.LOST_FILL):
+        if self.ioc_limit and request.order_type is OrderType.LIMIT:
+            self._ioc(order_no, self.behavior in (FakeBehavior.FILL, FakeBehavior.LOST_FILL))
+        elif self.behavior in (FakeBehavior.FILL, FakeBehavior.LOST_FILL):
             self.fill(order_no)
         if self.behavior in (FakeBehavior.LOST_ACCEPT, FakeBehavior.LOST_FILL):
             self._book[order_no].visible_after = self.queries + self.query_delay
@@ -191,6 +198,17 @@ class FakeBroker:
             self._fees[fill_id] = fee
         self._events.append(OrderEvent(kind="FILL", order_no=order_no, fill_id=fill_id, quantity=qty, price=px,
                                        commission=fee[0] if fee else None, commission_asset=fee[1] if fee else None))
+
+    def _ioc(self, order_no: str, fill: bool) -> None:
+        """IOC: 즉시 체결 가능한 수량만 체결(주문 가격), 남은 수량은 EXPIRED (BN §5 "IOC·MARKET 부분 체결 → EXPIRED")."""
+        o = self._book[order_no].record
+        available = self.ioc_liquidity.get(o.instrument, o.quantity) if fill else Decimal("0")
+        qty = min(max(available, Decimal("0")), o.quantity)
+        if qty > 0:
+            self.fill(order_no, qty)
+        if self._book[order_no].record.state in _OPEN:
+            self._set(order_no, state="EXPIRED")
+            self._events.append(OrderEvent(kind="EXPIRED", order_no=order_no, reason="IOC 미체결분 소멸 (D-104)"))
 
     def expire_open(self) -> list[str]:
         """장 마감: 미체결 잔량을 소멸시킨다 (03 §6.4)."""
