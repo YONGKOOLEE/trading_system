@@ -24,6 +24,7 @@ from trading_system.domain.strategy import Bar, EvaluationSnapshot, InstrumentVi
 
 from .calendar import KrxCalendar
 from .quality import Prepared, RawDaily, preprocess_daily
+from .quote_log import LoggedQuote, PollStats, QuoteHistory
 from .ticks import TickTable
 
 
@@ -76,14 +77,32 @@ class MarketDataStore:
     alerts: AlertSink | None = None
     account: str | None = None
     _data: dict[str, _Instrument] = field(default_factory=dict)
+    # 진단용 시세 기록 (T-023, CP-027 draft): 게이트 입력이 아니다. 실패해도 시세 갱신을 막지 않는다
+    history: QuoteHistory = field(default_factory=QuoteHistory)
+    poll_stats: PollStats = field(default_factory=PollStats)
 
     # --- 갱신 (공급자) ------------------------------------------------------------------
     def register(self, info: InstrumentInfo) -> None:
         cur = self._data.get(info.instrument)
         self._data[info.instrument] = _Instrument(info) if cur is None else replace(cur, info=info)
 
-    def update_quote(self, quote: Quote) -> None:
+    def update_quote(self, quote: Quote, source: str = "-") -> None:
         self._get(quote.instrument).quote = quote
+        try:   # 진단 기록 실패는 게이트 입력(위 한 줄)에 영향 없음 (CP-027 D-143)
+            self.history.add(quote, source)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def quote_at(self, instrument: str, at: datetime) -> LoggedQuote | None:
+        """진단용(T-023): at 시각에 알던 마지막 시세. 게이트·전략은 쓰지 않는다."""
+        return self.history.at_or_before(instrument, at)
+
+    def tick_of(self, instrument: str, price: Decimal) -> Decimal | None:
+        """진단용(T-023): 그 가격의 호가 단위. 규칙 파일·종목 정보가 없으면 None."""
+        inst = self._data.get(instrument)
+        if inst is None or self.ticks is None:
+            return None
+        return self.ticks.tick_of(inst.info.kind, price)
 
     def update_status(self, instrument: str, statuses: frozenset[TradingStatus], held: bool = False) -> None:
         inst = self._get(instrument)

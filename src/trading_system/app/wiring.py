@@ -31,6 +31,7 @@ from trading_system.gate.gate import Gate
 from trading_system.gate.ports import ClockHealth, GateInputs, GatePolicy
 from trading_system.halt.manager import HaltManager
 from trading_system.marketdata.store import MarketDataStore
+from trading_system.monitoring.market_log import MarketDataRecorder
 from trading_system.monitoring.watchers import AlertThresholds, AlertWatcher, ConservativeCashFacts, DailyRiskTracker
 from trading_system.ops.commands import OpsProcessor
 from trading_system.ops.reconcile import ReconcileResolver
@@ -133,9 +134,14 @@ def build_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: BrokerAd
     if alert_thresholds is not None:
         watcher = AlertWatcher(repo, alerts, AlertThresholds(account_limits.warn_usage_ratio, *alert_thresholds),
                                account_limits.daily_reference_time)
-    return Engine(repo=repo, clock=clock, broker=broker, store=store, gate=gate, executor=executor, halts=halts,
-                  resolver=resolver, reconciler=reconciler, recovery=recovery, ops=ops, registry=registry,
-                  account_state=acct, reporter=DailyReporter(repo, alerts, gate_settings.cost_rates, price_of),
-                  watcher=watcher, alerts=alerts, account=account,
-                  limits=lambda: settings.effective_limits(account), strategies=loaded,
-                  reconcile_every=reconcile_every)
+    engine = Engine(repo=repo, clock=clock, broker=broker, store=store, gate=gate, executor=executor, halts=halts,
+                    resolver=resolver, reconciler=reconciler, recovery=recovery, ops=ops, registry=registry,
+                    account_state=acct, reporter=DailyReporter(repo, alerts, gate_settings.cost_rates, price_of),
+                    watcher=watcher, alerts=alerts, account=account,
+                    limits=lambda: settings.effective_limits(account), strategies=loaded,
+                    reconcile_every=reconcile_every)
+    # 시세 기록 (T-023, CP-027 draft): tick 끝의 훅으로 원장을 읽기만 하고 진단 표에 쓴다. 주문 경로 밖 (D-143)
+    recorder = MarketDataRecorder(repo, clock, account, store.quote_at, store.tick_of, store.poll_stats.drain,
+                                  alerts=alerts, log_dir_of=lambda: engine.log_dir)
+    engine.on_tick.append(recorder.on_tick)
+    return engine

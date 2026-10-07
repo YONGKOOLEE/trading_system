@@ -112,6 +112,19 @@ CREATE TABLE IF NOT EXISTS notification (
 CREATE TABLE IF NOT EXISTS audit_event (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT NOT NULL, at TEXT NOT NULL, kind TEXT NOT NULL,
   actor TEXT NOT NULL, ref TEXT, summary TEXT NOT NULL);
+-- 시세 기록 (T-023, CP-027 draft D-141·D-142·D-144): 진단 전용 추가 표. 기존 표·의미를 바꾸지 않으므로 스키마
+-- 버전을 올리지 않는다 — 기존 저장소도 열 때 생성(아래 인덱스와 같은 방식). 주문 경로는 이 표를 읽지 않는다
+CREATE TABLE IF NOT EXISTS quote_snapshot (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT NOT NULL, event TEXT NOT NULL, ref TEXT NOT NULL,
+  account TEXT NOT NULL, instrument TEXT NOT NULL, side TEXT NOT NULL, intent_id TEXT,
+  event_at TEXT NOT NULL, event_price TEXT, event_quantity TEXT,
+  quote_price TEXT, quote_at TEXT, quote_source TEXT, quote_age_seconds TEXT, tick TEXT,
+  recorded_at TEXT NOT NULL, UNIQUE (event, ref));
+CREATE TABLE IF NOT EXISTS quote_poll_stat (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT NOT NULL, window_start TEXT NOT NULL, window_end TEXT NOT NULL,
+  watched INTEGER NOT NULL, instruments INTEGER NOT NULL, requests INTEGER NOT NULL, failures INTEGER NOT NULL,
+  latency_ms_p50 INTEGER, latency_ms_max INTEGER, interval_avg_seconds TEXT, interval_max_seconds TEXT,
+  response_fields TEXT, recorded_at TEXT NOT NULL);
 -- 조회 인덱스: 데이터 의미 불변이라 스키마 버전을 올리지 않는다 — 기존 저장소도 열 때 생성 (review C절, DP-38)
 CREATE INDEX IF NOT EXISTS ix_intent_state ON intent(state);
 CREATE INDEX IF NOT EXISTS ix_ops_command_status ON ops_command(status);
@@ -790,6 +803,49 @@ class Repository:
     def decisions_since(self, account: str, since: datetime) -> list[dict]:
         return [dict(r) for r in self._x("SELECT * FROM gate_decision WHERE account=? AND created_at>=? ORDER BY seq",
                                          (account, to_iso(since)))]
+
+    # --- 시세 기록 (T-023, CP-027 draft) — 진단 전용, 주문 경로에서 부르지 않는다 ----------------
+    def last_rowid(self, table: str) -> int:
+        if table not in ("attempt", "fill"):
+            raise ValueError(f"허용하지 않는 표 {table}")
+        return int(self._x(f"SELECT COALESCE(MAX(rowid), 0) FROM {table}").fetchone()[0])
+
+    def attempts_after(self, rowid: int, account: str) -> list[dict]:
+        """rowid 뒤의 전송 시도 + 의도 요약 (계좌 한정, 순서대로)."""
+        return [dict(r) for r in self._x(
+            "SELECT a.rowid AS rid, a.attempt_id, a.created_at, i.intent_id, i.instrument, i.side, i.request_type, "
+            "i.price FROM attempt a JOIN intent i ON i.intent_id = a.intent_id "
+            "WHERE a.rowid > ? AND i.account = ? ORDER BY a.rowid", (rowid, account))]
+
+    def fills_after(self, rowid: int, account: str) -> list[dict]:
+        """rowid 뒤의 체결 + 브로커 주문 요약 (계좌 한정, 순서대로)."""
+        return [dict(r) for r in self._x(
+            "SELECT f.rowid AS rid, f.fill_key, f.quantity, f.price, f.at, b.instrument, b.side, b.intent_id "
+            "FROM fill f JOIN broker_order b ON b.order_key = f.order_key "
+            "WHERE f.rowid > ? AND b.account = ? ORDER BY f.rowid", (rowid, account))]
+
+    def insert_quote_snapshot(self, row: dict) -> None:
+        """같은 (사건, 참조)는 한 번만 (INSERT OR IGNORE)."""
+        def t(v: object) -> object:
+            return to_iso(v) if isinstance(v, datetime) else (None if v is None else str(v))
+        self._x("INSERT OR IGNORE INTO quote_snapshot(mode, event, ref, account, instrument, side, intent_id, event_at, "
+                "event_price, event_quantity, quote_price, quote_at, quote_source, quote_age_seconds, tick, "
+                "recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (self.mode.value, row["event"], row["ref"], row["account"], row["instrument"], row["side"],
+                 row.get("intent_id"), t(row["event_at"]), t(row.get("event_price")), t(row.get("event_quantity")),
+                 t(row.get("quote_price")), t(row.get("quote_at")), row.get("quote_source"),
+                 t(row.get("quote_age_seconds")), t(row.get("tick")), t(row["recorded_at"])))
+
+    def insert_poll_stat(self, row: dict) -> None:
+        fields = row.get("response_fields")
+        self._x("INSERT INTO quote_poll_stat(mode, window_start, window_end, watched, instruments, requests, failures, "
+                "latency_ms_p50, latency_ms_max, interval_avg_seconds, interval_max_seconds, response_fields, "
+                "recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (self.mode.value, to_iso(row["window_start"]), to_iso(row["window_end"]), int(row["watched"]),
+                 int(row["instruments"]), int(row["requests"]), int(row["failures"]), row.get("latency_ms_p50"),
+                 row.get("latency_ms_max"), row.get("interval_avg_seconds"), row.get("interval_max_seconds"),
+                 None if fields is None else json.dumps(list(fields), ensure_ascii=False),
+                 to_iso(row["recorded_at"])))
 
     def select(self, sql: str, params: tuple = ()) -> list[dict]:
         """읽기 전용 질의 (보고서용). SELECT만 허용한다."""

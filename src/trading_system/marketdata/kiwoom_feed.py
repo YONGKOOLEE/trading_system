@@ -23,6 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from time import monotonic
 from typing import Protocol
 
 from trading_system.broker.base import BrokerQueryError
@@ -85,10 +86,20 @@ class KiwoomMarketFeed:
     _limit_status: dict[str, frozenset[TradingStatus]] = field(default_factory=dict)
     _lock: threading.RLock = field(default_factory=threading.RLock)
     failures: dict[str, int] = field(default_factory=dict)
+    mono: Callable[[], float] = field(default_factory=lambda: monotonic)   # 조회 지연 측정 (T-023, PV-15)
 
     def __post_init__(self) -> None:
         for info in self.infos.values():
             self.store.register(info)
+        self.store.poll_stats.watched = len(self.infos)
+
+    def _observe_poll(self, code: str, ok: bool, started: float, body: dict | None) -> None:
+        """시세 조회 관찰 (진단 전용, CP-027 D-142): 지연·성공 여부·응답 필드 **이름**. 실패해도 시세 갱신에 영향 없음."""
+        try:
+            self.store.poll_stats.observe(code, ok, self.mono() - started, self._now(),
+                                          fields=list(body) if isinstance(body, dict) else None)
+        except Exception:  # noqa: BLE001
+            pass
 
     # --- 공통 -----------------------------------------------------------------------------
     def _now(self) -> datetime:
@@ -162,8 +173,9 @@ class KiwoomMarketFeed:
 
     # --- 시세·상하한가 ------------------------------------------------------------------------
     def refresh_quote(self, code: str) -> Quote | None:
+        started, body = self.mono(), None
         try:
-            with call_priority(Priority.MARKET):
+            with call_priority(Priority.MARKET):   # 지연 = 호출 제한 대기 포함 (PV-15)
                 body, _ = self.api.query_raw(INFO_PATH, "ka10001", {"stk_cd": code}, None)
             price = parse.price(body.get("cur_prc"), "cur_prc")
             upper = parse.price(body.get("upl_pric"), "upl_pric")
@@ -171,8 +183,10 @@ class KiwoomMarketFeed:
             if not (Decimal("0") < lower < upper and lower <= price <= upper):
                 raise parse.KiwoomParseError("현재가·상하한가가 그럴듯하지 않음")
         except (BrokerQueryError, parse.KiwoomParseError) as exc:
+            self._observe_poll(code, False, started, None)
             self._fail(f"ka10001:{code}", exc)
             return None
+        self._observe_poll(code, True, started, body)
         self._ok(f"ka10001:{code}")
         q = Quote(code, price, self._now(), upper_limit=upper, lower_limit=lower)  # 받은 시각 (D-095)
         with self._lock:
@@ -180,7 +194,7 @@ class KiwoomMarketFeed:
             self._limit_status[code] = frozenset(
                 {TradingStatus.UPPER_LIMIT} if price == upper else ({TradingStatus.LOWER_LIMIT} if price == lower
                                                                      else set()))
-            self.store.update_quote(q)
+            self.store.update_quote(q, source="ka10001")
         self._compose(code)
         return q
 
@@ -279,7 +293,7 @@ class KiwoomMarketFeed:
                 self._limits[code] = (upper, lower)
                 q = self.store.quote(code)
                 if q is not None:  # 가격·시각은 그대로, 한도만 갱신
-                    self.store.update_quote(replace(q, upper_limit=upper, lower_limit=lower))
+                    self.store.update_quote(replace(q, upper_limit=upper, lower_limit=lower), source="0g")
 
         def h0s(item: str, values: dict) -> None:
             if str(values.get("215") or "").strip() == "3":   # 장 시작(09:00)
