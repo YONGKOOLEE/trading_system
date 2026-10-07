@@ -2,7 +2,8 @@
 
 1. status 정지 발동 시각을 KST로 표시한다 (다른 시각 항목과 같게).
 2. 텔레그램 스레드(알림 전송·명령 수신)가 죽으면 감시 스레드가 긴급 알림을 낸다. 정지(K5 등)는 걸지 않는다 —
-   정지 규칙 추가는 승인 대상이라 제안으로 남김.
+   정지 규칙 추가는 승인 대상이라 제안으로 남김. → CP-028(A-074)로 알림 전송 스레드 종료는 K11로 바뀜
+   (test_cp028_resilience V-194). 명령 수신 스레드는 그대로 알림만(Q-2).
 """
 
 from __future__ import annotations
@@ -66,10 +67,12 @@ def test_unstarted_telegram_thread_not_reported(world: World) -> None:  # noqa: 
     assert not any("스레드 종료" in m for m in alerts_of(world))
 
 
-def test_watched_threads_includes_telegram_as_alert_only() -> None:
+def test_watched_threads_includes_telegram_poll_as_alert_only() -> None:
+    """CP-028(A-074 Q-1 B·Q-2)로 바뀜: 알림 전송 스레드는 K11 감시(V-194), 명령 수신 스레드만 알림만."""
     from trading_system.app.main import watched_threads
     io = [threading.Thread(name="market-poller"), threading.Thread(name="telegram-notify"),
           threading.Thread(name="telegram-poll"), threading.Thread(name="other")]
-    halting, alert_only = watched_threads(io, None)
+    halting, k11, alert_only = watched_threads(io, None)
     assert [label for _, label in halting] == ["시세 조회"]
-    assert sorted(label for _, label in alert_only) == ["텔레그램 명령 수신", "텔레그램 알림 전송"]
+    assert [label for _, label in k11] == ["텔레그램 알림 전송"]
+    assert [label for _, label in alert_only] == ["텔레그램 명령 수신"]

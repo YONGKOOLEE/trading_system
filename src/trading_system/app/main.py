@@ -97,15 +97,16 @@ class _WsThreadRef:
 TELEGRAM_THREAD_LABELS = {"telegram-notify": "텔레그램 알림 전송", "telegram-poll": "텔레그램 명령 수신"}
 
 
-def watched_threads(io_threads: Sequence[threading.Thread], rt: object | None) -> tuple[list, list]:
-    """감시 스레드가 생존을 볼 입출력 스레드: (죽으면 긴급 알림 + K5, 죽으면 긴급 알림만).
+def watched_threads(io_threads: Sequence[threading.Thread], rt: object | None) -> tuple[list, list, list]:
+    """감시 스레드가 생존을 볼 입출력 스레드: (죽으면 긴급 알림 + K5, 죽으면 긴급 알림 + K11, 죽으면 긴급 알림만).
 
-    텔레그램 스레드는 알림만 — 정지 조건 추가는 01 정지 표 변경(승인 대상)이라 넣지 않는다."""
+    텔레그램 알림 전송 스레드는 K11(CP-028 D-147, A-074 Q-1 B), 명령 수신 스레드는 알림만(Q-2)."""
     halting: list = [(t, "시세 조회") for t in io_threads if t.name == "market-poller"]
     if rt is not None:
         halting.append((_WsThreadRef(rt), "실시간 수신"))   # 3차 검토 낮음: WS 스레드 생존
-    alert_only: list = [(t, TELEGRAM_THREAD_LABELS[t.name]) for t in io_threads if t.name in TELEGRAM_THREAD_LABELS]
-    return halting, alert_only
+    k11: list = [(t, TELEGRAM_THREAD_LABELS[t.name]) for t in io_threads if t.name == "telegram-notify"]
+    alert_only: list = [(t, TELEGRAM_THREAD_LABELS[t.name]) for t in io_threads if t.name == "telegram-poll"]
+    return halting, k11, alert_only
 
 
 def ws_state_handler(engine: Engine, account: str):  # type: ignore[no-untyped-def]
@@ -250,10 +251,11 @@ def _run(root: Path, mode: Mode, base: Path, startup, app: AppSettings, gate_set
                                        stop, log_dir=base / "logs")   # 03 D-052: 알림·원격 명령 (기본 꺼짐)
         # 시작 일봉(extra 안, 이 스레드) 뒤로는 시세 스레드가 K10을 걸므로 큐 경유 (3차 검토 F-5, RV-22)
         store.halts = QueuedHalts(engine)
-        watched, watched_alert_only = watched_threads(io_threads, getattr(extra, "rt", None))
+        watched, watched_k11, watched_alert_only = watched_threads(io_threads, getattr(extra, "rt", None))
         # 감시 스레드 (RV-22, D-038): KILL 즉시 반영·하트비트·루프 감시·SNTP·입출력 스레드 생존. 주문은 하지 않는다
         sup = Supervisor(engine, heartbeat=base / "heartbeat", fallback=engine.fallback_file,
-                         clock_monitor=clock_monitor, watched=watched, watched_alert_only=watched_alert_only)
+                         clock_monitor=clock_monitor, watched=watched, watched_k11=watched_k11,
+                         watched_alert_only=watched_alert_only)
         sup_thread = threading.Thread(target=sup.run, args=(stop,), name="supervisor", daemon=True)
         sup_thread.start()
         threads.append(sup_thread)
