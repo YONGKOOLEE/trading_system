@@ -5,7 +5,8 @@ PAPER 저장소(var/paper/trading.db)를 읽기 전용 연결로 열어 PAPER-0 
 
 다루는 항목: 기간·거래일, 거래 왕복, 게이트 결과, 의도 종결 상태, 결과 불명, 중복 검사, 주문번호(PV-02),
 전송→결과 지연(PV-05), 체결 금액·추정 비용(PV-07, 앱 내역과 비교용), 정지 이력, 대조, 시계 점검, 운영 명령, 알림,
-일일 기준(DAILY_BASE). 시세 이력은 저장하지 않으므로 PV-10·PV-15는 "데이터 없음"으로 표시한다.
+일일 기준(DAILY_BASE), [T-023 CP-027 draft] PV-10 체결가 − 시세(전송 시점·체결 시점, 틱), PV-15 시세 조회 주기·지연.
+시세 기록 표(quote_snapshot·quote_poll_stat)가 없는 저장소(이 기능 전)는 "시세 기록 표 없음"으로 표시한다.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from trading_system.domain.market import CostRates, estimate_cost
 
 # 키움 kt00001 관찰 필드 (broker/kiwoom/adapter.CASH_OBSERVED_FIELDS와 같음 — reporting은 broker를 import하지 않는다)
 CASH_FIELDS = ("entr", "d1_entra", "d2_entra", "ord_alow_amt", "pymn_alow_amt")
+QUOTE_MAX_AGE_SECONDS = Decimal("60")   # 03 D-095 시세 신선도 — PV-15 기준 "주기 × 3 ≤ 60초"
 
 
 @dataclass
@@ -49,6 +51,9 @@ class Review:
     emergencies: list[str] = field(default_factory=list)
     daily_bases: list[dict] = field(default_factory=list)
     cash_observations: list[dict] = field(default_factory=list)
+    market_log: bool = False                                            # 시세 기록 표 있음 (T-023)
+    slippage: list[dict] = field(default_factory=list)                  # PV-10 체결마다
+    poll_stats: list[dict] = field(default_factory=list)                # PV-15 창마다
 
 
 def _kst(text: str | None) -> str:
@@ -151,7 +156,64 @@ def _collect(conn: sqlite3.Connection, db: str, rates: CostRates | None) -> Revi
             r.alerts[s.get("level", "?")] += 1
             if s.get("level") == "EMERGENCY":
                 r.emergencies.append(f"{_kst(e['at'])} {str(s.get('message', ''))[:100]}")
+    _collect_market_log(conn, r)
     return r
+
+
+def _dec(text: object) -> Decimal | None:
+    try:
+        return None if text is None else Decimal(str(text))
+    except ArithmeticError:
+        return None
+
+
+def _slip(side: str, fill: Decimal | None, quote: Decimal | None) -> Decimal | None:
+    """체결가 − 시세, 불리한 방향이 양수 (매수: 비싸게 산 만큼, 매도: 싸게 판 만큼)."""
+    if fill is None or quote is None:
+        return None
+    d = fill - quote
+    return d if side == "BUY" else -d
+
+
+def _ticks(v: Decimal | None, tick: Decimal | None) -> str:
+    if v is None or tick is None or tick <= 0:
+        return "-"
+    t = v / tick
+    return str(t.to_integral_value()) if t == t.to_integral_value() else f"{t:.2f}"
+
+
+def _collect_market_log(conn: sqlite3.Connection, r: Review) -> None:
+    """PV-10·PV-15 (T-023). 표가 없으면(이 기능 전 저장소) 건너뛴다 — 읽기 전용이라 만들지 않는다."""
+    names = {n for (n,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if not {"quote_snapshot", "quote_poll_stat"} <= names:
+        return
+    r.market_log = True
+    snaps = _rows(conn, "SELECT * FROM quote_snapshot ORDER BY seq")
+    sends = {s["intent_id"]: s for s in snaps if s["event"] == "SEND" and s["intent_id"]}
+    for f in (s for s in snaps if s["event"] == "FILL"):
+        send = sends.get(f["intent_id"])
+        price = _dec(f["event_price"])
+        q_send = _dec(send["quote_price"]) if send is not None else None
+        q_fill = _dec(f["quote_price"])
+        tick = (_dec(send["tick"]) if send is not None else None) or _dec(f["tick"])
+        s_send, s_fill = _slip(f["side"], price, q_send), _slip(f["side"], price, q_fill)
+        r.slippage.append({
+            "at": _kst(f["event_at"]), "instrument": f["instrument"], "side": f["side"], "qty": f["event_quantity"],
+            "price": f["event_price"], "quote_send": str(q_send) if q_send is not None else "-",
+            "age_send": (send["quote_age_seconds"] if send is not None else None) or "-",
+            "slip_send": str(s_send) if s_send is not None else "-", "slip_send_ticks": _ticks(s_send, tick),
+            "quote_fill": str(q_fill) if q_fill is not None else "-", "age_fill": f["quote_age_seconds"] or "-",
+            "slip_fill": str(s_fill) if s_fill is not None else "-", "slip_fill_ticks": _ticks(s_fill, tick),
+            "tick": str(tick) if tick is not None else "-"})
+    for p in _rows(conn, "SELECT * FROM quote_poll_stat ORDER BY seq"):
+        mx = _dec(p["interval_max_seconds"])
+        r.poll_stats.append({
+            "start": _kst(p["window_start"]), "end": _kst(p["window_end"]), "watched": p["watched"],
+            "instruments": p["instruments"], "requests": p["requests"], "failures": p["failures"],
+            "lat_p50": p["latency_ms_p50"], "lat_max": p["latency_ms_max"],
+            "iv_avg": p["interval_avg_seconds"] or "-", "iv_max": p["interval_max_seconds"] or "-",
+            "over_limit": mx is not None and mx * 3 > QUOTE_MAX_AGE_SECONDS,
+            "fields": ", ".join(json.loads(p["response_fields"])) if p["response_fields"] else ""})
 
 
 def _table(head: list[str], rows: list[list[object]]) -> list[str]:
@@ -204,7 +266,41 @@ def render_markdown(r: Review) -> str:
     L += ["## 예수금 관찰 (CASH_OBSERVED, DP-31)", "", "값이 바뀔 때만 기록. 관찰 전용(게이트 계산에 쓰지 않음)", ""]
     L += _table(["시각", "예수금(내부)", "주문가능", *CASH_FIELDS],
                 [[c["at"], c["deposit"], c["orderable"], *(c[k] for k in CASH_FIELDS)] for c in r.cash_observations]) + [""]
-    L += ["## 이 기록으로 볼 수 없는 것", "",
-          "- PV-10 체결가 vs 같은 시각 시세, PV-15 시세 조회 주기: 시세 이력을 저장하지 않음 → 운영 로그·키움 앱으로",
-          "- 키움 앱 화면의 예수금과 응답 필드의 일치: 필요하면 사용자가 앱과 대조", ""]
+    L += _render_market_log(r)
+    L += ["## 이 기록으로 볼 수 없는 것", ""]
+    if r.market_log:
+        L += ["- PV-10 시세는 시스템이 받은 시각 기준의 마지막 조회값이다(체결 순간의 거래소 가격 아님). "
+              "시세 나이(초)가 조회 주기만큼 클 수 있으니 나이와 함께 본다",
+              "- 메모리 시세 이력은 재시작 때 비워진다 — 재시작 전 사건과 재시작 직후 첫 조회 전 사건은 시세 '-'"]
+    else:
+        L += ["- PV-10·PV-15: 이 저장소에는 시세 기록 표 없음(T-023 전) → 운영 로그·키움 앱으로"]
+    L += ["- 키움 앱 화면의 예수금과 응답 필드의 일치: 필요하면 사용자가 앱과 대조", ""]
     return "\n".join(L)
+
+
+def _render_market_log(r: Review) -> list[str]:
+    if not r.market_log:
+        return ["## 시세 기록 (PV-10·PV-15)", "", "- 시세 기록 표 없음 (이 기능 전 저장소)", ""]
+    L = ["## 체결가 vs 시세 (PV-10)", "",
+         "차이 = 체결가 − 시세, 불리한 방향이 양수(매수는 비싸게, 매도는 싸게). 틱 = 차이 ÷ 호가 단위(전송 시 시세 기준). "
+         "나이 = 사건 시각 − 시세를 받은 시각(초)", ""]
+    L += _table(["체결(KST)", "종목", "매매", "수량", "체결가", "전송 시 시세", "나이", "차이", "틱",
+                 "체결 시 시세", "나이", "차이", "틱"],
+                [[x["at"], x["instrument"], x["side"], x["qty"], x["price"], x["quote_send"], x["age_send"],
+                  x["slip_send"], x["slip_send_ticks"], x["quote_fill"], x["age_fill"], x["slip_fill"],
+                  x["slip_fill_ticks"]] for x in r.slippage]) + [""]
+    ticks = [Decimal(x["slip_send_ticks"]) for x in r.slippage if x["slip_send_ticks"] != "-"]
+    L += [f"- 전송 시 시세 대비 평균 {sum(ticks, Decimal(0)) / len(ticks):.2f}틱 ({len(ticks)}건)" if ticks
+          else "- 전송 시 시세 대비 틱 계산 가능한 체결 없음", ""]
+    L += ["## 시세 조회 주기·지연 (PV-15)", "",
+          f"간격 = 같은 종목의 연속 성공 조회 사이(초). 기준: 최대 간격 × 3 ≤ {QUOTE_MAX_AGE_SECONDS}초 (03 D-095). "
+          "지연 = 조회 요청~응답(호출 제한 대기 포함, ms)", ""]
+    L += _table(["창 시작(KST)", "창 끝", "감시 종목", "조회 종목", "조회", "실패", "지연 중앙", "지연 최대",
+                 "간격 평균", "간격 최대", "기준"],
+                [[p["start"], p["end"], p["watched"], p["instruments"], p["requests"], p["failures"], p["lat_p50"],
+                  p["lat_max"], p["iv_avg"], p["iv_max"], "초과" if p["over_limit"] else "이내"]
+                 for p in r.poll_stats]) + [""]
+    fields = [(p["start"], p["fields"]) for p in r.poll_stats if p["fields"]]
+    L += ["### 시세 응답 필드 이름 (ka10001, 값은 기록하지 않음 — 체결 시각 필드 유무 확인용)", ""]
+    L += [f"- {at}: {names}" for at, names in fields] or ["- 기록 없음"]
+    return L + [""]
