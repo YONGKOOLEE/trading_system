@@ -113,6 +113,11 @@ def make_root(tmp: Path, sntp_port: int) -> Path:
         shutil.copy(REPO / rel, root / rel)
     shutil.copytree(REPO / "config" / "calendar", root / "config" / "calendar")
     app = (REPO / "config" / "app.paper.toml").read_text(encoding="utf-8")
+    # 배포 설정 v2 교체(2026-10-07, A-067 B-5) — 예행연습은 v1 기준이라 복사본의 전략 항목만 v1로 고정(시험 변경 사유 기록)
+    for v2, v1 in (("paper0_verify:Paper0VerifyV2", "paper0_verify:Paper0Verify"),
+                   ("paper0-verify-v2.toml", "paper0-verify-v1.toml"),
+                   ('verification_approval = "A-067"', 'verification_approval = "A-037"')):
+        app = app.replace(v2, v1)
     lines = [f'sntp_servers = ["127.0.0.1:{sntp_port}"]' if ln.startswith("sntp_servers") else ln
              for ln in app.splitlines()
              if ln.strip() not in ("[telegram]", "enabled = true", "enabled = false")]  # 텔레그램은 test_telegram_run에서

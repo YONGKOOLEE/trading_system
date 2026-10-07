@@ -26,8 +26,9 @@ lot_size = "1"
 
 # PAPER-0 검증 전략 (T-016, 04 §4.1). verification_approval = DP-24 해법 (a) 승인 A-037.
 # 신호가 나가려면 상태가 PAPER여야 한다: scripts/strategy.py transition (사용자 승인 A-ID 필요, INV-13)
+# 2026-10-07 v1 → v2 교체 (A-067 B-5, 보유 0건 확인 뒤). v1 설정: Paper0Verify, paper0-verify-v1.toml, A-037
 [[strategies]]
-module = "trading_system.strategy.paper0_verify:Paper0Verify"
-params = "config/strategies/paper0-verify-v1.toml"
+module = "trading_system.strategy.paper0_verify:Paper0VerifyV2"
+params = "config/strategies/paper0-verify-v2.toml"
 eval_times = ["09:30", "14:30"]
-verification_approval = "A-037"
+verification_approval = "A-067"

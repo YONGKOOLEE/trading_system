@@ -96,6 +96,15 @@ def make_root(tmp: Path) -> Path:
                 "config/strategies/paper0-verify-v1.toml", "docs/capabilities.md"):
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_text((ROOT / rel).read_text(encoding="utf-8"), encoding="utf-8")
+    # 배포 설정은 2026-10-07 v2로 교체됨(A-067 B-5). 이 시험들은 v1 기준 엔진 동작을 보므로 복사본의 전략 항목만 v1로
+    # 고정한다(시험 변경 사유: 배포 설정 교체 — 시험 대상 동작은 그대로. v2 시험은 test_t017_paper0_v2·test_t017_gaps)
+    app = root / "config" / "app.paper.toml"
+    text = app.read_text(encoding="utf-8")
+    for v2, v1 in (("paper0_verify:Paper0VerifyV2", "paper0_verify:Paper0Verify"),
+                   ("paper0-verify-v2.toml", "paper0-verify-v1.toml"),
+                   ('verification_approval = "A-067"', 'verification_approval = "A-037"')):
+        text = text.replace(v2, v1)
+    app.write_text(text, encoding="utf-8")
     assert strategy_main(["register", "--mode", "PAPER", "--root", str(root)]) == 0
     evidence = root / "var" / "backtest" / "paper0-verify-v1" / "report.md"
     evidence.parent.mkdir(parents=True, exist_ok=True)
