@@ -2,7 +2,8 @@
 
 로컬 CLI·메신저(T-013) → DB 명령 테이블(명령 ID = 멱등키) → 이 처리기 → 정지 관리 또는 게이트.
 - 운영 요청은 취소·감액·청산만 (신규 진입·증액 불가, R-21). 요청은 반드시 게이트를 거친다.
-- 원격 채널: 킬 스위치 발동·K1/K2 재개·취소·감액·청산. 결과 불명 확정은 로컬만.
+- 원격 채널: 킬 스위치 발동·K1/K2 재개·취소·감액·청산·대조. K4/K8 재개는 명령 처리 중 새 대조를 거쳐서만 (CP-026).
+  결과 불명 확정·불일치 해소는 로컬만.
 - 원격 인증(허용 채팅 ID·확인 코드)은 T-013. 이 처리기는 기록된 채널 값을 믿는다.
 """
 
@@ -16,13 +17,15 @@ from decimal import Decimal, InvalidOperation
 
 from trading_system.domain.clock import Clock
 from trading_system.domain.enums import GateResult, HaltType, OrderType, RequestSource, RequestType, Side
+from trading_system.domain.halts import REMOTE_FRESH_RECONCILE
 from trading_system.domain.models import GateRequest
 from trading_system.execution.executor import ExecutionBlocked, Executor
 from trading_system.gate.gate import Gate
 from trading_system.halt.manager import Channel, HaltManager
 from trading_system.storage.repository import Repository
 
-LOCAL_ONLY = frozenset({"CONFIRM_UNKNOWN", "RECONCILE", "RECONCILE_RESOLVE", "STRATEGY_SYNC"})
+LOCAL_ONLY = frozenset({"CONFIRM_UNKNOWN", "RECONCILE_RESOLVE", "STRATEGY_SYNC"})
+REMOTE_RESUME_TRIGGER = "REMOTE_RESUME"   # 원격 K4·K8 재개 직전 대조의 사유 (CP-026)
 SUPERSEDED_BY_KILL = "뒤이은 KILL 명령이 있어 K1 재개 거부 (사용자의 마지막 의사 = KILL)"
 KNOWN = frozenset({"KILL", "RESUME", "CANCEL", "REDUCE", "EXIT", "CONFIRM_UNKNOWN", "RECONCILE", "RECONCILE_RESOLVE",
                    "STRATEGY_SYNC"})
@@ -150,10 +153,15 @@ class OpsProcessor:
             return "DONE", f"K1 발동 {halt_id}"
         if name == "RESUME":
             halt_type = HaltType(args["halt_type"])
+            fresh = None
+            if channel == Channel.REMOTE and halt_type in REMOTE_FRESH_RECONCILE:
+                fresh, refused = self._fresh_reconcile(account)
+                if refused:
+                    return "REJECTED", refused
             # 대기 명령을 읽은 뒤 들어온 KILL(감시 스레드 fast_kill은 기존 K1을 보고 행을 남기지 않음)도 RESUME 적용
             # 저장 단위 안에서 다시 확인한다 — 풀린 K1로 같은 tick에 신규 진입이 나가지 않게 (3차 검토 #2)
             check = (lambda: self._later_kill(seq)) if halt_type is HaltType.K1 and seq is not None else None
-            r = self._halts.resume(halt_type, account, channel, actor, superseded=check)
+            r = self._halts.resume(halt_type, account, channel, actor, superseded=check, fresh_recon=fresh)
             note = r.reason
             if self._kill_file is not None and self._kill_file.exists():
                 note += " / KILL 파일 있음: 위험 확대 전송은 계속 차단 (로컬에서만 삭제, V-119)"
@@ -168,7 +176,7 @@ class OpsProcessor:
             if self._reconciler is None:
                 raise CommandError("대조기가 연결되지 않음")
             r = self._reconciler.run(args["account"], "MANUAL")
-            return "DONE", f"대조 {getattr(r, 'result', r)}"
+            return "DONE", f"대조 {getattr(r, 'result', r)}, 열린 불일치 {len(self._repo.open_recon_items(args['account']))}건"
         if name == "RECONCILE_RESOLVE":
             if self._resolver is None:
                 raise CommandError("해소기가 연결되지 않음")
@@ -184,6 +192,20 @@ class OpsProcessor:
             return "REJECTED", f"게이트 거부 {d.failed_check}: {d.reason}"
         state = self._executor.submit(d.approved)
         return "DONE", f"의도 {d.approved.intent_id} {state.value}"
+
+    def _fresh_reconcile(self, account: str | None) -> tuple[str | None, str | None]:
+        """원격 K4·K8 재개 직전에 대조를 새로 한 번 한다 (A-069 ①②). (대조 ID, 거부 사유). 일치·열린 불일치 0건만 통과.
+        K8은 대조 뒤 엔진의 복구 판정(engine._after_reconcile)이 이 대조 ID로 recovery_ok를 보고해야 재개된다."""
+        if not account:
+            raise CommandError("원격 K4·K8 재개에는 계좌가 필요")
+        if self._reconciler is None:
+            raise CommandError("대조기가 연결되지 않음")
+        r = self._reconciler.run(account, REMOTE_RESUME_TRIGGER)
+        result, rid = getattr(r, "result", None), getattr(r, "recon_id", None)
+        open_items = len(self._repo.open_recon_items(account))
+        if result != "MATCH" or open_items or not rid:
+            return None, f"새 대조 {result}, 열린 불일치 {open_items}건 — 재개하지 않음 (해소는 PC에서 reconcile-resolve)"
+        return rid, None
 
     def _later_kill(self, seq: int) -> str | None:
         """이 RESUME(created_seq=seq)보다 뒤에 들어온 대기 KILL이 있으면 거부 사유 (resume의 저장 단위 안에서 호출)."""
