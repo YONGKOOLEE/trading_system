@@ -398,6 +398,13 @@ class HaltManager:
             else:
                 self._executor.close(intent, IntentState.NOT_ACCEPTED, f"사람 확정: 미접수 ({actor})")
             self._repo.audit(now, "UNKNOWN_CONFIRMED", actor, intent_id, {"accepted": accepted, "order_no": order_no})
+            # K3 재개는 이 확정 **뒤의** 새 대조 일치만 인정한다 (CP-031 재검토, V-233). 확정 전 대조의 충족 기록을 지워
+            # 확정이 틀렸어도(예: 접수된 주문을 '미접수'로) 새 대조가 그 주문을 미확인 브로커 주문(K4)으로 잡게 한다
+            for row in self._rows(HaltType.K3, intent.account):
+                conds = json.loads(row["conditions"] or "{}")
+                conds["reconciled"] = {"ok": False, "at": now.isoformat(),
+                                       "evidence": f"결과 불명 확정 {intent_id} 뒤 새 대조 필요"}
+                self._repo.update_halt(row["halt_id"], state=HaltState.ACTIVE.value, conditions=conds)
         if accepted:
             try:   # 정지 중 확정된 매수 취소 (6차 F-1 사람 경로). 확정은 이미 커밋됨 — 취소 실패가 확정을 FAILED로 만들지 않게 (7차 F-4)
                 self.cancel_newly_open_buys(f"사람 확정 접수 {intent_id}", self._repo.intent(intent_id).broker_order_key)

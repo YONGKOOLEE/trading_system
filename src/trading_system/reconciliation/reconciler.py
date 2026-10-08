@@ -4,7 +4,8 @@
 - 비교: 보유 수량, 브로커에만 있는 주문(외부 거래·미확인), 내부에만 열린 주문, 상태 차이(브로커 종결·내부 열림),
   지난 거래일에 열린 채 남은 주문, 누락 체결(체결번호가 있는 조회 체결만, D-094).
 - 조회 실패는 불일치가 아니다(결과를 모름). 기록만 하고 판단은 호출자(K5 정책)에 맡긴다.
-- 일치하면 K3·K4·K5의 재개 조건 `reconciled`를 충족으로 보고한다.
+- 일치하면 K3·K4·K5의 재개 조건 `reconciled`를 충족으로 보고한다. 단 결과 불명 의도에 맡긴(deferred) 브로커 주문이
+  있는 일치는 K3에 미충족으로 보고한다 — K3 재개는 사람 확정 뒤의 새 대조로만 (CP-031 재검토, V-233).
 - 재시작 복구(01 §2.11): 모드·환경, 저장 무결성, 시계, 브로커 조회, 대조 일치·결과 불명 없음을 모두 확인한다.
   하나라도 실패하면 해당 정지(K7·K6·K5·K4·K3)를 발동하고, 모두 충족하면 K8 `recovery_ok`를 보고한다.
   K8 해제는 사용자 재개로만 한다.
@@ -194,6 +195,12 @@ class Reconciler:
             self._reminded.pop(account, None)
         if result != "MISMATCH" and self._halts is not None:
             for k in (HaltType.K3, HaltType.K4, HaltType.K5):
+                if k is HaltType.K3 and cmp.deferred:
+                    # 결과 불명 의도에 맡긴 브로커 주문이 있으면 K3 재개 근거가 아니다 — 그 주문의 정체(우리 주문인지)는
+                    # 사람 확정 뒤 새 대조로만 판정한다 (CP-031 재검토, V-233). 잘못된 '미접수' 확정 + 이 일치로 재개되면 이중 주문
+                    self._halts.report_condition(k, account, "reconciled", False,
+                                                 f"{rid}: 결과 불명에 맡긴 브로커 주문 {len(cmp.deferred)}건", recon=rid)
+                    continue
                 self._halts.report_condition(k, account, "reconciled", True, rid, recon=rid)
         if cmp.open_after_close:
             # 03 §6.4 "남아 있으면 알림하고 다음 거래일 시작 전 사용자 확인 대상" (마감 후 대조는 하루 1회 → 알림 1회)

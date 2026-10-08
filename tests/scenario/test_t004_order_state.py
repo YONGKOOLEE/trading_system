@@ -87,19 +87,20 @@ def test_v40_delayed_visibility_found_on_later_round(env: Env) -> None:
     assert waits == [2, 4, 8]
 
 
-# --- V-41 응답 유실 + 브로커도 받지 않음 → 5회 조회 후 미접수 종결 ----------------------
+# --- V-41 응답 유실 + 브로커도 받지 않음 → 5회 조회 후 K3·사람 확인 (자동 미접수 종결 없음) ----------------------
 
-def test_v41_not_received_closed_after_five_queries(env: Env) -> None:
+def test_v41_not_received_escalates_k3_after_five_queries(env: Env) -> None:
+    # 요구사항 변경 A-084/CP-031: 5회 모두 주문 없음 → NOT_ACCEPTED 자동 종결 대신 UNKNOWN 유지 + K3 (D-047 M1 → D-111 규칙)
     env.broker.behavior = FakeBehavior.UNKNOWN
     d = enter(env)
     waits: list[float] = []
-    assert resolver(env, waits).resolve(d.approved.intent_id) is ResolveOutcome.NOT_ACCEPTED
-    assert waits == [2, 4, 8, 16, 32]
-    assert state(env, d) is IntentState.NOT_ACCEPTED
-    assert env.repo.active_reservations(ACCOUNT) == []
-    assert env.repo.active_ownership(ACCOUNT, "TST-A") is None
+    assert resolver(env, waits).resolve(d.approved.intent_id) is ResolveOutcome.AMBIGUOUS
+    assert waits == [2, 4, 8, 16, 32]                       # 회차·간격 변경 없음
+    assert state(env, d) is IntentState.UNKNOWN
+    assert env.repo.active_reservations(ACCOUNT) != []      # 예약 유지 → 재진입 불가
+    assert env.repo.active_ownership(ACCOUNT, "TST-A") is not None
     assert len(env.broker.sent) == 1
-    assert env.repo.active_halts(ACCOUNT) == []
+    assert env.repo.active_halts(ACCOUNT) == ["K3"]
 
 
 # --- V-42 조회 모호 → K3 ------------------------------------------------------------
