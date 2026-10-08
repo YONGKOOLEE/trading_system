@@ -427,6 +427,10 @@ class Repository:
                 rec = json.loads(r["summary"])
             except ValueError:
                 rec = None
+            if isinstance(rec, dict) and rec.get("market") not in (None, "M1"):
+                # 다른 시장의 일일 기준(M2 monitoring.spot_cash — 요약에 market, 거래일 = UTC 날짜)은 M1 기준이 아니다.
+                # 같은 별칭·같은 날짜 문자열이어도 읽지 않는다 (통합 시험 적응, V-152 M1 동작 불변)
+                continue
             day = rec.get("trade_date") if isinstance(rec, dict) else None
             if not isinstance(day, str):
                 try:
