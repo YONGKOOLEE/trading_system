@@ -388,6 +388,7 @@ def backtest_main(argv: Sequence[str], root: Path) -> int:
     from trading_system.app.backtest import BacktestConfig, BacktestError, perturbation_check, render_report, \
         run_backtest, run_sensitivity
     from trading_system.config.app_file import StrategyDeploy
+    from trading_system.app.validation_tool import load_validation_settings
     from trading_system.config.limits_file import load_limits_file
     p = argparse.ArgumentParser(prog="python -m trading_system.app backtest")
     p.add_argument("--strategy", required=True, help="패키지.모듈:클래스")
@@ -400,6 +401,9 @@ def backtest_main(argv: Sequence[str], root: Path) -> int:
     p.add_argument("--eval-time", default="09:05", help="판정 시각 HH:MM, 여러 개는 쉼표로 (예: 09:30,14:30)")
     p.add_argument("--segment", default="ALL", choices=["ALL", "TRAIN", "VALIDATION", "FINAL"])
     p.add_argument("--slippage-tick", default="10", help="호가 표가 없을 때 1틱 크기(원)")
+    p.add_argument("--final-check", action="store_true",
+                   help="[CP-030 D-163] 최종 확인 실행: config/validation.toml final_from 이후만, 전략 버전당 1회")
+    p.add_argument("--confirmed-by", default="", help="--final-check 때 전략 확정 사용자 선언 A-ID")
     ns = p.parse_args(argv)
     try:
         mode = Mode.BACKTEST
@@ -421,19 +425,39 @@ def backtest_main(argv: Sequence[str], root: Path) -> int:
                              initial_cash=Decimal(ns.cash), out_dir=root / "var" / "backtest",
                              eval_time=eval_times[0], eval_times=eval_times, segment=ns.segment,
                              final_usage_ledger=root / "var" / "backtest" / "final-usage.json",
-                             data_version=f"csv:{data_dir.name}")
+                             data_version=f"csv:{data_dir.name}",
+                             final_from=load_validation_settings(root / "config" / "validation.toml")["final_from"],  # type: ignore[arg-type]
+                             final_check=ns.final_check)
+        if ns.final_check:
+            # 인자·날짜를 먼저 검사하고(실패하면 장부 미기록) 장부에 1회 사용을 기록한 뒤 실행 (D-163)
+            from trading_system.app.backtest import _run_days
+            from trading_system.app.validation import ValidationError, claim_final_check
+            if ns.segment != "ALL":
+                raise BacktestError("최종 확인 실행은 --segment ALL로만 (날짜로 구간 지정, D-163)")
+            if (cfg.out_dir / cfg.run_id / "trading.db").exists():
+                raise BacktestError(f"같은 실행 ID의 DB가 이미 있음: {cfg.out_dir / cfg.run_id} (실행마다 새 ID)")
+            days = _run_days(cfg)
+            if not days or days[0] < cfg.final_from:
+                raise BacktestError(f"최종 확인 실행은 {cfg.final_from} 이후 거래일만 (D-163)")
+            try:
+                claim_final_check(cfg.final_usage_ledger, strat.spec, cfg.run_id,  # type: ignore[arg-type]
+                                  confirmed_by=ns.confirmed_by)
+            except ValidationError as exc:
+                raise BacktestError(str(exc)) from None
         result = run_backtest(cfg)
     except (ConfigError, BacktestError, ValueError) as exc:
         print(f"백테스트 거부: {exc}")
         return 2
     from dataclasses import replace
     days = result.days
-    bad = perturbation_check(cfg, days[:: max(1, len(days) // 10)])
+    once = ns.segment == "FINAL" or ns.final_check   # 최종 구간은 한 번만 (D-075·D-163): 재실행·교란·민감도 없음
+    bad = None if ns.final_check else perturbation_check(cfg, days[:: max(1, len(days) // 10)])
     reproducible = None
-    if ns.segment != "FINAL":   # 최종 구간은 한 번만 (D-075)
+    if not once:
         reproducible = run_backtest(replace(cfg, run_id=f"{cfg.run_id}-repro")).digest == result.digest
     report = render_report(cfg, result, settings_hash=limits.version_hash(), reproducible=reproducible,
-                           lookahead_bad=bad, sensitivity=run_sensitivity(cfg) if ns.segment == "ALL" else None)
+                           lookahead_bad=bad,
+                           sensitivity=run_sensitivity(cfg) if ns.segment == "ALL" and not ns.final_check else None)
     out = cfg.out_dir / cfg.run_id / "report.md"
     out.write_text(report, encoding="utf-8", newline="\n")
     print(f"백테스트 완료: {out}")

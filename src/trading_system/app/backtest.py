@@ -63,6 +63,7 @@ ACCOUNT = "KR-BT-01"
 SEGMENTS = ("ALL", "TRAIN", "VALIDATION", "FINAL")
 SPLIT = (Decimal("0.6"), Decimal("0.2"), Decimal("0.2"))  # D-075 기본 60/20/20
 SESSION_FIRST, SESSION_END = time(9, 0), time(15, 20)       # 판정 시각 허용 범위 [09:00, 15:20) — 종가 동시호가 전
+FINAL_FROM_DEFAULT = date(2026, 1, 1)   # [CP-030 D-163] 최종 확인 구간 시작일 (설정 config/validation.toml, 변경은 CP)
 
 
 class BacktestError(RuntimeError):
@@ -96,6 +97,11 @@ class BacktestConfig:
     segment: str = "ALL"
     final_usage_ledger: Path | None = None
     write_exports: bool = True          # 결과 파일(trades.csv·equity.csv·summary.json) 쓰기. 교란 검사 내부 실행은 끈다
+    slippage_pct: Decimal | None = None  # [CP-030 D-164] 주면 % 슬리피지(검증 실행기). None = 틱 방식(기존 기본)
+    # [CP-030 D-163] 실행 거래일이 final_from 이후와 겹치면 구간·날짜 지정과 무관하게 거부. 허용은 최종 확인 실행
+    # (final_check=True, 사용 장부에 이 전략 버전의 최종 확인 기록이 있어야 함, 모든 거래일이 final_from 이후)뿐.
+    final_from: date = FINAL_FROM_DEFAULT
+    final_check: bool = False
 
 
 @dataclass(frozen=True)
@@ -171,6 +177,25 @@ def _run_days(cfg: BacktestConfig) -> list[date]:
     return segment_days(all_days, cfg.segment)
 
 
+def _guard_final_period(cfg: BacktestConfig, days: list[date]) -> None:
+    """[CP-030 D-163] 최종 확인 구간 보호. DB·장부를 만들기 전에 검사한다."""
+    if not cfg.final_check:
+        if days[-1] >= cfg.final_from:
+            raise BacktestError(f"실행 거래일 {days[0]}~{days[-1]}이 최종 확인 구간({cfg.final_from} 이후)과 겹침 — "
+                                "최종 확인 실행(전략 확정 뒤 1회, 장부 기록)으로만 허용 (D-163)")
+        return
+    if days[0] < cfg.final_from:
+        raise BacktestError(f"최종 확인 실행은 최종 확인 구간만 쓴다 (첫 거래일 {days[0]} < {cfg.final_from}, D-163)")
+    spec = cfg.strategy.spec
+    ledger = cfg.final_usage_ledger
+    recs = []
+    if ledger is not None and ledger.exists():
+        recs = [json.loads(x) for x in ledger.read_text(encoding="utf-8").splitlines() if x.strip()]
+    if not any(r.get("strategy") == spec.strategy_id and r.get("version") == spec.version
+               and r.get("kind") == "final_check" for r in recs):
+        raise BacktestError("최종 확인 실행인데 사용 장부에 이 전략 버전의 최종 확인 기록이 없음 (D-163)")
+
+
 def _claim_final(cfg: BacktestConfig) -> None:
     if cfg.segment != "FINAL":
         return
@@ -222,6 +247,7 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
     days = _run_days(cfg)
     if not days:
         raise BacktestError("구간에 거래일이 없음")
+    _guard_final_period(cfg, days)
     _claim_final(cfg)
 
     repo = Repository(run_dir / "trading.db", Mode.BACKTEST)
@@ -238,7 +264,16 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
                 return t
         return cfg.slippage_tick
 
-    broker = BacktestBroker(tick_of, cfg.slippage_ticks, cfg.volume_cap)
+    def price_unit(inst: str, price: Decimal) -> Decimal:
+        # % 슬리피지의 맞춤 단위: 호가 표가 있으면 그 가격대 호가, 없으면 1원 (D-164)
+        if cfg.ticks is not None:
+            t = cfg.ticks.tick_of(cfg.infos[inst].kind, price)
+            if t is not None:
+                return t
+        return Decimal("1")
+
+    broker = BacktestBroker(tick_of, cfg.slippage_ticks, cfg.volume_cap, slippage_pct=cfg.slippage_pct,
+                            price_unit=price_unit if cfg.slippage_pct is not None else None)
     executor = Executor(repo, broker, clock, run_dir / "KILL")
     registry = StrategyRegistry(repo, clock, None)
     gate = Gate(repo, clock, GateInputs(_Limits(cfg.account_limits), store, acct, registry, _ClockOk()), policy)
@@ -440,6 +475,7 @@ def _write_exports(cfg: BacktestConfig, result: BacktestResult, details: list[bx
         "cost_rates": {"commission_rate": str(rates.commission_rate), "sell_tax_rate": str(rates.sell_tax_rate)},
         "slippage_ticks": cfg.slippage_ticks,
         "slippage_tick": str(cfg.slippage_tick),
+        **({} if cfg.slippage_pct is None else {"slippage_pct": str(cfg.slippage_pct)}),
         "tick_table": cfg.ticks is not None,
         "volume_cap": str(cfg.volume_cap),
         "price_limit_ratio": str(cfg.gate_settings.price_limit_ratio),
