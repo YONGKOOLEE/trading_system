@@ -254,12 +254,22 @@ def test_a084_mode_refusal_is_written_to_day_log(tmp_path: Path, capsys: pytest.
     assert not (tmp_path / "var" / "paper" / "autopilot.lock").exists()
 
 
+def _telegram_on(root: Path) -> None:
+    """재검토 잔여(T-025): PAPER 거부 알림은 config/app.paper.toml [telegram] enabled = true일 때만 보낸다."""
+    (root / "config").mkdir(parents=True, exist_ok=True)
+    (root / "config" / "app.paper.toml").write_text("[telegram]\nenabled = true\n", encoding="utf-8")
+
+
 def test_a084_refusal_sends_one_telegram_warning_when_secrets_available(tmp_path: Path, tg: FakeTelegram) -> None:
+    # 재검토 잔여(T-025)로 변경: --mode LIVE 거부는 PAPER 채널에 보내지 않는다(tests/scenario/test_ops_low_items.py).
+    # 알림 경로는 PAPER 요청의 모드 거부(환경 변수 TRADE_MODE=LIVE) + [telegram] enabled로 시험한다.
     (tmp_path / ".env.paper").write_text(f"TRADE_MODE=PAPER\nTELEGRAM_BOT_TOKEN={TOKEN}\nTELEGRAM_CHAT_ID={CHAT}\n",
                                          encoding="utf-8")
-    assert autopilot_main(["--mode", "LIVE", "--root", str(tmp_path)], environ={}, telegram_base_url=tg.url) == 2
+    _telegram_on(tmp_path)
+    assert autopilot_main(["--mode", "PAPER", "--root", str(tmp_path)], environ={"TRADE_MODE": "LIVE"},
+                          telegram_base_url=tg.url) == 2
     assert len(tg.sent) == 1 and tg.sent[0]["text"].startswith("[경고] [자동 운영] 자동 운영 거부"), tg.sent
-    assert "PAPER 전용" in tg.sent[0]["text"]
+    assert "PAPER가 아님" in tg.sent[0]["text"]
     text = _day_log(tmp_path)
     assert TOKEN not in text and "virtual-token" not in text
 
@@ -268,7 +278,9 @@ def test_a084_config_refusal_logged_and_notified(tmp_path: Path, tg: FakeTelegra
     (tmp_path / ".env").write_text("TRADE_MODE=PAPER\n", encoding="utf-8")
     (tmp_path / ".env.paper").write_text(f"TRADE_MODE=PAPER\nTELEGRAM_BOT_TOKEN={TOKEN}\nTELEGRAM_CHAT_ID={CHAT}\n",
                                          encoding="utf-8")
-    # config/ 없음 → check_startup/설정 적재가 ConfigError → 거부(코드 2)
+    # 한도 파일 등 없음 → check_startup/설정 적재가 ConfigError → 거부(코드 2). 재검토 잔여(T-025): 알림은 [telegram]
+    # enabled = true를 읽을 수 있을 때만 — config/app.paper.toml에 그 값만 둔다
+    _telegram_on(tmp_path)
     assert autopilot_main(["--mode", "PAPER", "--root", str(tmp_path)], environ={}, telegram_base_url=tg.url) == 2
     text = _day_log(tmp_path)
     assert "자동 운영 거부(설정)" in text, text
@@ -276,8 +288,11 @@ def test_a084_config_refusal_logged_and_notified(tmp_path: Path, tg: FakeTelegra
 
 
 def test_a084_refusal_without_secrets_logs_only(tmp_path: Path, tg: FakeTelegram) -> None:
+    # 재검토 잔여(T-025)로 변경: BACKTEST 요청은 비밀값 확인 전에 로그만 → "키 없음" 경로는 PAPER 요청 거부로 시험한다
     (tmp_path / ".env.paper").write_text("TRADE_MODE=PAPER\n", encoding="utf-8")   # 텔레그램 키 없음
-    assert autopilot_main(["--mode", "BACKTEST", "--root", str(tmp_path)], environ={}, telegram_base_url=tg.url) == 2
+    _telegram_on(tmp_path)
+    assert autopilot_main(["--mode", "PAPER", "--root", str(tmp_path)], environ={"TRADE_MODE": "BACKTEST"},
+                          telegram_base_url=tg.url) == 2
     assert tg.sent == [] and tg.paths == []
     assert "거부 알림 못 보냄" in _day_log(tmp_path)
 
@@ -309,8 +324,12 @@ def test_a084_retry_after_honored_with_cap(tmp_path: Path) -> None:
     n, _ = _notify(tmp_path, api, sleeps)
     n("INFO", "하나")
     n("INFO", "둘")
-    assert sleeps == [7.0, 60.0] and len(api.sent) == 2                     # 2초 고정 대기 대신 Retry-After, 상한 60초
-    assert n.failed == [] and not (tmp_path / "logs").exists()
+    # 2초 고정 대기 대신 Retry-After. 재검토 잔여(T-025)로 변경: 메시지 1건 30초 상한 — 상한 60초 대기(600→60)는 30초를
+    # 넘으므로 기다리지 않고 fallback + 종료 전 재전송 큐로 (전에는 [7.0, 60.0]·2건 즉시 전송)
+    assert sleeps == [7.0] and api.sent == ["[정보] [자동 운영] 하나"]
+    assert len(n.failed) == 1 and "둘" in n.failed[0]
+    assert "둘" in (tmp_path / "logs" / "alerts-fallback-autopilot.log").read_text(encoding="utf-8")
+    assert n.flush() == 1 and n.failed == [] and len(api.sent) == 2
 
 
 def test_a084_final_failure_goes_to_fallback_file_and_is_resent_once_at_exit(tmp_path: Path) -> None:
@@ -456,7 +475,8 @@ def test_a084_refusal_notify_exception_does_not_escape(tmp_path: Path, tg: FakeT
     def broken(self: TelegramNotify, level: str, text: str) -> None:
         raise RuntimeError(f"전송 결함 {TOKEN}")
     monkeypatch.setattr(TelegramNotify, "__call__", broken)
-    assert autopilot_main(["--mode", "LIVE", "--root", str(tmp_path)], environ={},
+    _telegram_on(tmp_path)   # 재검토 잔여(T-025): LIVE 요청은 알림 자체가 없으므로 PAPER 요청 거부로 전송 경로를 탄다
+    assert autopilot_main(["--mode", "PAPER", "--root", str(tmp_path)], environ={"TRADE_MODE": "LIVE"},
                           telegram_base_url=tg.url) == EXIT_REFUSED              # 거부는 거부 그대로
     text = _day_log(tmp_path)
     assert "자동 운영 거부" in text and "RuntimeError" in text, text
