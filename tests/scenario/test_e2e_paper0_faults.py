@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.e2e   # A-084 ⑥: 빠른 확인은 -m "not rehearsal and not e2e"
+
 import tests.scenario.test_e2e_paper0_days as days
 from tests.scenario.test_e2e_paper0_days import (
     ACCOUNT, CODE, DAYS, KiwoomPaperWorld, PaperWorld, _wait, buy_sell_of_day, kst, start_and_resume,
@@ -152,24 +154,39 @@ def test_kiwoom_sim_lost_order_response_resolved_by_query_and_ws(kworld: KiwoomP
     assert w.sent_count() == 2 and w.position() == 0
 
 
-def test_lost_response_not_accepted_after_five_clean_queries(world: PaperWorld) -> None:
-    """브로커가 받지 않았고 응답도 없음 → 조회 5회(2·4·8·16·32초) 모두 성공·후보 없음 → NOT_ACCEPTED, 재전송 없음."""
+def test_lost_response_five_clean_queries_escalates_k3_until_human(world: PaperWorld) -> None:
+    """브로커가 받지 않았고 응답도 없음 → 조회 5회(2·4·8·16·32초) 모두 성공·후보 없음 → K3·사람 확인, 재전송 없음.
+    요구사항 변경 A-084/CP-031: 자동 NOT_ACCEPTED 종결(예약 해제·재진입 허용)을 하지 않는다 — 접수 반영 지연 시 이중 포지션 위험."""
     w = world
     start_and_resume(w)
     entry_with(w, FakeBehavior.UNKNOWN)
     assert w.intents()[-1]["state"] == "UNKNOWN"
+    iid = w.intents()[-1]["intent_id"]
     w.run_until(kst(D0, 9, 31, 0))                             # 대기 2·4·8·16·32초 + 30초 주기: 아직 결과 불명
     assert w.intents()[-1]["state"] == "UNKNOWN"
     w.run_until(kst(D0, 9, 35))
-    assert [(i["request_type"], i["state"]) for i in w.intents()] == [("ENTRY", "NOT_ACCEPTED")]
-    assert w.position() == 0 and "K3" not in w.active()
-    w.run_until(kst(D0, 14, 29))
-    assert len(w.broker.sent) == 1                              # 같은 의도 재발주 없음
+    assert [(i["request_type"], i["state"]) for i in w.intents()] == [("ENTRY", "UNKNOWN")]
+    assert w.position() == 0 and "K3" in w.active(), w.active()
+    assert len(alerts(w, "결과 불명: 조회 5회 주문 없음 → K3")) == 1
+    assert len([e for e in audits(w, "UNKNOWN_ESCALATED") if e["ref"] == iid]) == 1
+    n_alerts = len(alerts(w, "결과 불명"))
+    w.run_until(kst(D0, 14, 31))                                # 14:30 판정까지 사람 대기: 조회·알림 반복 없음
+    assert len(alerts(w, "결과 불명")) == n_alerts, alerts(w, "결과 불명")
+    assert len([e for e in audits(w, "UNKNOWN_ESCALATED") if e["ref"] == iid]) == 1
+    assert len(w.broker.sent) == 1                              # 같은 의도 재발주 없음, 새 신호 진입도 없음
+    assert w.repo.active_reservations(ACCOUNT) != []            # 예약 유지
+    assert [(i["request_type"], i["state"]) for i in w.intents()] == [("ENTRY", "UNKNOWN")]
+    # 사람 확정(미접수) → 종결·예약 해제 → 대조 일치 뒤 로컬 RESUME
+    w.command("CONFIRM_UNKNOWN", {"intent_id": iid, "accepted": False})
+    w.step()
+    assert last_command(w)["status"] == "DONE", last_command(w)
+    assert w.intents()[-1]["state"] == "NOT_ACCEPTED"
     assert w.repo.active_reservations(ACCOUNT) == []
-    w.run_until(kst(D0, 14, 31))                                # 14:30 판정: 보유 없음 → 새 신호(새 멱등키) 진입 (전략 규칙)
-    its = w.intents()
-    assert [(i["request_type"], i["state"]) for i in its] == [("ENTRY", "NOT_ACCEPTED"), ("ENTRY", "FILLED")]
-    assert its[0]["idem_key"] != its[1]["idem_key"]
+    w.run_until(kst(D0, 14, 36))                                # 확정 뒤 주기 대조 일치
+    w.command("RESUME", {"account": None, "halt_type": "K3"})
+    w.step()
+    assert "K3" not in w.active(), (last_command(w), halt_rows(w, "K3"))
+    assert len(w.broker.sent) == 1 and w.position() == 0
 
 
 def test_lost_response_ambiguous_k3_no_spam_then_operator_confirm(world: PaperWorld) -> None:

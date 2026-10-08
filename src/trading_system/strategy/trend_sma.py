@@ -16,10 +16,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from decimal import ROUND_FLOOR, Decimal
+from decimal import Decimal
 
 from trading_system.domain.clock import KST
 from trading_system.domain.models import Signal
+from trading_system.domain.sizing import round_price_down
 from trading_system.domain.strategy import EvaluationSnapshot, InstrumentView, ParamSpec, RuleSpec, StrategySpec
 
 from .base import ParamValues
@@ -101,7 +102,7 @@ class TrendSmaV1:
                     out.append(_exit(self.spec, snapshot, v, "EXIT-1"))
             elif v.position is None or v.position.quantity == 0:
                 if f > s and not reentry_blocked(v, wait):
-                    stop = (xs[-1] - mult * atr).quantize(Decimal("1"), rounding=ROUND_FLOOR)
+                    stop = round_price_down(xs[-1] - mult * atr, Decimal("1"))   # 내림 (A-084 ⑦, 수치 동일)
                     sig = _entry(self.spec, snapshot, params, v, "ENTRY-1", stop)
                     if sig is not None:
                         out.append(sig)

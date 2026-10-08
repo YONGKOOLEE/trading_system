@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import tomllib
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 
 from trading_system.domain.clock import KST
@@ -123,3 +123,14 @@ class KrxCalendar:
     def is_trading_day(self, d: date) -> bool | None:
         s = self.session(d)
         return None if s is None else s.is_open
+
+    def has_year(self, year: int) -> bool:
+        return year in self._years
+
+    def missing_year_within(self, today: date, days: int = 30) -> int | None:
+        """오늘+days일이 달력 없는 **다음** 해로 넘어가면 그 연도 (사전 경고용, A-084·X-U3). 올해 자체가 없는 것은
+        기존 "올해 달력 없음" 경고·거부의 몫이므로 여기서는 보지 않는다."""
+        ahead = today + timedelta(days=days)
+        if ahead.year == today.year or self.has_year(ahead.year):
+            return None
+        return ahead.year

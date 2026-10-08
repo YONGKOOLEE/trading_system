@@ -134,24 +134,64 @@ def test_rv08_sync_resolve_still_reevaluates(env: Env) -> None:
     iid = unknown_entry(env)
     env.broker.query_failures = 1
     assert resolver(env).resolve(iid) is ResolveOutcome.AMBIGUOUS
-    assert resolver(env).resolve(iid) is ResolveOutcome.NOT_ACCEPTED   # 조회 모두 성공, 후보 없음
+    q = env.broker.queries
+    # 요구사항 변경 A-084/CP-031: 조회 모두 성공·후보 없음이어도 자동 미접수 종결 없음 → 다시 조회하되 AMBIGUOUS(K3 유지)
+    assert resolver(env).resolve(iid) is ResolveOutcome.AMBIGUOUS
+    assert env.broker.queries > q and env.repo.intent(iid).state is IntentState.UNKNOWN
+
+
+def test_rv08_sync_resolve_finds_late_order_on_second_call(env: Env) -> None:
+    """사람 대기(K3) 중 동기 재해소가 실제로 다시 조회한다: 1차 5회(10번 조회) 동안 안 보이던 접수 주문이
+    조회 반영 지연 뒤 보이면 2차 동기 해소가 찾아 채택한다 (FOUND, 재전송 없음)."""
+    env.broker.behavior = FakeBehavior.LOST_ACCEPT
+    env.broker.query_delay = 10                         # 1차 해소의 조회 10번 동안 안 보임 (PV-05 반영 지연)
+    d = env.gate.decide(GateRequest.from_signal(make_signal(RequestType.ENTRY, evaluation="e1")))
+    assert d.approved is not None, d.reason
+    env.executor.submit(d.approved)
+    env.executor.process_events()
+    iid = d.approved.intent_id
+    assert env.repo.intent(iid).state is IntentState.UNKNOWN
+    assert resolver(env).resolve(iid) is ResolveOutcome.AMBIGUOUS
+    assert env.broker.queries == 10 and env.repo.intent(iid).state is IntentState.UNKNOWN
+    [order] = env.broker.query_orders_unchecked()
+    assert resolver(env).resolve(iid) is ResolveOutcome.FOUND
+    assert env.broker.queries == 12                     # 2차 1회차(주문+체결)에서 발견
+    intent = env.repo.intent(iid)
+    assert intent.state is not IntentState.UNKNOWN and intent.broker_order_key is not None
+    assert intent.broker_order_key.endswith(f"|{order.order_no}")
+    assert len(env.broker.sent) == 1                    # 재전송 없음
 
 
 # --- RV-09 전일 전송 의도 ---------------------------------------------------------------------------
 
+def _k3_reasons(env: Env) -> list[str]:
+    return [h["reason"] for h in env.repo.halt_rows(None) if h["halt_type"] == "K3"]
+
+
 def test_rv09_previous_trade_date_never_closed_not_accepted(env: Env) -> None:
     iid = unknown_entry(env)
     env.clock.advance(timedelta(days=1))
+    q = env.broker.queries
     assert resolver(env).resolve(iid) is ResolveOutcome.AMBIGUOUS
     assert env.repo.intent(iid).state is IntentState.UNKNOWN
     assert "K3" in env.repo.active_halts(ACCOUNT)
+    # 날짜 방어선이 판정했음: 당일 조회로는 전일 주문을 볼 수 없으므로 조회하지 않고 바로 K3 (CP-031의 5회 소진 K3가 아님)
+    assert env.broker.queries == q
+    [reason] = _k3_reasons(env)
+    assert "전송 거래일" in reason and "≠ 오늘" in reason
 
 
 def test_rv09_date_rolls_over_during_rounds(env: Env) -> None:
     iid = unknown_entry(env)
     env.clock.advance(timedelta(hours=14, minutes=54, seconds=50))   # 23:59:55 KST — 해소 중 날짜 경과
+    q = env.broker.queries
     assert resolver(env).resolve(iid) is ResolveOutcome.AMBIGUOUS
     assert env.repo.intent(iid).state is IntentState.UNKNOWN
+    # 시작 23:59:50 KST: 1회차(:52)·2회차(:56)만 조회(주문+체결 ×2), 3회차(00:00:04)는 조회 전 날짜 방어선 → K3.
+    # 5회 소진 경로(10번 조회)가 아님
+    assert env.broker.queries - q == 4
+    [reason] = _k3_reasons(env)
+    assert "전송 거래일" in reason and "≠ 오늘" in reason
 
 
 # --- 키움 시험 준비 ---------------------------------------------------------------------------------

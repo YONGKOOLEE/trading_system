@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.e2e   # A-084 ⑥: 빠른 확인은 -m "not rehearsal and not e2e"
+
 from tests.support.invariants import check_invariants
 from trading_system.app.main import ws_state_handler
 from trading_system.app.strategy_tool import strategy_main

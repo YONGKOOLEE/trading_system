@@ -16,9 +16,10 @@ from datetime import datetime, time, timedelta
 from decimal import Decimal
 
 from trading_system.domain.clock import Clock, from_iso, last_kst_time_at_or_before, to_iso
+from trading_system.domain.daily_base import DailyBase, DailyBaseCorrupt
 from trading_system.domain.market import CashView, CostRates, DailyRisk, estimate_cost
 from trading_system.domain.sinks import AlertSink
-from trading_system.storage.repository import Repository
+from trading_system.storage.repository import DAILY_BASE_KIND, Repository
 
 
 @dataclass(frozen=True)
@@ -89,7 +90,8 @@ def same_day_buy_cash(repo: Repository, account: str, now: datetime, rates: Cost
     return total
 
 
-DAILY_BASE = "DAILY_BASE"   # 거래일별 일일 기준 감사 기록 (재검토2 #2)
+DAILY_BASE = DAILY_BASE_KIND   # 거래일별 일일 기준 감사 기록 (재검토2 #2). 형식은 domain.daily_base.DailyBase (A-084 ①)
+DAILY_BASE_CORRUPT_ALERT = "일일 기준 기록 손상 — 사람 확인 필요"   # 재검토 M-1
 
 
 def same_day_cash_flow(repo: Repository, account: str, now: datetime, rates: CostRates,
@@ -124,8 +126,11 @@ class DailyRiskTracker:
     """
 
     def __init__(self, repo: Repository, price_of: Callable[[str], Decimal | None], *,
-                 clock: Clock | None = None, cost_rates: CostRates | None = None) -> None:
+                 clock: Clock | None = None, cost_rates: CostRates | None = None,
+                 alerts: AlertSink | None = None) -> None:
         self._repo = repo
+        self._alerts = alerts
+        self._corrupt_alerted: set[tuple[str, str]] = set()   # (거래일, 계좌) — 손상 알림은 프로세스에서 하루 1회
         self._price_of = price_of
         self._clock = clock
         self._rates = cost_rates
@@ -140,13 +145,18 @@ class DailyRiskTracker:
 
         실운영(clock·cost_rates 있음)에서는 거래일별 기준(현금·평가액·시각)을 감사 기록 DAILY_BASE로 남기고, 같은
         거래일에 다시 부르면(재시작) 저장된 기준을 쓴다 — 재시작으로 그날 손실이 L4에서 사라지지 않게 (재검토2 #2).
+        저장된 기준이 손상됐으면 새로 계산·기록하지 않고 None(모름 → 위험 확대 거부)과 EMERGENCY 알림 1회 (재검토 M-1).
         """
-        saved = self._saved_base(account)
+        try:
+            saved = self._saved_base(account)
+        except DailyBaseCorrupt:
+            self._base.pop(account, None)
+            self._corrupt_alert(account)
+            return None
         if saved is not None:
-            base_cash, base_value, base_at = saved
-            self._base[account] = base_cash + base_value
-            self._base_cash[account] = base_cash
-            self._base_at[account] = base_at
+            self._base[account] = saved.total
+            self._base_cash[account] = saved.cash
+            self._base_at[account] = saved.at
             self._cash.setdefault(account, cash)
             return self._base[account]
         value = self._positions_value(account)
@@ -160,25 +170,23 @@ class DailyRiskTracker:
             self._base_at[account] = self._clock.now()
             if self._rates is not None:
                 now = self._clock.now()
+                base = DailyBase(self._repo.trade_date_of(now), cash, value, now)
                 with self._repo.tx():
-                    self._repo.audit(now, DAILY_BASE, "monitor", account, {
-                        "trade_date": self._repo.trade_date_of(now), "cash": str(cash), "value": str(value),
-                        "at": now.isoformat()})
+                    self._repo.audit(now, DAILY_BASE, "monitor", account, base.to_summary())
         return self._base[account]
 
-    def _saved_base(self, account: str) -> tuple[Decimal, Decimal, datetime] | None:
+    def _corrupt_alert(self, account: str) -> None:
+        assert self._clock is not None
+        key = (self._repo.trade_date_of(self._clock.now()), account)
+        if key in self._corrupt_alerted or self._alerts is None:
+            return
+        self._corrupt_alerted.add(key)
+        self._alerts.alert("EMERGENCY", DAILY_BASE_CORRUPT_ALERT, account)
+
+    def _saved_base(self, account: str) -> DailyBase | None:
         if self._clock is None or self._rates is None:
             return None
-        today = self._repo.trade_date_of(self._clock.now())
-        found = None
-        for e in self._repo.select("SELECT summary FROM audit_event WHERE kind=? AND ref=? ORDER BY seq",
-                                   (DAILY_BASE, account)):
-            rec = json.loads(e["summary"])
-            if rec.get("trade_date") == today:
-                found = rec
-        if found is None:
-            return None
-        return Decimal(found["cash"]), Decimal(found["value"]), datetime.fromisoformat(found["at"])
+        return self._repo.daily_base(account, self._repo.trade_date_of(self._clock.now()))
 
     def update_cash(self, account: str, cash: Decimal) -> None:
         self._cash[account] = cash

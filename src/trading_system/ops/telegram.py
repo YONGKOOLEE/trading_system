@@ -2,6 +2,7 @@
 
 - 봇 API 롱 폴링(getUpdates)만 쓴다. 외부 포트를 열지 않는다. update_id로 중복을 없앤다(V-57).
 - 허용된 채팅 ID만 받는다. `/kill`을 뺀 명령은 1회용 확인 코드(60초)를 받은 뒤에만 명령 테이블에 넣는다(V-107).
+  비인가 채팅은 시간당 처음 3건만 감사 기록·경고하고, 나머지는 세었다가 시간이 지나면 요약 경고 1건 (A-084 ③).
   `/kill`은 위험을 줄이는 명령이라 확인 없이 즉시 넣는다(결정 대기열 DP-9).
 - 원격으로는 K1·K2, 그리고 명령 처리 중 새 대조를 거친 K4·K8만 재개할 수 있다(정지 관리자가 판정, CP-026).
   재개·상태 응답에는 KILL 파일 존재를 표시한다(V-119). `/reconcile`(대조)은 확인 코드, `/review`(오늘 요약)는 조회만.
@@ -43,6 +44,8 @@ _MESSAGE_FAULTS = ("message is too long", "can't parse entities", "message text 
                    "text must be non-empty")
 CONNECT_TIMEOUT, READ_TIMEOUT = 3, 10
 POLL_SECONDS = 30
+UNAUTH_AUDIT_LIMIT = 3           # A-084 ③: 비인가 채팅은 시간당 처음 3건만 감사 기록 + WARNING, 나머지는 조용히 센다
+UNAUTH_WINDOW = timedelta(hours=1)
 LEVEL_KO = {"EMERGENCY": "긴급", "WARNING": "경고", "INFO": "정보"}
 
 
@@ -199,8 +202,11 @@ class CommandBot:
         self._pending: dict[str, _Pending] = {}
         self._started = clock.now()
         self._fail_counts: dict[int, int] = {}   # update_id → 연속 처리 실패 수 (T-017 M-4)
+        self._unauth_window = clock.now()        # 비인가 채팅 집계 창 시작 (A-084 ③, 프로세스 안에서만 센다)
+        self._unauth_seen = 0                    # 창 안의 비인가 메시지 수
 
     def poll_once(self, timeout: int = POLL_SECONDS) -> int:
+        self._roll_unauthorized(self._clock.now())
         updates = self._api.get_updates(self._offset, timeout)
         handled = 0
         for u in updates:
@@ -252,11 +258,24 @@ class CommandBot:
         except TelegramError:
             pass  # 회신 실패는 알림 경로(Notifier)의 실패 집계로 드러난다
 
+    def _roll_unauthorized(self, now: datetime) -> None:
+        """비인가 채팅 집계 창(1시간)이 지났으면 조용히 센 건수를 WARNING 1건으로 요약하고 창을 새로 연다 (A-084 ③)."""
+        if now - self._unauth_window < UNAUTH_WINDOW:
+            return
+        silent = self._unauth_seen - UNAUTH_AUDIT_LIMIT
+        self._unauth_window, self._unauth_seen = now, 0
+        if silent > 0:
+            self._alert("WARNING", f"비인가 메시지 {silent}건 무시 (최근 1시간, 처음 {UNAUTH_AUDIT_LIMIT}건만 기록)")
+
     def _handle(self, uid: int, chat: str, text: str, date: int | None = None) -> None:
         if chat != self._allowed:
+            now = self._clock.now()
+            self._roll_unauthorized(now)
+            self._unauth_seen += 1
+            if self._unauth_seen > UNAUTH_AUDIT_LIMIT:
+                return   # 홍수 방지: 감사·경고 없이 센다. 창이 끝나면 요약 1건 (A-084 ③)
             with self._repo.tx():
-                self._repo.audit(self._clock.now(), "REMOTE_REJECTED", "telegram", str(uid),
-                                 {"reason": "허용되지 않은 채팅"})
+                self._repo.audit(now, "REMOTE_REJECTED", "telegram", str(uid), {"reason": "허용되지 않은 채팅"})
             self._alert("WARNING", "허용되지 않은 채팅에서 명령 시도 (거부)")
             return
         parts = text.split()

@@ -9,7 +9,10 @@ dependencies = []
 pythonpath = ["src", "."]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers -m \"not paper\""
+# 기본 선택은 바꾸지 않는다(A-084 ⑥). 빠른 확인: -m "not rehearsal and not e2e" / 전체: -m 없이 (README·implementation-guide)
 markers = [
     "paper: 키움 모의(PAPER) 연동 테스트. 실제 네트워크 사용 — 사용자 승인 후 -m paper로만 실행",
     "slow: 오래 걸리는 시험(V-95 무작위 사건열 등). 기본 실행에 포함. 빠른 확인은 -m 'not paper and not slow'",
+    "rehearsal: 실제 프로세스를 띄우는 운영 리허설(tests/scenario/test_run_rehearsal*.py). 기본 실행에 포함",
+    "e2e: 종단 간 PAPER-0 시나리오(tests/scenario/test_e2e_paper0_*.py). 기본 실행에 포함",
 ]
