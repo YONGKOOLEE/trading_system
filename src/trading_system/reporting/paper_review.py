@@ -20,6 +20,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from trading_system.domain.clock import KST
+from trading_system.domain.daily_base import DailyBase
 from trading_system.domain.market import CostRates, estimate_cost
 
 # 키움 kt00001 관찰 필드 (broker/kiwoom/adapter.CASH_OBSERVED_FIELDS와 같음 — reporting은 broker를 import하지 않는다)
@@ -142,6 +143,9 @@ def _collect(conn: sqlite3.Connection, db: str, rates: CostRates | None) -> Revi
 
     for e in _rows(conn, "SELECT kind, at, summary FROM audit_event "
                          "WHERE kind IN ('ALERT', 'UNKNOWN_ESCALATED', 'DAILY_BASE', 'CASH_OBSERVED') ORDER BY seq"):
+        if e["kind"] == "DAILY_BASE":   # 손상 행은 "손상"으로 표시하고 집계를 계속한다 (재검토 잔여)
+            r.daily_bases.append(_daily_base_row(e))
+            continue
         s = json.loads(e["summary"])
         if e["kind"] == "UNKNOWN_ESCALATED":
             r.escalated += 1
@@ -149,15 +153,41 @@ def _collect(conn: sqlite3.Connection, db: str, rates: CostRates | None) -> Revi
             obs = s.get("observed") or {}
             r.cash_observations.append({"at": _kst(e["at"]), "deposit": s.get("deposit"), "orderable": s.get("orderable"),
                                         **{k: obs.get(k, "-") for k in CASH_FIELDS}})
-        elif e["kind"] == "DAILY_BASE":
-            r.daily_bases.append({"trade_date": s.get("trade_date"), "cash": s.get("cash"), "value": s.get("value"),
-                                  "at": _kst(s.get("at"))})
         else:
             r.alerts[s.get("level", "?")] += 1
             if s.get("level") == "EMERGENCY":
                 r.emergencies.append(f"{_kst(e['at'])} {str(s.get('message', ''))[:100]}")
     _collect_market_log(conn, r)
     return r
+
+
+DAILY_BASE_CORRUPT = "손상"
+
+
+def _daily_base_row(e: sqlite3.Row) -> dict:
+    """DAILY_BASE 감사 행 → 표 행. 형식은 domain.daily_base.DailyBase 한 곳(A-084 ①). 읽을 수 없으면 현금·평가액을
+    "손상"으로 두고 거래일은 읽히면 그대로, 기록 시각은 감사 행 시각으로 — 보고 전체를 실패시키지 않는다."""
+    try:
+        rec = json.loads(e["summary"])
+    except ValueError:
+        rec = None
+    try:
+        if not isinstance(rec, dict):
+            raise ValueError("DAILY_BASE 요약이 객체가 아님")
+        base = DailyBase.from_summary(rec)
+    except ValueError:
+        day = rec.get("trade_date") if isinstance(rec, dict) else None
+        return {"trade_date": day if isinstance(day, str) else "-", "cash": DAILY_BASE_CORRUPT,
+                "value": DAILY_BASE_CORRUPT, "at": _kst_safe(e["at"])}
+    return {"trade_date": base.trade_date, "cash": str(base.cash), "value": str(base.value),
+            "at": _kst_safe(base.at.isoformat())}
+
+
+def _kst_safe(text: str | None) -> str:
+    try:
+        return _kst(text)
+    except (TypeError, ValueError):
+        return str(text)
 
 
 def _dec(text: object) -> Decimal | None:
