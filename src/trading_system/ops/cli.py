@@ -22,6 +22,7 @@ from trading_system.config.errors import ConfigError
 from trading_system.config.modes import parse_trade_mode
 from trading_system.domain.clock import KST, Clock, SystemClock, to_iso
 from trading_system.domain.enums import HaltType, IntentState, Mode
+from trading_system.domain.heartbeat import watchdog_check
 from trading_system.storage.jsonlog import Masker
 from trading_system.storage.repository import ModeMismatch, Repository, StorageFailure
 
@@ -97,6 +98,9 @@ def resume_main(argv: Sequence[str] | None = None) -> int:
     except (ConfigError, ValueError) as exc:
         print(f"거부: {exc}")
         return 2
+    if mode is Mode.LIVE:   # A-084 ⑤: 저장소를 열기 전에 거부
+        print(LIVE_REFUSAL.format(tool="resume"))
+        return 2
     try:
         cid = _record(db, mode, "RESUME", {"account": ns.account, "halt_type": halt_type.value})
     except (StorageFailure, ModeMismatch) as exc:
@@ -126,6 +130,9 @@ def reconcile_resolve_main(argv: Sequence[str] | None = None) -> int:
         mode, db, _ = _resolve(ns)
     except ConfigError as exc:
         print(f"거부: {exc}")
+        return 2
+    if mode is Mode.LIVE:   # A-084 ⑤: 저장소를 열기 전에 거부
+        print(LIVE_REFUSAL.format(tool="reconcile-resolve"))
         return 2
     if ns.run:
         if not ns.account:
@@ -204,7 +211,8 @@ def status_main(argv: Sequence[str] | None = None, *, clock: Clock | None = None
 
 RECENT = 10
 _MASK = Masker()  # 화면 출력 전 가림 (계좌번호 형태 등, R-11)
-HEARTBEAT_STALE_SECONDS = 30  # monitoring.liveness.HEARTBEAT_STALE와 같은 값 (ops는 monitoring을 import하지 않는다)
+LIVE_REFUSAL = ("거부: --mode LIVE에서는 {tool}을(를) 지원하지 않음 — LIVE 실행·재개·대조 처리는 사용자 주도로 별도 승인 뒤에만 "
+                "(CLAUDE.md §3·§7). kill·status는 LIVE에서도 가능")
 
 
 def _acct(sql: str, account: str | None, params: tuple = ()) -> tuple[str, tuple]:
@@ -264,20 +272,13 @@ def _print_operations(repo: Repository, account: str | None, now: datetime) -> N
 
 
 def _print_heartbeat(path: Path, now: datetime) -> None:
-    try:
-        beat = datetime.fromisoformat(path.read_text(encoding="utf-8").strip())
-    except FileNotFoundError:
-        print("하트비트: 없음 — 본 프로세스가 시작되지 않았거나 멈춤")
+    """읽기·판정은 domain.heartbeat.watchdog_check 한 곳 (재시도 포함, A-084 ②)."""
+    st = watchdog_check(path, now)
+    if st.age_seconds is None or st.at is None:
+        print(f"하트비트: {st.detail}")
         return
-    except (OSError, ValueError):
-        print("하트비트: 읽을 수 없음")
-        return
-    if beat.tzinfo is None:
-        print("하트비트: 시간대 없는 시각 — 판정 불가")
-        return
-    age = (now - beat).total_seconds()
-    state = "살아 있음" if age <= HEARTBEAT_STALE_SECONDS else "멈춤 의심"
-    print(f"하트비트: {age:.0f}초 전 ({_kst(beat.isoformat())}) — 본 프로세스 {state}")
+    state = "살아 있음" if st.alive else f"멈춤 의심 ({st.detail})"
+    print(f"하트비트: {st.age_seconds:.0f}초 전 ({_kst(st.at.isoformat())}) — 본 프로세스 {state}")
 
 
 def _kst(text: str | None) -> str:

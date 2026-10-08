@@ -21,9 +21,12 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
-from trading_system.domain.clock import KST, to_iso
+from trading_system.domain.clock import KST, from_iso, to_iso
+from trading_system.domain.daily_base import DailyBase, DailyBaseCorrupt
 from trading_system.domain.enums import ACTIVE_INTENT_STATES, IntentState, Mode
 from trading_system.domain.models import Account
+
+DAILY_BASE_KIND = "DAILY_BASE"   # 거래일별 일일 기준 감사 기록 (monitoring.watchers.DAILY_BASE와 같은 값)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -382,6 +385,34 @@ class Repository:
 
     def audit_events(self) -> list[dict]:
         return [dict(r) for r in self._x("SELECT * FROM audit_event ORDER BY seq")]
+
+    def daily_base(self, account: str, trade_date: str) -> DailyBase | None:
+        """거래일의 마지막 DAILY_BASE 감사 기록 (A-084 ①: 일일 손실 추적·요약·보고가 같은 기준 금액을 읽는다).
+
+        기록이 없으면 None. 같은 거래일에 여러 번 기록됐으면 마지막 것. 그 거래일의 마지막 기록이 깨졌으면
+        DailyBaseCorrupt — "기록 없음"으로 보면 호출자가 기준을 새로 고정해 그날 앞선 손실이 사라진다 (재검토 M-1).
+        요약에서 거래일을 읽지 못하는 행은 기록 시각(at)의 거래일로 판단한다."""
+        for r in self._x("SELECT at, summary FROM audit_event WHERE kind=? AND ref=? ORDER BY seq DESC",
+                         (DAILY_BASE_KIND, account)):
+            try:
+                rec = json.loads(r["summary"])
+            except ValueError:
+                rec = None
+            day = rec.get("trade_date") if isinstance(rec, dict) else None
+            if not isinstance(day, str):
+                try:
+                    day = self.trade_date_of(from_iso(r["at"]))
+                except (TypeError, ValueError):
+                    day = trade_date   # 어느 날 기록인지도 모르면 손상으로 본다 (보수적)
+            if day != trade_date:
+                continue
+            if not isinstance(rec, dict):
+                raise DailyBaseCorrupt(f"DAILY_BASE {trade_date} 요약을 읽을 수 없음")
+            try:
+                return DailyBase.from_summary(rec)
+            except ValueError as exc:
+                raise DailyBaseCorrupt(f"DAILY_BASE {trade_date} {exc}") from exc
+        return None
 
     # --- 게이트 판정 --------------------------------------------------------
     def insert_decision(self, row: dict) -> None:

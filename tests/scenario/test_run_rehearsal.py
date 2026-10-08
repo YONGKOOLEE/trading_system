@@ -34,6 +34,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.rehearsal   # A-084 ⑥: 빠른 확인은 -m "not rehearsal and not e2e"
+
 from tests.support.kiwoom_sim import ACCOUNT_NO, APP_KEY, SECRET, Sim, _md_init
 from trading_system.app.instance_lock import acquire_instance_lock
 from trading_system.app.main import run_main

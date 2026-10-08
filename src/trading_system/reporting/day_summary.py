@@ -7,19 +7,19 @@
 
 from __future__ import annotations
 
-import json
 from collections import Counter
 from collections.abc import Sequence
 from datetime import date, time
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 
 from trading_system.domain.clock import KST, from_iso
+from trading_system.domain.daily_base import DailyBaseCorrupt
 from trading_system.domain.enums import IntentState, Mode
 from trading_system.domain.market import CostRates
 from trading_system.storage.repository import Repository
 
-from .daily import build_report
+from .daily import BASE_CORRUPT_NOTE, build_report, daily_base_total
 from .paper_review import review
 
 SIDE_KO = {"BUY": "매수", "SELL": "매도"}
@@ -73,10 +73,16 @@ def _pnl(repo: Repository, account: str, day: date, reference_time: time, rates:
     content = build_report(repo, account, day, reference_time, rates or CostRates(Decimal("0"), Decimal("0")),
                            lambda inst: None, None)
     note = "" if rates is not None else " (비용 미반영)"
+    try:
+        base, corrupt = _base_value(repo, account, day), False
+    except DailyBaseCorrupt:
+        base, corrupt = None, True   # 손상은 기록 없음과 다르게 표시 (재검토 M-1)
     if not content["fills_today"]:
-        return [f"실현 손익: 체결 없음{note}"]
+        return [f"실현 손익: 체결 없음{note}" + (f" ({BASE_CORRUPT_NOTE} — 사람 확인 필요)" if corrupt else "")]
     realized = Decimal(content["realized_total"])
-    base = _base_value(repo, account, day)
+    if corrupt:
+        sign = "+" if realized > 0 else "-" if realized < 0 else "±"
+        return [f"실현 손익: 방향 {sign} ({BASE_CORRUPT_NOTE} — 비율 생략, 사람 확인 필요){note}"]
     if base is None or base <= 0:
         sign = "+" if realized > 0 else "-" if realized < 0 else "±"
         return [f"실현 손익: 방향 {sign} (일일 기준 금액 기록 없음 — 비율 생략){note}"]
@@ -84,15 +90,9 @@ def _pnl(repo: Repository, account: str, day: date, reference_time: time, rates:
 
 
 def _base_value(repo: Repository, account: str, day: date) -> Decimal | None:
-    for e in repo.select("SELECT summary FROM audit_event WHERE kind='DAILY_BASE' AND ref=? ORDER BY seq DESC",
-                         (account,)):
-        s = json.loads(e["summary"])
-        if s.get("trade_date") == day.isoformat():
-            try:  # 기준 금액 = 현금 + 보유 평가액 (watchers DailyRiskTracker와 같은 정의, 3일차 결함 수정)
-                return Decimal(str(s.get("cash"))) + Decimal(str(s.get("value")))
-            except (InvalidOperation, ValueError):
-                return None
-    return None
+    """일일 기준 금액 = 현금 + 보유 평가액 (domain.daily_base.DailyBase 단일 정의, A-084 ①). 기록 없음은 None,
+    손상은 DailyBaseCorrupt (재검토 M-1)."""
+    return daily_base_total(repo, account, day)
 
 
 def _halts(repo: Repository, account: str, day: date, *_: object) -> list[str]:
