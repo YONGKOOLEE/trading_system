@@ -646,3 +646,22 @@ def test_v219_ops_stop_only_when_run_is_running(tmp_path: Path, capsys: pytest.C
     finally:
         lock.release()
     assert (base / STOP_REQUEST).exists() and "정지 요청" in capsys.readouterr().out
+
+
+def test_day3_summary_base_is_cash_plus_value(tmp_path: Path) -> None:
+    """3일차(2026-10-08) 결함: 일일 요약이 기준 금액 대신 보유 평가액(value)만 읽어, 보유 0인 날 "기록 없음"으로 표시.
+    기준 금액 = cash + value (watchers DailyRiskTracker와 같은 정의)."""
+    from trading_system.reporting.day_summary import _base_value
+
+    r = Rig(tmp_path)
+    run = r.launch()
+    run.step()
+    with run.repo.tx():
+        run.repo.audit(r.clock.now(), "DAILY_BASE", "monitor", ACCOUNT,
+                       {"trade_date": DAY.isoformat(), "cash": "99721280", "value": "0", "at": r.clock.now().isoformat()})
+    assert _base_value(run.repo, ACCOUNT, DAY) == Decimal("99721280")
+    with run.repo.tx():
+        run.repo.audit(r.clock.now(), "DAILY_BASE", "monitor", ACCOUNT,
+                       {"trade_date": DAY.isoformat(), "cash": "1000", "value": "500", "at": r.clock.now().isoformat()})
+    assert _base_value(run.repo, ACCOUNT, DAY) == Decimal("1500")  # 같은 날 마지막 기록
+    run.finish(0)
