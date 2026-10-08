@@ -160,6 +160,35 @@ class SchemaMismatch(RuntimeError):
 SCHEMA_VERSION = "2"  # 1: 기준선 (CP-018). 2: 신호 규칙 ID·소유 해제 시각 (거래 이력). maintenance.MIGRATIONS
 
 
+def open_read_only(path: Path, mode: Mode, busy_timeout: float = 5.0) -> sqlite3.Connection:
+    """조회 도구용 읽기 전용 연결 (confirm-unknown --list). 스키마 생성·모드 기록·쓰기를 하지 않는다.
+
+    -wal 파일이 없으면(쓰는 프로세스 없음) immutable로 열어 -wal·-shm도 만들지 않는다. 있으면 mode=ro (WAL 공유
+    메모리를 함께 읽어 쓰는 중인 run의 커밋을 본다). 모드·스키마 버전이 다르면 거부한다 (R-01, INV-12).
+    열기·읽기 실패(잠김·DB 아님·meta 없음)는 StorageFailure."""
+    from urllib.parse import quote
+    p = path.resolve()
+    if not p.is_file():
+        raise StorageFailure(f"DB 없음: {p}")
+    ro = "" if p.with_name(p.name + "-wal").exists() else "&immutable=1"
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(f"file:{quote(p.as_posix(), safe='/:')}?mode=ro{ro}", uri=True, timeout=busy_timeout)
+        conn.row_factory = sqlite3.Row
+        meta = dict(conn.execute("SELECT key, value FROM meta WHERE key IN ('mode','schema_version')").fetchall())
+    except sqlite3.Error as exc:
+        if conn is not None:
+            conn.close()
+        raise StorageFailure(f"읽기 전용 열기 실패 ({type(exc).__name__}: {exc}) — 잠김이면 잠시 뒤 다시 실행") from exc
+    if meta.get("mode") != mode.value:
+        conn.close()
+        raise ModeMismatch(f"이 저장소는 {meta.get('mode') or '모드 기록 없음'} 모드로 만들어졌다 (요청 모드 {mode.value})")
+    if meta.get("schema_version") != SCHEMA_VERSION:
+        conn.close()
+        raise SchemaMismatch(f"저장소 스키마 버전 {meta.get('schema_version') or '없음'} ≠ 코드 {SCHEMA_VERSION}")
+    return conn
+
+
 @dataclass(frozen=True)
 class IntentRow:
     intent_id: str
