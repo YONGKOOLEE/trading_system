@@ -95,7 +95,8 @@ def build_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: BrokerAd
         # 일일 보고서(장 마감 후)는 마지막 시세(price_of)를 그대로 쓴다
         return store.fresh_price(inst, clock.now(), quote_age)
 
-    tracker = DailyRiskTracker(repo, fresh_price_of, clock=clock, cost_rates=gate_settings.cost_rates)  # RV-23 보정
+    tracker = DailyRiskTracker(repo, fresh_price_of, clock=clock, cost_rates=gate_settings.cost_rates,  # RV-23 보정
+                               alerts=alerts)   # 일일 기준 기록 손상 알림 (재검토 M-1)
     acct = AccountState(tracker)
     # G8 현금: 조회 신선도 + 미반영 당일 매수 체결 보수 차감 (RV-23, PAPER-0에서 entr·d2_entra 의미 실측 후 재결정).
     # 신선도 한도(임시): max(대조 주기 × 3, 10분). 현금은 대조 때마다 조회하므로 조회 실패가 이어지면 모름이 된다.

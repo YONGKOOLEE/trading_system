@@ -13,6 +13,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
 from trading_system.domain.clock import KST, last_kst_time_at_or_before, to_iso
+from trading_system.domain.daily_base import DailyBaseCorrupt
 from trading_system.domain.enums import IntentState
 from trading_system.domain.market import CostRates, estimate_cost
 from trading_system.domain.sinks import AlertSink
@@ -91,18 +92,26 @@ def build_report(repo: Repository, account: str, trade_day: date, reference_time
     }
 
 
+BASE_CORRUPT_NOTE = "일일 기준 기록 손상"   # 일일 보고·요약 공통 문구 (재검토 M-1)
+
+
 def daily_base_total(repo: Repository, account: str, trade_day: date) -> Decimal | None:
-    """거래일의 일일 기준 금액(현금 + 보유 평가액, DAILY_BASE 감사 기록). 기록 없음·형식 오류는 None (A-084 ①)."""
+    """거래일의 일일 기준 금액(현금 + 보유 평가액, DAILY_BASE 감사 기록). 기록 없음은 None (A-084 ①).
+
+    기록이 손상됐으면 DailyBaseCorrupt (재검토 M-1) — 호출자는 비율 대신 "기준 기록 손상"을 쓴다."""
     base = repo.daily_base(account, trade_day.isoformat())
     return None if base is None else base.total
 
 
-def realized_ratio_text(realized: Decimal, base: Decimal | None) -> str:
+def realized_ratio_text(realized: Decimal, base: Decimal | None, *, corrupt: bool = False) -> str:
     """실현 손익을 일일 기준 금액 대비 비율로. 기준이 없으면 방향만 (D-156 일일 요약과 같은 정책, A-084 ④).
+    기준 기록이 손상됐으면(corrupt) 방향과 "기준 기록 손상" (재검토 M-1).
 
     텔레그램으로 가는 알림에는 금액 원문(원)을 넣지 않는다 (A-069 ⑤)."""
+    sign = "+" if realized > 0 else "-" if realized < 0 else "±"
+    if corrupt:
+        return f"실현 손익 방향 {sign} ({BASE_CORRUPT_NOTE} — 비율 생략, 사람 확인 필요)"
     if base is None or base <= 0:
-        sign = "+" if realized > 0 else "-" if realized < 0 else "±"
         return f"실현 손익 방향 {sign} (일일 기준 금액 기록 없음 — 비율 생략)"
     return f"실현 손익 일일 기준 대비 {realized / base * 100:+.3f}%"
 
@@ -141,6 +150,10 @@ class DailyReporter:
             return None
         with self._repo.tx():
             self._repo.insert_daily_report(account, trade_day, "OK", content, now, settings_hash)
-        ratio = realized_ratio_text(Decimal(content["realized_total"]), daily_base_total(self._repo, account, trade_day))
+        try:
+            base, corrupt = daily_base_total(self._repo, account, trade_day), False
+        except DailyBaseCorrupt:
+            base, corrupt = None, True
+        ratio = realized_ratio_text(Decimal(content["realized_total"]), base, corrupt=corrupt)
         self._alerts.alert("INFO", f"일일 보고 {trade_day}: 체결 {content['fills_today']}건, {ratio}", None)
         return content

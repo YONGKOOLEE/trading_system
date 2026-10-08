@@ -103,6 +103,23 @@ def test_preflight_engine_alive_uses_shared_reader_with_retry(tmp_path: Path, mo
     assert engine_alive(hb, T0) is None                                # 없음 → 거부 없음
 
 
+@pytest.mark.parametrize(("age", "refused"), [
+    (-31, True),    # 30초 넘게 미래 — 시계 이상, 엔진이 돌고 있을 수 있음 → 거부 (재검토 M-2, 6bac802 이전 동작)
+    (-10, True),
+    (10, True),     # 살아 있음 → 거부
+    (30, True),     # 정확히 30초 — 보수적으로 살아 있음 (6bac802 동작 유지)
+    (31, False),    # 멈춤 → 거부 없음
+])
+def test_preflight_engine_alive_refuses_future_heartbeat(tmp_path: Path, age: int, refused: bool) -> None:
+    from trading_system.app.preflight import engine_alive
+    hb = tmp_path / "heartbeat"
+    _write(hb, T0 - timedelta(seconds=age))
+    reason = engine_alive(hb, T0)
+    assert (reason is not None) is refused, reason
+    if age < -30:
+        assert reason is not None and "미래" in reason and "시계" in reason
+
+
 def test_cli_heartbeat_print_uses_shared_reader_with_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                                           capsys: pytest.CaptureFixture[str]) -> None:
     from trading_system.ops.cli import _print_heartbeat

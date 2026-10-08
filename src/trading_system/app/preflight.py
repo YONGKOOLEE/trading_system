@@ -308,8 +308,13 @@ def connect_paper(root: Path, environ: Mapping[str, str] | None, clock: Clock, *
 def engine_alive(heartbeat: Path, now: datetime) -> str | None:
     """본 프로세스 하트비트가 살아 있으면(HEARTBEAT_STALE 이내) 거부 사유. 없거나 오래되었으면 None.
 
+    하트비트 시각이 HEARTBEAT_STALE보다 미래면(시계 이상) 엔진이 돌고 있을 수 있으므로 거부한다 — watchdog_check는
+    이를 alive=False로 보지만, 점검 끝의 토큰 폐기는 엔진이 확실히 멈췄을 때만 해야 한다 (재검토 M-2, 6bac802 이전 동작).
     읽기는 domain.heartbeat.watchdog_check 한 곳 (재시도 포함, A-084 ②)."""
     st = watchdog_check(heartbeat, now)
+    if st.age_seconds is not None and st.age_seconds < -HEARTBEAT_STALE.total_seconds():
+        return (f"본 프로세스 하트비트 시각이 {-st.age_seconds:.0f}초 미래 — 시계 이상 의심, 실행 중인 엔진일 수 있어 "
+                f"점검하지 않는다(점검 끝의 토큰 폐기가 엔진 토큰을 무효화할 수 있음). 엔진 정지와 시계를 확인한 뒤 다시 실행")
     if not st.alive:
         return None
     return (f"본 프로세스 하트비트가 {st.age_seconds:.0f}초 전 — 실행 중인 엔진과 동시에 점검하지 않는다"

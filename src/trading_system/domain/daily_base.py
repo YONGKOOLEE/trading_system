@@ -38,3 +38,9 @@ class DailyBase:
                        datetime.fromisoformat(str(rec["at"])))
         except (KeyError, InvalidOperation, ValueError, TypeError) as exc:
             raise ValueError(f"DAILY_BASE 요약 형식 오류: {type(exc).__name__}") from exc
+
+
+class DailyBaseCorrupt(Exception):
+    """거래일의 DAILY_BASE 기록이 있으나 읽을 수 없음 — "기록 없음"과 구분한다 (A-084 재검토 M-1).
+
+    손상을 기록 없음으로 보면 지금 금액으로 기준을 새로 고정해 그날 앞선 손실이 L4에서 사라진다. 호출자는 모름으로 다룬다."""
