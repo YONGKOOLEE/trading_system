@@ -278,3 +278,44 @@ def test_stale_check_applies_after_chat_check(env: Env, tg: FakeTelegram) -> Non
     b.poll_once(timeout=0)
     kinds = [e["kind"] for e in env.repo.audit_events()]
     assert "REMOTE_REJECTED" in kinds and "REMOTE_STALE" not in kinds and tg.sent == []
+
+
+# --- A-084 ③ 비인가 채팅 홍수 상한 (R-21) -------------------------------------------------------------------
+
+def _rejected_audits(env: Env) -> int:
+    return sum(1 for e in env.repo.audit_events() if e["kind"] == "REMOTE_REJECTED")
+
+
+def test_a084_unauthorized_chat_flood_capped_per_hour(env: Env, tg: FakeTelegram) -> None:
+    """시간당 처음 3건만 감사 기록 + WARNING. 그 뒤는 조용히 세고, 한 시간이 지나면 요약 WARNING 1건.
+
+    알림 호출 자체를 세려고 기록용 alert를 넣는다 (AuditAlertSink의 같은 문구 억제 창과 별개의 상한)."""
+    calls: list[tuple[str, str]] = []
+    b = CommandBot(env.repo, api(tg), CHAT, ACCOUNT, env.clock, env.kill_file, lambda lvl, m: calls.append((lvl, m)))
+
+    def warnings(needle: str) -> list[str]:
+        return [m for lvl, m in calls if lvl == "WARNING" and needle in m]
+
+    for uid in range(1, 6):
+        tg.push(uid, "/kill", chat="999")
+    assert b.poll_once(timeout=0) == 5
+    assert _rejected_audits(env) == 3
+    assert len(warnings("허용되지 않은 채팅")) == 3
+    assert warnings("비인가 메시지") == []                   # 같은 시간 창 안에서는 요약 없음
+    assert tg.sent == [] and env.repo.pending_commands() == []
+    tg.updates.clear()
+    env.clock.advance(timedelta(minutes=59))
+    tg.push(6, "/status", chat="999")
+    b.poll_once(timeout=0)
+    assert _rejected_audits(env) == 3 and warnings("비인가 메시지") == []
+    tg.updates.clear()
+    env.clock.advance(timedelta(minutes=2))                  # 시간 창 경과
+    tg.push(7, "/kill", chat="999")
+    b.poll_once(timeout=0)
+    assert warnings("비인가 메시지") == ["비인가 메시지 3건 무시 (최근 1시간, 처음 3건만 기록)"]
+    assert _rejected_audits(env) == 4                        # 새 시간 창의 첫 건은 다시 기록
+    assert len(warnings("허용되지 않은 채팅")) == 4
+    tg.updates.clear()
+    env.clock.advance(timedelta(hours=1, minutes=1))         # 조용히 센 건이 없으면 요약도 없다
+    assert b.poll_once(timeout=0) == 0
+    assert len(warnings("비인가 메시지")) == 1

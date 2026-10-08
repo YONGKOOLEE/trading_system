@@ -5,6 +5,8 @@
 
 - 현재 상태: **6단계 구현 중** (`docs/.status`, 계획 0~5단계 승인 완료). 작업 목록: [docs/05-plan.md](docs/05-plan.md)
 - 개발 환경: Python 3.14, 프로젝트 가상환경 `.venv` + `requirements-dev.txt`(해시 고정). 테스트: `.venv\Scripts\python -m pytest`
+  - 빠른 확인(리허설·종단 간 제외): `.venv\Scripts\python -m pytest -q -m "not rehearsal and not e2e"`
+  - 전체(커밋 전 기준): `.venv\Scripts\python -m pytest -q` — `-m` 없이. 기본 선택은 PAPER 연동(`paper`)만 뺀다 (A-084 ⑥)
 - 에이전트 규칙: [CLAUDE.md](CLAUDE.md)
 - 범위·요구사항: [docs/business-definition.md](docs/business-definition.md)
 - 문서 체계: [docs/README.md](docs/README.md)

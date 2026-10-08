@@ -10,20 +10,20 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from trading_system.domain.enums import HaltType
+from trading_system.domain.heartbeat import HEARTBEAT_RETRIES, HEARTBEAT_STALE, WatchdogStatus, watchdog_check
 from trading_system.domain.sinks import AlertSink, HaltControl
 
+__all__ = ["HEARTBEAT_INTERVAL", "HEARTBEAT_RETRIES", "HEARTBEAT_STALE", "LoopMonitor", "WatchdogStatus",
+           "watchdog_check", "write_heartbeat"]
+
 HEARTBEAT_INTERVAL = timedelta(seconds=5)
-HEARTBEAT_STALE = timedelta(seconds=30)
+# HEARTBEAT_STALE·HEARTBEAT_RETRIES·watchdog_check·WatchdogStatus는 domain.heartbeat에 정의 (A-084 ②, 여기서 재노출)
 LOOP_DELAY_LIMIT = 5.0      # 초
 CLOCK_JUMP_LIMIT = 2.0      # 벽시계와 단조 시계 차이 (초)
-
-
-HEARTBEAT_RETRIES = 3       # Windows: watchdog·preflight가 읽는 순간 교체가 PermissionError로 실패할 수 있다 (RV-06)
 
 
 def write_heartbeat(path: Path, now: datetime, *, retries: int = HEARTBEAT_RETRIES,
@@ -39,35 +39,6 @@ def write_heartbeat(path: Path, now: datetime, *, retries: int = HEARTBEAT_RETRI
             if i == retries - 1:
                 raise
             sleep(0.05)
-
-
-@dataclass(frozen=True)
-class WatchdogStatus:
-    alive: bool
-    age_seconds: float | None
-    detail: str
-
-
-def watchdog_check(path: Path, now: datetime, stale: timedelta = HEARTBEAT_STALE, *,
-                   retries: int = HEARTBEAT_RETRIES, sleep: Callable[[float], None] = time.sleep) -> WatchdogStatus:
-    if not path.exists():
-        return WatchdogStatus(False, None, "하트비트 파일 없음 — 본 프로세스가 시작되지 않았거나 멈춤")
-    at = None
-    for i in range(retries):  # 쓰는 쪽 교체(replace) 순간 Windows 읽기가 실패할 수 있다 — 쓰기(RV-06)처럼 짧게 재시도
-        try:
-            at = datetime.fromisoformat(path.read_text(encoding="utf-8").strip())
-            break
-        except (OSError, ValueError):
-            if i < retries - 1:
-                sleep(0.05)
-    if at is None:
-        return WatchdogStatus(False, None, "하트비트 파일을 읽을 수 없음")
-    age = (now - at).total_seconds()
-    if age > stale.total_seconds():
-        return WatchdogStatus(False, age, f"하트비트 {age:.0f}초 멈춤 (기준 {stale.total_seconds():.0f}초)")
-    if age < -stale.total_seconds():
-        return WatchdogStatus(False, age, "하트비트 시각이 미래 — 시계 이상 의심")
-    return WatchdogStatus(True, age, "정상")
 
 
 class LoopMonitor:

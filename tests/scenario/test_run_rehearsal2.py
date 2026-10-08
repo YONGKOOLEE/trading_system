@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.rehearsal   # A-084 ⑥: 빠른 확인은 -m "not rehearsal and not e2e"
+
 import trading_system.app.main as main_mod
 from tests.scenario import test_run_rehearsal as base
 from tests.scenario.test_run_rehearsal import ACCOUNT, CODE, ORDER_APIS, Rig, _ntp, raise_first, started, wait_until

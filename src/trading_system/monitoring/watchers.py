@@ -16,9 +16,10 @@ from datetime import datetime, time, timedelta
 from decimal import Decimal
 
 from trading_system.domain.clock import Clock, from_iso, last_kst_time_at_or_before, to_iso
+from trading_system.domain.daily_base import DailyBase
 from trading_system.domain.market import CashView, CostRates, DailyRisk, estimate_cost
 from trading_system.domain.sinks import AlertSink
-from trading_system.storage.repository import Repository
+from trading_system.storage.repository import DAILY_BASE_KIND, Repository
 
 
 @dataclass(frozen=True)
@@ -89,7 +90,7 @@ def same_day_buy_cash(repo: Repository, account: str, now: datetime, rates: Cost
     return total
 
 
-DAILY_BASE = "DAILY_BASE"   # 거래일별 일일 기준 감사 기록 (재검토2 #2)
+DAILY_BASE = DAILY_BASE_KIND   # 거래일별 일일 기준 감사 기록 (재검토2 #2). 형식은 domain.daily_base.DailyBase (A-084 ①)
 
 
 def same_day_cash_flow(repo: Repository, account: str, now: datetime, rates: CostRates,
@@ -143,10 +144,9 @@ class DailyRiskTracker:
         """
         saved = self._saved_base(account)
         if saved is not None:
-            base_cash, base_value, base_at = saved
-            self._base[account] = base_cash + base_value
-            self._base_cash[account] = base_cash
-            self._base_at[account] = base_at
+            self._base[account] = saved.total
+            self._base_cash[account] = saved.cash
+            self._base_at[account] = saved.at
             self._cash.setdefault(account, cash)
             return self._base[account]
         value = self._positions_value(account)
@@ -160,25 +160,15 @@ class DailyRiskTracker:
             self._base_at[account] = self._clock.now()
             if self._rates is not None:
                 now = self._clock.now()
+                base = DailyBase(self._repo.trade_date_of(now), cash, value, now)
                 with self._repo.tx():
-                    self._repo.audit(now, DAILY_BASE, "monitor", account, {
-                        "trade_date": self._repo.trade_date_of(now), "cash": str(cash), "value": str(value),
-                        "at": now.isoformat()})
+                    self._repo.audit(now, DAILY_BASE, "monitor", account, base.to_summary())
         return self._base[account]
 
-    def _saved_base(self, account: str) -> tuple[Decimal, Decimal, datetime] | None:
+    def _saved_base(self, account: str) -> DailyBase | None:
         if self._clock is None or self._rates is None:
             return None
-        today = self._repo.trade_date_of(self._clock.now())
-        found = None
-        for e in self._repo.select("SELECT summary FROM audit_event WHERE kind=? AND ref=? ORDER BY seq",
-                                   (DAILY_BASE, account)):
-            rec = json.loads(e["summary"])
-            if rec.get("trade_date") == today:
-                found = rec
-        if found is None:
-            return None
-        return Decimal(found["cash"]), Decimal(found["value"]), datetime.fromisoformat(found["at"])
+        return self._repo.daily_base(account, self._repo.trade_date_of(self._clock.now()))
 
     def update_cash(self, account: str, cash: Decimal) -> None:
         self._cash[account] = cash

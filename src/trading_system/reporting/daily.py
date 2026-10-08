@@ -91,6 +91,22 @@ def build_report(repo: Repository, account: str, trade_day: date, reference_time
     }
 
 
+def daily_base_total(repo: Repository, account: str, trade_day: date) -> Decimal | None:
+    """거래일의 일일 기준 금액(현금 + 보유 평가액, DAILY_BASE 감사 기록). 기록 없음·형식 오류는 None (A-084 ①)."""
+    base = repo.daily_base(account, trade_day.isoformat())
+    return None if base is None else base.total
+
+
+def realized_ratio_text(realized: Decimal, base: Decimal | None) -> str:
+    """실현 손익을 일일 기준 금액 대비 비율로. 기준이 없으면 방향만 (D-156 일일 요약과 같은 정책, A-084 ④).
+
+    텔레그램으로 가는 알림에는 금액 원문(원)을 넣지 않는다 (A-069 ⑤)."""
+    if base is None or base <= 0:
+        sign = "+" if realized > 0 else "-" if realized < 0 else "±"
+        return f"실현 손익 방향 {sign} (일일 기준 금액 기록 없음 — 비율 생략)"
+    return f"실현 손익 일일 기준 대비 {realized / base * 100:+.3f}%"
+
+
 def current_trade_day(now: datetime, reference_time: time) -> date:
     """`now`가 속한 거래일 = 직전(같은 시각 포함) 일일 기준 시각의 KST 날짜. report_time(예: 16:00) 보고에 쓴다."""
     return last_kst_time_at_or_before(now, reference_time).astimezone(KST).date()
@@ -125,6 +141,6 @@ class DailyReporter:
             return None
         with self._repo.tx():
             self._repo.insert_daily_report(account, trade_day, "OK", content, now, settings_hash)
-        self._alerts.alert("INFO", f"일일 보고 {trade_day}: 체결 {content['fills_today']}건, "
-                                   f"실현 {content['realized_total']}원", None)
+        ratio = realized_ratio_text(Decimal(content["realized_total"]), daily_base_total(self._repo, account, trade_day))
+        self._alerts.alert("INFO", f"일일 보고 {trade_day}: 체결 {content['fills_today']}건, {ratio}", None)
         return content

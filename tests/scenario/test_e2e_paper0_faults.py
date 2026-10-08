@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.e2e   # A-084 ⑥: 빠른 확인은 -m "not rehearsal and not e2e"
+
 import tests.scenario.test_e2e_paper0_days as days
 from tests.scenario.test_e2e_paper0_days import (
     ACCOUNT, CODE, DAYS, KiwoomPaperWorld, PaperWorld, _wait, buy_sell_of_day, kst, start_and_resume,

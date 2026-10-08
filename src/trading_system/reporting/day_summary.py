@@ -7,11 +7,10 @@
 
 from __future__ import annotations
 
-import json
 from collections import Counter
 from collections.abc import Sequence
 from datetime import date, time
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 
 from trading_system.domain.clock import KST, from_iso
@@ -19,7 +18,7 @@ from trading_system.domain.enums import IntentState, Mode
 from trading_system.domain.market import CostRates
 from trading_system.storage.repository import Repository
 
-from .daily import build_report
+from .daily import build_report, daily_base_total
 from .paper_review import review
 
 SIDE_KO = {"BUY": "매수", "SELL": "매도"}
@@ -84,15 +83,8 @@ def _pnl(repo: Repository, account: str, day: date, reference_time: time, rates:
 
 
 def _base_value(repo: Repository, account: str, day: date) -> Decimal | None:
-    for e in repo.select("SELECT summary FROM audit_event WHERE kind='DAILY_BASE' AND ref=? ORDER BY seq DESC",
-                         (account,)):
-        s = json.loads(e["summary"])
-        if s.get("trade_date") == day.isoformat():
-            try:  # 기준 금액 = 현금 + 보유 평가액 (watchers DailyRiskTracker와 같은 정의, 3일차 결함 수정)
-                return Decimal(str(s.get("cash"))) + Decimal(str(s.get("value")))
-            except (InvalidOperation, ValueError):
-                return None
-    return None
+    """일일 기준 금액 = 현금 + 보유 평가액 (domain.daily_base.DailyBase 단일 정의, A-084 ①). 기록 없음·형식 오류는 None."""
+    return daily_base_total(repo, account, day)
 
 
 def _halts(repo: Repository, account: str, day: date, *_: object) -> list[str]:
