@@ -14,4 +14,4 @@ implementation_start: authorized   # A-022 (2026-10-01). M2 구현 시작 A-071 
 live_order_code: not-authorized
 live_run: not-authorized    # 시장별: M1/M2/M3 모두 없음. PAPER 자동 운영(CP-029)은 PAPER 전용
 commit_policy: D-082 (A-017) + A-030   # 작업 완료·테스트 통과 시 로컬 커밋(문서 포함, A-030), push·main 병합은 지시 시
-last_updated: 2026-10-08   # 마지막 기록 A-084(전체 점검 후속 작업 지시·결정 위임 2-1 CP-031 K3, 2-2 CAP-ORD-02 미지원, 2-3 텔레그램 금액 제외). 게이트 변경 없음. CP 승인: CP-026~CP-030(A-070·072·074·080·082), CP-031 A-084 위임, CP-025 미승인
+last_updated: 2026-10-09   # main 4e76347(A-084 후속·백테스트·confirm-unknown 병합, 1449 passed), CP-032 draft. 마지막 기록 A-084(전체 점검 후속 작업 지시·결정 위임 2-1 CP-031 K3, 2-2 CAP-ORD-02 미지원, 2-3 텔레그램 금액 제외). 게이트 변경 없음. CP 승인: CP-026~CP-030(A-070·072·074·080·082), CP-031 A-084 위임, CP-025 미승인
