@@ -392,3 +392,12 @@
 - 문서 정리(브랜치 docs/cp-030-validation-criteria, 이 worklog 포함): CP-029 `[CP-029]` 반영(01·03·04·05), CP-031 신설·반영, A-084 2-2·2-3 반영, "미병합·미커밋·전체 회귀 미실행" 문구를 병합 사실로 갱신, 07-paper-review v0.3(2일차 마감·v2 전환·3일차 — 보고 기반), paper0-verify status·strategy 상태, pv-procedure v0.6(조건문 삭제, 10-12 준비), handoff 전면 개정, .status, README 2종·루트 README, decisions-pending DP-27·31·40.
 - 미확인: 3일차 DB 수치(주문번호·PV-05·PV-10·PV-15·PV-16·알림 통계) — v0.4에서 조회. unknown-k3·ops-hardening·code-health 시험 결과. 시험 실행 없음(이 문서 작업).
 - 다음: 사용자에게 10-12 무인 전환 준비 4단계 안내(시간 서버 time.kriss.re.kr, .env TRADE_MODE 확인, schedule-register, Principal UserId 확인) → 병합 지시 시 T-009 export → T-026 → T-M2-07 순.
+
+## 2026-10-09 (40) — 전체 점검 후속 3묶음 재검토·통합·main 병합
+- 세션 한도로 끊긴 재검토·수정 3건 재수행(작업 폴더는 끊기기 전 상태 그대로, 미완성 변경 없음).
+- 재검토 반영: code-health f6d5090(손상 DAILY_BASE → DailyBaseCorrupt, start_day None·위험 확대 거부·긴급 알림 1회; preflight 미래 하트비트 거부 복원, 1290), ops-hardening d71ebc1·242476e(처리 못 한 예외 → traceback 일 로그·코드 3, SNTP 음수 지연 표본 제외, 1291), unknown-k3 2109f81(K3 재개는 결과 불명 확정 뒤 새 대조만, 보류 주문 있으면 K3 reconciled 미충족; 잘못된 미접수 확정 → 다음 대조 K4, 1262).
+- 에이전트 판단(A-084 위임): run 시작 전 일반 예외는 코드 2 유지. CP-031 유지 — K3는 계좌 전체 청산도 막는다(CP-031 §5 명시, 이중 포지션 방지 우선).
+- 통합 integ/2026-10-09(세 브랜치 자동 병합, 충돌 없음) 전체 **1335 passed**(963.90s).
+- 사용자 지시 "운영 묶음과 문서 main 병합": d825890(integ) → 52e7aa0(docs/cp-030-validation-criteria) → 9a494f1(docs/user-manual, docs/README.md 충돌 1건 최신 표 채택). main 전체 **1335 passed**(914.65s). push 없음.
+- 사용자 질문 정리: 구현·가능 기능 목록(대화), 확장 선행 조건(지정가 바로 가능, 분봉·실시간·정정은 키움 사양 조사 후, 다종목 20은 한도 결정 먼저).
+- 다음: 10-12 무인 전환 사용자 준비 4단계(집 PC), 남은 브랜치(T-009·T-026·M2) 통합 시험 뒤 병합, 키움 사양 조사(지시 시), 사용 설명서 v0.2.
