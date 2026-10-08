@@ -48,12 +48,19 @@ class WatchdogStatus:
     detail: str
 
 
-def watchdog_check(path: Path, now: datetime, stale: timedelta = HEARTBEAT_STALE) -> WatchdogStatus:
+def watchdog_check(path: Path, now: datetime, stale: timedelta = HEARTBEAT_STALE, *,
+                   retries: int = HEARTBEAT_RETRIES, sleep: Callable[[float], None] = time.sleep) -> WatchdogStatus:
     if not path.exists():
         return WatchdogStatus(False, None, "하트비트 파일 없음 — 본 프로세스가 시작되지 않았거나 멈춤")
-    try:
-        at = datetime.fromisoformat(path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
+    at = None
+    for i in range(retries):  # 쓰는 쪽 교체(replace) 순간 Windows 읽기가 실패할 수 있다 — 쓰기(RV-06)처럼 짧게 재시도
+        try:
+            at = datetime.fromisoformat(path.read_text(encoding="utf-8").strip())
+            break
+        except (OSError, ValueError):
+            if i < retries - 1:
+                sleep(0.05)
+    if at is None:
         return WatchdogStatus(False, None, "하트비트 파일을 읽을 수 없음")
     age = (now - at).total_seconds()
     if age > stale.total_seconds():

@@ -88,8 +88,8 @@ def _base_value(repo: Repository, account: str, day: date) -> Decimal | None:
                          (account,)):
         s = json.loads(e["summary"])
         if s.get("trade_date") == day.isoformat():
-            try:
-                return Decimal(str(s.get("value")))
+            try:  # 기준 금액 = 현금 + 보유 평가액 (watchers DailyRiskTracker와 같은 정의, 3일차 결함 수정)
+                return Decimal(str(s.get("cash"))) + Decimal(str(s.get("value")))
             except (InvalidOperation, ValueError):
                 return None
     return None
