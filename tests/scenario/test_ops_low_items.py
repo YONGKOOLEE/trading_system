@@ -112,11 +112,9 @@ def test_paper_mode_refusal_notifies_when_telegram_enabled(tmp_path: Path, tg: F
     assert "TRADE_MODE" in tg.sent[0]["text"]
 
 
-@pytest.mark.parametrize("enabled", [False, None])
-def test_paper_refusal_without_enabled_telegram_logs_only(tmp_path: Path, tg: FakeTelegram,
-                                                          enabled: bool | None) -> None:
+def test_paper_refusal_with_telegram_explicitly_disabled_logs_only(tmp_path: Path, tg: FakeTelegram) -> None:
     _secrets_root(tmp_path)
-    _app_toml(tmp_path, enabled)                                             # false 또는 파일 없음
+    _app_toml(tmp_path, False)                                               # 읽히고 명시적으로 enabled = false
     assert autopilot_main(["--mode", "PAPER", "--root", str(tmp_path)], environ={"TRADE_MODE": "LIVE"},
                           telegram_base_url=tg.url) == EXIT_REFUSED
     assert tg.sent == [] and tg.paths == []
@@ -124,13 +122,30 @@ def test_paper_refusal_without_enabled_telegram_logs_only(tmp_path: Path, tg: Fa
     assert "자동 운영 거부" in text and "로그만" in text, text
 
 
-def test_paper_refusal_with_broken_app_toml_logs_only(tmp_path: Path, tg: FakeTelegram) -> None:
+# 재검토(c7e16da 후속, A-084 위임 결정 L-2): 무인 운영에서 침묵이 더 나쁘다 — 설정을 못 읽거나 깨졌으면 PAPER 거부
+# 알림을 그대로 보낸다(fail-loud). 로그만은 "읽히고 명시적으로 enabled = false"일 때뿐.
+@pytest.mark.parametrize("content", [
+    None,                                       # 파일 없음 (OSError)
+    b"[telegram\nenabled = true\n",             # TOML 형식 오류
+    b"[telegram]\nenabled = \xff\xfe\n",        # UTF-8 아님 (UnicodeDecodeError)
+])
+def test_paper_refusal_with_unreadable_app_toml_still_notifies(tmp_path: Path, tg: FakeTelegram,
+                                                               content: bytes | None) -> None:
     _secrets_root(tmp_path)
     (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "app.paper.toml").write_text("[telegram\nenabled = true\n", encoding="utf-8")
+    if content is not None:
+        (tmp_path / "config" / "app.paper.toml").write_bytes(content)
     assert autopilot_main(["--mode", "PAPER", "--root", str(tmp_path)], environ={"TRADE_MODE": "LIVE"},
                           telegram_base_url=tg.url) == EXIT_REFUSED
-    assert tg.sent == []
+    assert len(tg.sent) == 1 and "자동 운영 거부" in tg.sent[0]["text"], tg.sent
+    assert "확인 불가" in _day_log(tmp_path)
+
+
+def test_non_paper_refusal_with_unreadable_app_toml_still_log_only(tmp_path: Path, tg: FakeTelegram) -> None:
+    _secrets_root(tmp_path)                                                  # 설정 파일 없음 — 그래도 LIVE는 로그만
+    assert autopilot_main(["--mode", "LIVE", "--root", str(tmp_path)], environ={},
+                          telegram_base_url=tg.url) == EXIT_REFUSED
+    assert tg.sent == [] and tg.paths == []
 
 
 def test_config_refusal_telegram_has_no_filesystem_path(tmp_path: Path, tg: FakeTelegram,
@@ -166,6 +181,26 @@ def test_config_refusal_telegram_has_no_filesystem_path(tmp_path: Path, tg: Fake
 def test_strip_paths_only_masks_absolute_paths(text: str, kept: bool) -> None:
     from trading_system.app.autopilot import strip_paths
     assert (strip_paths(text) == text) is kept, strip_paths(text)
+
+
+@pytest.mark.parametrize("text,gone", [
+    ("C:\\AI\\x y\\파일 없음", ("AI", "x y", "파일")),                       # 공백 든 경로 — 조각이 남지 않음
+    ("없음: C:\\Program Files\\app\\a.toml (확인)", ("Program", "Files", "app", "a.toml")),
+    ("없음: /home/my docs/x.db — 다시 실행", ("home", "my docs", "x.db")),
+    ("없음: \\\\srv\\my share\\a.toml\n다음 줄", ("srv", "my share", "a.toml")),
+])
+def test_strip_paths_masks_paths_with_spaces_to_delimiter(text: str, gone: tuple[str, ...]) -> None:
+    from trading_system.app.autopilot import strip_paths
+    out = strip_paths(text)
+    assert "<경로>" in out, out
+    for frag in gone:
+        assert frag not in out, out
+    if "(확인)" in text:
+        assert out.endswith(" (확인)"), out                                 # 구분자 뒤 문구는 남김
+    if " — 다시 실행" in text:
+        assert out.endswith("<경로> — 다시 실행"), out
+    if "\n다음 줄" in text:
+        assert out.endswith("\n다음 줄"), out
 
 
 # --- 3. 429·연결 실패: 메시지 1건 30초 상한 ---------------------------------------------------------------------
@@ -252,6 +287,32 @@ def test_repeated_429_each_message_capped(tmp_path: Path) -> None:
     assert len(n.failed) == 3
 
 
+def test_flush_total_time_capped_at_60s(tmp_path: Path) -> None:
+    # 재검토(L-4): 종료 전 재전송도 전체 60초 이내 — 남은 것은 큐·fallback 파일에 그대로
+    mono = Mono()
+    err = TelegramError("sendMessage: 연결 실패 (ReadTimeout)")
+    api = SlowApi(mono, [], cost=13.0)
+    n, logs = _timed(tmp_path, api, mono)
+    n.failed = [f"[정보] [자동 운영] 밀린 {i}" for i in range(10)]
+    api.replies = [err] * 10
+    start = mono.t
+    assert n.flush() == 0
+    assert mono.t - start <= 60.0, mono.t - start
+    assert api.calls == 4 and len(n.failed) == 10                           # 시도 못 한 6건도 큐에 남김
+    assert any("60초" in m for m in logs), logs
+    api.replies = []
+    mono.t += 1
+    api.cost = 0.1
+    assert n.flush() == 10 and n.failed == []
+
+
+def test_retry_after_cap_constant_removed() -> None:
+    import trading_system.app.autopilot as m
+    assert not hasattr(m, "RETRY_AFTER_CAP_SECONDS")                        # 메시지당 30초 상한으로 대체
+    assert m.MESSAGE_BUDGET_SECONDS == 30.0 and m.FLUSH_BUDGET_SECONDS == 60.0
+    assert m.__doc__ is not None and "메시지당 총 30초" in m.__doc__
+
+
 # --- 4. paper-review: 손상된 DAILY_BASE 행 ---------------------------------------------------------------------
 
 def test_paper_review_renders_corrupt_daily_base_rows(tmp_path: Path) -> None:
@@ -295,13 +356,14 @@ class FakeChildRun:
 
     def __init__(self, argv: object, cwd: Path, env: object, log_path: Path) -> None:
         self.lock = acquire_instance_lock(log_path.parent.parent)          # var/paper
+        self.exited = False
         FakeChildRun.made.append(self)
 
     def alive(self) -> bool:
-        return True
+        return not self.exited
 
     def exit_code(self) -> int | None:
-        return None
+        return 2 if self.exited else None
 
 
 @pytest.fixture
@@ -363,6 +425,33 @@ def test_base_exception_after_child_already_exited_writes_nothing(tmp_path: Path
     assert autopilot_main(["--mode", "PAPER", "--root", str(tmp_path)], environ={},
                           telegram_base_url=tg.url) == EXIT_ABORTED
     assert not (tmp_path / "var" / "paper" / STOP_REQUEST).exists()
+
+
+def test_base_exception_child_exited_and_manual_run_holds_lock_no_stop(tmp_path: Path, tg: FakeTelegram,
+                                                                        monkeypatch: pytest.MonkeyPatch,
+                                                                        child) -> None:  # type: ignore[no-untyped-def]
+    # 재검토 M-1: 자식 run이 끝난 뒤(예: 잠금 경합으로 코드 2, 또는 종료 절차 중) 사용자가 수동 run을 켜 잠금을 잡았으면
+    # 실행 잠금만 보고 정지 요청을 쓰면 수동 run을 멈춘다 — 자기 자식이 살아 있을 때만 쓴다
+    _secrets_root(tmp_path)
+    _stub_main_setup(monkeypatch)
+    held: list = []
+
+    def child_exited_manual_started(self: Autopilot) -> int:
+        self.d.launch()
+        c = FakeChildRun.made[-1]
+        c.lock.release()
+        c.exited = True                                                      # 자식 프로세스 종료
+        held.append(acquire_instance_lock(self.base))                        # 수동 run이 잠금을 잡음
+        raise KeyboardInterrupt
+    monkeypatch.setattr(Autopilot, "run", child_exited_manual_started)
+    try:
+        assert autopilot_main(["--mode", "PAPER", "--root", str(tmp_path)], environ={},
+                              telegram_base_url=tg.url) == EXIT_ABORTED
+    finally:
+        for lk in held:
+            lk.release()
+    assert not (tmp_path / "var" / "paper" / STOP_REQUEST).exists()
+    assert "정지 요청 파일 안 씀" in _day_log(tmp_path)
 
 
 # --- 6. 미래 시각 하트비트: status·preflight·자동 운영 모두 "시계 이상 의심" -----------------------------------------
