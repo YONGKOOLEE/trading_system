@@ -11,7 +11,8 @@
 - D-164 % 슬리피지: 기본 0.1%, 2배 0.2%. C-3 = 0.2%에서 검증 구간(7개 창 합산) 거래당 기대값 > 0.
 - D-165 파라미터 ±20%: 수치 파라미터 하나씩, 실행 수 2P(창마다). C-4 = 모든 변형의 합산 기대값 > 0. 변형은 기본 슬리피지.
 - D-166 비교(참고, 판정 제외): 단순 보유(첫날 동일 비중 매수·끝까지 보유, 비용·슬리피지 반영) / 무작위 진입(전략과 같은
-  거래 수·보유 기간 분포, 같은 게이트·비용·슬리피지, 시드 고정 기본 200회)의 백분위.
+  거래 수·보유 기간 분포, 같은 게이트·비용·슬리피지, 시드 고정)의 백분위. 무작위 진입은 A-083(2026-10-08)으로
+  공통 성과 기준에서 빠졌다 — 기본 미실행(0회), `--random-runs N`으로만 선택 실행, 판정에 쓰지 않는다.
 - D-167 C-2: 합산 거래 수 < 100 → 판단 불가. D-168 C-7: 사후 선택 목록이면 생존편향 표시 + "통과(과대 추정 가능)".
 - D-161 검증용 전략(paper0-verify 계열)은 성과 판정 제외.
 - 거래 1건 = 진입~전량 청산(D-078). 창 끝에 남은 보유는 거래 수·기대값에 넣지 않고 창별 "미청산"으로 기록한다.
@@ -51,7 +52,7 @@ FINAL_FROM = FINAL_FROM_DEFAULT        # D-163 2026-01-01 (설정 config/validat
 _log = logging.getLogger(__name__)
 SLIPPAGE_BASE = Decimal("0.001")       # D-164 기본 0.1% (2배 = 0.2%)
 MIN_TRADES = 100                       # D-167
-RANDOM_RUNS = 200                      # D-166 [제안 — 횟수]
+RANDOM_RUNS = 0                        # A-083: 무작위 진입 비교는 공통 기준 아님 → 기본 미실행 (선택 실행 N회)
 VERIFY_FAMILY = ("paper0-verify",)     # D-161 검증용 전략 (D-076 PAPER-0)
 BANNER = "생존편향 포함 — 모든 수익은 과대 추정된 것으로 본다"
 _Q6 = Decimal("0.000001")
@@ -904,10 +905,10 @@ def render_validation(o: dict[str, object]) -> str:
              else "수치 파라미터 없음 — 변형 0개 [제안: 판단 불가]") + f" | {v['C-4']} |",  # type: ignore[index]
           f"| C-5 | 단순 보유 비교 | 같은 기간 나란히 (참고) | 연결 수익률 {o['pooled']['buy_hold_chained_return']} "  # type: ignore[index]
           f"vs 전략 {pb['chained_return']} | 참고 |",
-          f"| C-6 | 무작위 진입 비교 | {RANDOM_RUNS}회 분포 대비 백분위 (참고) [제안] | "
-          + (f"{pr['strategy_percentile']} 백분위 ({pr['runs']}회)" if pr else "미실행")
-          + (f" — CP 기준 {RANDOM_RUNS}회 미충족, {c['random_runs']}회" if c["random_runs"] < RANDOM_RUNS else "")  # type: ignore[index, operator]
-          + " | 참고 |",
+          "| C-6 | 무작위 진입 비교 | 삭제(A-083) — 공통 기준 아님 | "
+          + (f"{pr['strategy_percentile']} 백분위 — 선택 실행(공통 기준 아님, A-083), {c['random_runs']}회"  # type: ignore[index]
+             if pr and c["random_runs"] else "삭제(A-083) — 공통 기준 아님, 미실행")  # type: ignore[index]
+          + " | 판정 제외 |",
           f"| 재현성 | 같은 입력 재실행 지문 (D-074) | 모든 창 같음 | "
           f"{sum(1 for w in o['windows'] if w['reproducible'])}/{len(o['windows'])} 창 통과 | "  # type: ignore[union-attr, arg-type]
           f"{v.get('reproducible', '—')} (실패면 판단 불가) |",  # type: ignore[union-attr]
@@ -963,8 +964,8 @@ def render_validation(o: dict[str, object]) -> str:
           "- 무작위 진입: 창마다 전략 기본 실행의 거래별 (보유 거래일 수, 진입 금액, 손절 거리)를 그대로 쓰고 종목·진입일만 "
           "무작위(시드 고정, 같은 종목 구간 겹침 없음). 같은 run_backtest(게이트·한도·비용·슬리피지)로 실행 — 한도 거부로 실제 "
           "거래 수는 전략보다 적을 수 있음. 백분위 = (무작위 수익률 < 전략 + 같음 × ½) / 횟수.",
-          *([f"- **무작위 진입 횟수: CP 기준 {RANDOM_RUNS}회 미충족, {c['random_runs']}회** (`--random-runs`)"]  # type: ignore[index]
-            if c["random_runs"] < RANDOM_RUNS else []),  # type: ignore[index, operator]
+          (f"- 무작위 진입: 선택 실행(공통 기준 아님, A-083), {c['random_runs']}회 (`--random-runs`)"  # type: ignore[index]
+           if c["random_runs"] else "- 무작위 진입: 삭제(A-083) — 공통 기준 아님, 미실행 (`--random-runs N`으로 선택 실행)"),
           "", "| 창 | 단순 보유 수익률 | 단순 보유 MDD | 단순 보유 매도 비용 | 전략 평균·최대 투자 비중 | 제외 종목(첫날 봉 없음) "
           "| 무작위 횟수 | 무작위 중앙값 | 실현 거래(무작위 평균 / 전략) | 자리 못 찾은 거래 |",
           "|---|---|---|---|---|---|---|---|---|---|"]

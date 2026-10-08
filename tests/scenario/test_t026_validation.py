@@ -502,7 +502,25 @@ def test_m3_m4_m5_tables(tmp_path: Path) -> None:
     assert {"avg", "max"} <= set(w["base"]["invested_ratio"]) and "sell_costs" in w["buy_hold"]   # M-4
     assert "평균·최대 투자 비중" in md
     assert w["random"]["strategy_trades"] == w["base"]["trades"]                                   # M-5
-    assert "CP 기준 200회 미충족, 3회" in md
+    # [A-083, 2026-10-08] 무작위 진입은 공통 기준에서 제외(선택 실행). 이전 기대 "CP 기준 200회 미충족, 3회"는 삭제
+    assert "선택 실행(공통 기준 아님, A-083), 3회" in md and "미충족, 3회" not in md and "200회" not in md
+    zero = run_validation(ValidationInputs(template=_dummy_strategy_cfg(tmp_path), out_dir=tmp_path / "v0",  # type: ignore[arg-type]
+                                           report_version=1, windows=(W1, W2), final_from=date(2027, 1, 1),
+                                           random_runs=0))
+    assert zero["verdict"] == out["verdict"]                     # 판정은 무작위 진입과 무관 (A-083)
+    assert zero["runs_by_kind"]["random"] == 0
+    md0 = (tmp_path / "v0" / "validation-v1.md").read_text(encoding="utf-8")
+    assert "삭제(A-083) — 공통 기준 아님, 미실행" in md0 and "200회" not in md0
+
+
+def test_a083_random_entry_off_by_default() -> None:
+    """[A-083] 무작위 진입 비교는 공통 기준이 아니다: 기본 0회(미실행), --random-runs N으로만 실행."""
+    import dataclasses
+    from trading_system.app.validation import RANDOM_RUNS
+    f = {x.name: x for x in dataclasses.fields(ValidationInputs)}
+    assert RANDOM_RUNS == 0 and f["random_runs"].default == 0
+    import inspect
+    assert "random" not in str(inspect.signature(decide_verdict))
 
 
 def test_l1_final_check_validates_before_ledger(tmp_path: Path) -> None:

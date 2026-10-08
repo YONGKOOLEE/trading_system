@@ -3,7 +3,8 @@
     python scripts/validate-strategy.py --strategy trading_system.strategy.trend_sma:TrendSmaV1 \
         --params config/strategies/trend-sma-v1.toml --data <일봉 CSV 폴더> --report-version 1
 
-- 7개 워크포워드 창(D-162) × (기본 슬리피지, 2배) + 재현성 + ±20% 변형(D-165) + 단순 보유·무작위 진입(D-166).
+- 7개 워크포워드 창(D-162) × (기본 슬리피지, 2배) + 재현성 + ±20% 변형(D-165) + 단순 보유(D-166).
+  무작위 진입 비교는 A-083으로 공통 기준에서 제외 — 기본 미실행, --random-runs N으로 선택 실행(판정 제외).
 - 결과: `var/backtest/validation/<전략ID>-v<n>/` (창별 결과 파일, verdict.json, validation-v<n>.md).
   판정표는 docs/strategies/<ID>/로 사람이 옮긴다(이 명령은 docs/를 쓰지 않는다).
 - 최종 확인 구간(`config/validation.toml` final_from 이후)은 `--final-check --confirmed-by A-xxx`로만, 전략 버전당 1회(D-163).
@@ -93,7 +94,8 @@ def validate_main(argv: Sequence[str] | None = None, root: Path | None = None) -
     p.add_argument("--universe-note", default="")
     p.add_argument("--window-params", action="append", default=[], metavar="K=PATH",
                    help="창 k의 파라미터 파일(사람이 학습 창으로 고른 값). 여러 번 지정")
-    p.add_argument("--random-runs", type=int, default=RANDOM_RUNS)
+    p.add_argument("--random-runs", type=int, default=RANDOM_RUNS,
+                   help="무작위 진입 비교 횟수 (A-083: 공통 기준 아님, 기본 0 = 미실행)")
     p.add_argument("--random-seed", default="cp030")
     p.add_argument("--workers", type=int, default=1, help="병렬 프로세스 수 (결과는 같음)")
     p.add_argument("--out-root", default="var/backtest/validation")
