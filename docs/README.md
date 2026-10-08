@@ -22,7 +22,7 @@
 | handoff.md | 세션 인계(현재 상태·다음 행동·도구·위험) — 작업 끝마다 덮어씀 | 전체 | — | 2026-10-08 저녁 |
 | decisions-pending.md | 무인 진행 중 에이전트 임시 결정 대기열(DP-xx, A-030) | 6~ | — | DP-1~DP-43 (재검토 대기: DP-31·DP-40) |
 | decision-sheet.md | 사용자 확인 결정표(PAPER-0 전, A-044) | 6 | — | 처리 완료(2026-10-04), 기록용 |
-| user-manual.md | 사용 설명서(평소·이상 시·원격·전략 변경·끄고 켜기) | 6~ | — | v0.1 초안 — **브랜치 `docs/user-manual`(b8c4a12)에만 있음, 미병합** |
+| user-manual.md | 사용 설명서(평소·이상 시·원격·전략 변경·끄고 켜기) | 6~ | — | v0.1 초안 (main 병합 2026-10-09). 3일차 결과 반영 v0.2 예정 |
 | process/ | 에이전트 단계별 가이드 (계획 / 구현) | — | — | planning-guide, implementation-guide |
 | templates/ | 산출물 양식 | — | — | stage-doc-template, strategy-template |
 | changes/ | 승인 문서 변경 제안 CP-xxx, 검토 기록 | — | — | CP-016~CP-031 (목록·상태는 changes/README.md) |
