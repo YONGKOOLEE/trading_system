@@ -5,6 +5,8 @@
   KILL 파일은 `--clear-kill-file`을 줄 때만 지운다 (로컬에서만, 03 §6.5).
 - status: 해제되지 않은 정지·KILL 파일·대기 명령·결과 불명 의도, 포지션·미체결·당일 의도/체결 수, 최근 운영 명령·ALERT
   10건, 하트비트 나이(본 프로세스 생존), 마지막 시계(SNTP) 점검, 전략 상태를 보여 준다 (읽기 전용, 비밀 없음, RV-16).
+- confirm-unknown: 결과 불명 의도의 사람 확정(CONFIRM_UNKNOWN, 로컬 전용)을 명령 테이블에 기록한다 (CP-031 V-233).
+  `--list`는 결과 불명 의도 목록(읽기 전용). 판정·반영은 본 프로세스가 한다.
 로컬 인증은 Windows 로그인 사용자 = 운영자 (단일 사용자 가정, 03 §6.6).
 """
 
@@ -24,7 +26,7 @@ from trading_system.domain.clock import KST, Clock, SystemClock, to_iso
 from trading_system.domain.enums import HaltType, IntentState, Mode
 from trading_system.domain.heartbeat import watchdog_check
 from trading_system.storage.jsonlog import Masker
-from trading_system.storage.repository import ModeMismatch, Repository, StorageFailure
+from trading_system.storage.repository import ModeMismatch, Repository, SchemaMismatch, StorageFailure
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # src/trading_system/ops/cli.py → 저장소 루트
@@ -151,6 +153,111 @@ def reconcile_resolve_main(argv: Sequence[str] | None = None) -> int:
         return 1
     print(f"{command} 요청 기록: {cid} (결과는 status로 확인)")
     return 0
+
+
+CONFIRM_DESCRIPTION = (
+    "결과 불명 의도의 결과를 사람이 확정한다 (CP-031 V-233, 로컬 전용 CONFIRM_UNKNOWN). 조회 5회로 해소되지 않은 "
+    "결과 불명은 K3로 정지되고, 이 확정 뒤의 새 대조 일치로만 K3를 재개할 수 있다. 이 도구는 명령 테이블에 "
+    "기록만 하며, 판정·반영은 실행 중인 run이 다음 tick(꺼져 있으면 다음 시작)에 한다. "
+    "--list로 결과 불명 의도와 ID를 먼저 확인한다 (읽기 전용). 브로커 화면에서 주문이 없으면 --not-accepted, "
+    "주문이 있으면 --accepted --order-no <브로커주문번호>.")
+
+
+def confirm_unknown_main(argv: Sequence[str] | None = None) -> int:
+    """결과 불명 확정(CONFIRM_UNKNOWN) 기록 또는 결과 불명 의도 목록 (CP-031). 판정·반영은 본 프로세스가 한다."""
+    p = _parser("confirm-unknown")
+    p.description = CONFIRM_DESCRIPTION
+    p.add_argument("intent_id", nargs="?", help="결과 불명 의도 ID (--list로 확인)")
+    what = p.add_mutually_exclusive_group(required=True)
+    what.add_argument("--accepted", action="store_true", help="브로커가 접수함 (--order-no 필요)")
+    what.add_argument("--not-accepted", action="store_true", help="브로커가 접수하지 않음 (주문 없음)")
+    what.add_argument("--list", action="store_true", help="결과 불명 의도 목록만 보기 (읽기 전용, 기록 없음)")
+    p.add_argument("--order-no", help="--accepted일 때 브로커 주문번호")
+    ns = p.parse_args(argv)
+    try:
+        mode, db, _ = _resolve(ns)
+    except ConfigError as exc:
+        print(f"거부: {exc}")
+        return 2
+    if mode is Mode.LIVE:   # A-084 ⑤: 저장소를 열기 전에 거부
+        print(LIVE_REFUSAL.format(tool="confirm-unknown"))
+        return 2
+    if not ns.list:
+        refused = _confirm_args_refusal(ns)
+        if refused:
+            print(f"거부: {refused}")
+            return 2
+    if not db.exists():   # Repository는 없는 DB를 만든다 — 확정·목록 모두 기존 DB만
+        print(f"거부: DB 없음: {db}")
+        return 2
+    try:
+        repo = Repository(db, mode)
+    except (ModeMismatch, SchemaMismatch, StorageFailure) as exc:
+        print(f"거부: {exc}")
+        return 2
+    try:
+        if ns.list:
+            _print_unknown_intents(repo, ns.account)
+            return 0
+        refused = _confirm_target_refusal(repo, ns.intent_id)
+    finally:
+        repo.close()
+    if refused:
+        print(f"거부: {refused}")
+        return 2
+    args = {"intent_id": ns.intent_id, "accepted": bool(ns.accepted), "order_no": ns.order_no if ns.accepted else None}
+    try:
+        cid = _record(db, mode, "CONFIRM_UNKNOWN", args)
+    except (StorageFailure, ModeMismatch) as exc:
+        print(f"명령 기록 실패(저장소): {exc}")
+        return 1
+    print(f"CONFIRM_UNKNOWN 요청 기록: {cid} ({'접수 ' + ns.order_no if ns.accepted else '미접수'})")
+    print("run이 다음 tick(꺼져 있으면 다음 시작)에 처리 — 결과는 status로 확인. "
+          "K3 재개는 확정 뒤 새 대조 일치 후 resume")
+    return 0
+
+
+def _confirm_args_refusal(ns: argparse.Namespace) -> str | None:
+    if not ns.intent_id:
+        return "의도 ID가 필요 (--list로 확인)"
+    if ns.accepted and not (ns.order_no or "").strip():
+        return "--accepted에는 --order-no <브로커주문번호>가 필요"
+    if ns.not_accepted and ns.order_no:
+        return "--not-accepted에는 --order-no를 주지 않음"
+    return None
+
+
+def _confirm_target_refusal(repo: Repository, intent_id: str) -> str | None:
+    """의도가 있고 결과 불명이며, 같은 의도의 확정 명령이 대기 중이 아닌지 (처리기도 다시 확인한다)."""
+    rows = repo.select("SELECT state FROM intent WHERE intent_id=?", (intent_id,))
+    if not rows:
+        return f"의도 없음: {intent_id}"
+    if rows[0]["state"] != IntentState.UNKNOWN.value:
+        return f"결과 불명이 아님: {intent_id} 상태 {rows[0]['state']}"
+    for c in repo.pending_commands():
+        try:
+            a = json.loads(c["args"] or "{}")
+        except ValueError:
+            continue
+        if c["command"] == "CONFIRM_UNKNOWN" and isinstance(a, dict) and a.get("intent_id") == intent_id:
+            return f"같은 의도의 확정 명령이 이미 대기 중: {c['command_id']} (status로 확인)"
+    return None
+
+
+def _print_unknown_intents(repo: Repository, account: str | None) -> None:
+    """결과 불명 의도 목록 (읽기 전용 SELECT만). 사람 확인 요청(UNKNOWN_ESCALATED)·K3 활성 여부 표시."""
+    from trading_system.execution.resolver import ESCALATED
+    unknown = [i for i in repo.intents_in_state(IntentState.UNKNOWN) if account is None or i.account == account]
+    print(f"결과 불명 의도: {len(unknown)}건")
+    for i in unknown:
+        sent = repo.select("SELECT created_at FROM attempt WHERE intent_id=?", (i.intent_id,))
+        created = repo.select("SELECT created_at FROM intent WHERE intent_id=?", (i.intent_id,))[0]["created_at"]
+        escalated = bool(repo.select("SELECT 1 FROM audit_event WHERE kind=? AND ref=? LIMIT 1",
+                                     (ESCALATED, i.intent_id)))
+        k3 = "K3 활성" if HaltType.K3.value in repo.active_halts(i.account) else "K3 아님"
+        print(_MASK.text(f"  {i.intent_id} {i.account} {i.instrument} {i.side} {i.quantity} {i.request_type} "
+                         f"전송 {_kst(sent[0]['created_at'] if sent else created)} {k3}"
+                         f"{' 사람 확인 요청됨' if escalated else ' 조회 해소 중'}"))
 
 
 def _k1_released(db: Path, mode: Mode) -> bool:
