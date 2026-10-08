@@ -263,7 +263,7 @@ def test_preflight_old_heartbeat_does_not_block_and_sntp_ok(tmp_path: Path, sim:
         return Decimal("-0.076")
     assert _run(root, sim, clock, q) == 0
     out = capsys.readouterr().out
-    assert asked == ["sntp.invalid"] and "-0.076" in out and "승인 전" not in out
+    assert asked == ["sntp.invalid"] * 3 and "-0.076" in out and "승인 전" not in out   # A-084: 서버당 표본 3개
     rep = _report(root)
     assert rep["clock_offset"] == "-0.076" and rep["ok"] is True
 
@@ -291,7 +291,7 @@ def test_preflight_does_not_resolve_reserved_invalid_host(tmp_path: Path, sim: S
                                                           capsys: pytest.CaptureFixture[str]) -> None:
     # 기본 질의(실제 소켓)에서도 .invalid(RFC 6761)는 조회하지 않는다 — 시험이 네트워크를 쓰지 않게
     called: list[str] = []
-    monkeypatch.setattr("trading_system.app.preflight.query_offset", lambda *a, **k: called.append("x"))
+    monkeypatch.setattr("trading_system.app.preflight.query_sample", lambda *a, **k: called.append("x"))  # A-084
     root = make_root(tmp_path, env_lines=ENV_OK, approved=True)
     assert preflight_main(root, {"TRADE_MODE": "PAPER"}, rest_url=sim.url, ws_url=sim.ws_url, clock=clock,
                           probe_code=CODE, per_tr_interval=0.0) == 0

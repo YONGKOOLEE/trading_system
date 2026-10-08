@@ -102,7 +102,8 @@ def test_v72_clock_monitor(env: Env, offsets: list, expected_k6: bool) -> None:
             raise SntpError("가짜 실패")
         return v
 
-    m = ClockMonitor(env.repo, env.clock, [("a", 1), ("b", 2)], env.halts, None, query)
+    # A-084: 기본 표본 3개 → 서버당 1표본 주입 시험은 samples=1로 (3표본 동작은 test_a084_ops_hardening)
+    m = ClockMonitor(env.repo, env.clock, [("a", 1), ("b", 2)], env.halts, None, query, samples=1)
     m.check()
     assert ("K6" in env.repo.active_halts(ACCOUNT)) is expected_k6
     assert m.clock_ok() is (False if expected_k6 and offsets[-1] is not None else (None if expected_k6 else True))
@@ -112,7 +113,7 @@ def test_v72_clock_monitor(env: Env, offsets: list, expected_k6: bool) -> None:
 
 def test_v72_k6_released_when_clock_recovers_and_stale_check_is_unknown(env: Env) -> None:
     vals = iter([Decimal("2"), Decimal("0.1")])
-    m = ClockMonitor(env.repo, env.clock, [("a", 1)], env.halts, None, lambda h, p: next(vals))
+    m = ClockMonitor(env.repo, env.clock, [("a", 1)], env.halts, None, lambda h, p: next(vals), samples=1)  # A-084
     m.check()
     assert "K6" in env.repo.active_halts(ACCOUNT)
     m.check()
