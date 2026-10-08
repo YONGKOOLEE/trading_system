@@ -2,6 +2,8 @@
 
 - 실운영과 같은 전략·판정 실행기·게이트·실행기·정지 관리를 쓰고, 브로커만 체결 모델(BacktestBroker)로 바꾼다 (D-071).
 - 실행마다 `var/backtest/<실행ID>/trading.db` (모드 BACKTEST). 같은 DB를 다른 실행과 섞지 않는다 (A-5).
+  같은 폴더에 결과 파일 `trades.csv`(왕복별)·`equity.csv`(거래일별)·`summary.json`(지표·실행 조건)을 쓴다
+  (형식은 backtest_export 모듈, 2026-10-08 사용자 승인 형식). `report.md`는 명령(main)이 따로 쓴다.
 - 거래일마다: 판정 시각(기본 09:05 KST, 여러 개 가능)에 판정 → 게이트 → 전송 → 그날 봉으로 체결(다음 봉 시가 원칙)
   → 마감 만료 → 평가.
 - 하루 여러 판정(제안 가정, 일봉만 있을 때 — 승인 전 기록용):
@@ -35,6 +37,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from pathlib import Path
 
+from trading_system.app import backtest_export as bx
 from trading_system.broker.fake.fill_model import BacktestBroker, BarFacts
 from trading_system.config.capabilities import CapabilityTable
 from trading_system.config.strategy_registry import StrategyRegistry
@@ -92,6 +95,7 @@ class BacktestConfig:
     seed: int = 0
     segment: str = "ALL"
     final_usage_ledger: Path | None = None
+    write_exports: bool = True          # 결과 파일(trades.csv·equity.csv·summary.json) 쓰기. 교란 검사 내부 실행은 끈다
 
 
 @dataclass(frozen=True)
@@ -265,6 +269,9 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
     rejects: Counter = Counter()
     signals: list[str] = []
     fills_log: list[tuple[date, str, str, str, str, str]] = []
+    fill_details: list[bx.FillDetail] = []      # 결과 파일용 (지문·지표에 쓰지 않음)
+    order_rule: dict[str, str] = {}             # 주문 키 → 신호 규칙 ID
+    daily_split: list[tuple[date, Decimal, Decimal]] = []   # 일말 (날짜, 현금, 보유평가액)
     k2_resumes = 0
     seen_fills = 0
     prev_close: dict[str, Decimal] = {}
@@ -288,6 +295,9 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
             costs_total += cost
             cash += -amount - cost if side == "BUY" else amount - cost
             fills_log.append((day, f.order_no, inst, side, str(f.quantity), str(f.price)))
+            fill_details.append(bx.FillDetail(f.at.astimezone(KST).strftime("%Y-%m-%d %H:%M"),
+                                              order_rule.get(repo.order_key(ACCOUNT, f.at, f.order_no),
+                                                             bx.NON_SIGNAL_REASON)))
 
     for i, day in enumerate(days):
         # 상·하한가: 기준가(전일 종가) × (1 ± 비율)을 호가 단위로 내림·올림
@@ -347,6 +357,9 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
                 decision = gate.decide(GateRequest.from_signal(s))
                 if decision.result is GateResult.APPROVED and decision.approved is not None:
                     executor.submit(decision.approved)
+                    sent_key = repo.intent(decision.approved.intent_id).broker_order_key
+                    if sent_key is not None:
+                        order_rule[sent_key] = s.rule_id
                 else:
                     rejects[str(decision.failed_check)] += 1
             executor.process_events()
@@ -381,8 +394,10 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
             if day in by_day:
                 prev_close[inst] = by_day[day].close
         positions = {k: v for k, v in repo.positions(ACCOUNT).items() if v.quantity > 0}
-        eq = cash + sum((p.quantity * prev_close.get(k, p.avg_price) for k, p in positions.items()), Decimal("0"))
+        held = sum((p.quantity * prev_close.get(k, p.avg_price) for k, p in positions.items()), Decimal("0"))
+        eq = cash + held
         equity.append((day, eq))
+        daily_split.append((day, cash, held))
 
     unknown = repo.intents_in_state(IntentState.UNKNOWN)
     repo.close()
@@ -393,9 +408,60 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
     digest = hashlib.sha256(json.dumps({"signals": signals, "fills": fills_log,
                                         "equity": [(d.isoformat(), str(e)) for d, e in equity]},
                                        sort_keys=True, default=str).encode()).hexdigest()
-    return BacktestResult(cfg.run_id, cfg.segment, days, equity, trades, metrics, rejects, digest,
-                          run_dir / "trading.db", signals, fills_log, k2_resumes, costs_total, quality_failures,
-                          signals_by_eval)
+    result = BacktestResult(cfg.run_id, cfg.segment, days, equity, trades, metrics, rejects, digest,
+                            run_dir / "trading.db", signals, fills_log, k2_resumes, costs_total, quality_failures,
+                            signals_by_eval)
+    if cfg.write_exports:
+        _write_exports(cfg, result, fill_details, daily_split, times)
+    return result
+
+
+def _write_exports(cfg: BacktestConfig, result: BacktestResult, details: list[bx.FillDetail],
+                   daily_split: list[tuple[date, Decimal, Decimal]], times: tuple[time, ...]) -> None:
+    """결과 파일 3종 (backtest_export 모듈 docstring). 이미 계산된 값만 옮긴다 — 지표·지문에 영향 없음."""
+    run_dir = result.db_path.parent
+    rates = cfg.gate_settings.cost_rates
+    rows, open_n = bx.trade_rows(result.fills, details, lambda amt, sell: estimate_cost(amt, sell, rates),
+                                 lambda a, b: _trading_days_between(cfg, a, b), result.days[-1])
+    bx.write_csv(run_dir / "trades.csv", bx.TRADE_HEADER, rows)
+    bx.write_csv(run_dir / "equity.csv", bx.EQUITY_HEADER, bx.equity_rows(cfg.initial_cash, daily_split))
+    spec = cfg.strategy.spec
+    bx.write_summary(run_dir / "summary.json", {
+        "run_id": cfg.run_id,
+        "segment": cfg.segment,
+        "start": result.days[0].isoformat(),
+        "end": result.days[-1].isoformat(),
+        "trading_days": len(result.days),
+        "eval_times": [t.strftime("%H:%M") for t in times],
+        "strategy_id": spec.strategy_id,
+        "strategy_version": spec.version,
+        "params": {k: str(v) for k, v in sorted(cfg.params.items())},
+        "initial_cash": str(cfg.initial_cash),
+        "cost_rates": {"commission_rate": str(rates.commission_rate), "sell_tax_rate": str(rates.sell_tax_rate)},
+        "slippage_ticks": cfg.slippage_ticks,
+        "slippage_tick": str(cfg.slippage_tick),
+        "tick_table": cfg.ticks is not None,
+        "volume_cap": str(cfg.volume_cap),
+        "price_limit_ratio": str(cfg.gate_settings.price_limit_ratio),
+        "data_version": cfg.data_version,
+        "code_commit": cfg.code_commit,
+        "seed": cfg.seed,
+        "instruments": sorted(cfg.data),
+        "settings_hash": cfg.account_limits.version_hash(),
+        "digest": result.digest,
+        "reproducible": None,
+        "reproducible_note": "재현성(D-074)은 두 번 실행해 지문을 비교해야 알 수 있음 — 이 파일에서는 미산출, report.md 참조",
+        "signals": len(result.signals),
+        "fills": len(result.fills),
+        "open_positions": open_n,
+        "k2_resumes": result.k2_resumes,
+        "quality_failures": len(result.quality_failures),
+        "quality_failure_instruments": sorted(result.quality_failures),
+        "rejects": {k: v for k, v in sorted(result.rejects.items())},
+        "costs": str(result.costs),
+        "metrics": dict(result.metrics),
+        "files": {"trades.csv": "UTF-8 BOM, CRLF", "equity.csv": "UTF-8 BOM, CRLF"},
+    })
 
 
 def _round_trips(fills: list[tuple[date, str, str, str, str, str]], cfg: BacktestConfig) -> list[Trade]:
@@ -530,7 +596,7 @@ def perturbation_check(cfg: BacktestConfig, check_days: list[date], *, flat: boo
         if targets:
             with tempfile.TemporaryDirectory(prefix="v91-") as tmp:
                 probe = replace(cfg, segment="ALL", start=run_days[0], end=run_days[-1], out_dir=Path(tmp),
-                                final_usage_ledger=None)
+                                final_usage_ledger=None, write_exports=False)
                 base_run = run_backtest(replace(probe, run_id="base"))
                 for n, day in enumerate(targets):
                     keys = [f"{day.isoformat()}T{et:%H:%M}" for et in times]
