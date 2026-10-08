@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -22,12 +23,13 @@ import pytest
 from tests.scenario.conftest import ACCOUNT, Env, make_signal
 from tests.scenario.test_cp031_unknown_k3 import _invisible_accepted_entry, _k3_reconciled, _rec
 from tests.scenario.test_rv_broker import engine_ticks, resolver, unknown_entry
-from trading_system.domain.enums import HaltType, IntentState, RequestType
+from trading_system.domain.enums import HaltType, IntentState, Mode, RequestType
 from trading_system.domain.models import GateRequest
 from trading_system.execution.resolver import ResolveProgress
 from trading_system.halt.manager import Channel
 from trading_system.ops.cli import confirm_unknown_main
 from trading_system.ops.commands import OpsProcessor
+from trading_system.storage.repository import Repository
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -218,6 +220,125 @@ def test_e_list_ignores_confirm_args(env: Env, tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as exc:
         confirm_unknown_main(_db(tmp_path) + ["--list", "--not-accepted"])
     assert exc.value.code == 2
+
+
+# --- 재검토 (M-1, L-1, L-3, L-4) -----------------------------------------------------------------
+
+DIGIT_ID = "int-ab12345678cd"   # 8자리 숫자열 → 계좌번호 형태 가림(ACCOUNT_LIKE)에 걸리는 ID
+
+
+def _digit_id_unknown(env: Env, monkeypatch: pytest.MonkeyPatch) -> str:
+    import trading_system.gate.gate as gate_mod
+    orig = gate_mod.new_id
+    monkeypatch.setattr(gate_mod, "new_id", lambda prefix: DIGIT_ID if prefix == "int" else orig(prefix))
+    iid = unknown_entry(env)
+    assert iid == DIGIT_ID
+    return iid
+
+
+def test_m1_list_never_masks_intent_id(env: Env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                       capsys: pytest.CaptureFixture[str]) -> None:
+    """M-1: 목록의 의도 ID를 가리면 운영자가 가린 ID를 복사해 '의도 없음' → K3를 풀 수 없다."""
+    iid = _digit_id_unknown(env, monkeypatch)
+    engine_ticks(env, resolver(env), {}, 30)                              # → K3
+    assert confirm_unknown_main(_db(tmp_path) + ["--list"]) == 0
+    out = capsys.readouterr().out
+    assert DIGIT_ID in out and "****" not in out
+    assert confirm_unknown_main(_db(tmp_path) + [iid, "--not-accepted"]) == 0   # 목록의 ID 그대로 확정 가능
+    capsys.readouterr()
+    assert json.loads(_commands(env)[0]["args"])["intent_id"] == DIGIT_ID
+    [o] = _process(env)
+    assert o.status == "DONE" and env.repo.intent(iid).state is IntentState.NOT_ACCEPTED
+
+
+def test_l1_order_no_is_stripped(env: Env, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    iid = _invisible_accepted_entry(env)
+    [order] = env.broker.query_orders_unchecked()
+    assert confirm_unknown_main(_db(tmp_path) + [iid, "--accepted", "--order-no", f"  {order.order_no} "]) == 0
+    capsys.readouterr()
+    [cmd] = _commands(env)
+    assert json.loads(cmd["args"])["order_no"] == order.order_no
+    [o] = _process(env)
+    assert o.status == "DONE", o.result
+    assert env.repo.intent(iid).broker_order_key is not None
+
+
+def test_l1_blank_order_no_refused(env: Env, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    iid = _k3_escalated(env)
+    assert confirm_unknown_main(_db(tmp_path) + [iid, "--accepted", "--order-no", "   "]) == 2
+    assert "--order-no" in capsys.readouterr().out
+    assert _commands(env) == []
+
+
+def _closed_db(tmp_path: Path, mode: Mode = Mode.PAPER) -> Path:
+    db = tmp_path / "ro" / "trading.db"
+    Repository(db, mode).close()
+    assert not db.with_name("trading.db-wal").exists() and not db.with_name("trading.db-shm").exists()
+    return db
+
+
+def test_l3_list_is_truly_read_only_no_wal_shm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                               capsys: pytest.CaptureFixture[str]) -> None:
+    db = _closed_db(tmp_path)
+    before = db.read_bytes()
+
+    def no_writer(*a: object, **k: object) -> None:
+        raise AssertionError("--list는 쓰기 저장소(Repository)를 열지 않는다")
+    monkeypatch.setattr("trading_system.ops.cli.Repository", no_writer)
+    assert confirm_unknown_main(["--mode", "PAPER", "--db", str(db), "--list"]) == 0
+    assert "결과 불명 의도: 0건" in capsys.readouterr().out
+    assert db.read_bytes() == before
+    assert sorted(p.name for p in db.parent.iterdir()) == ["trading.db"]   # -wal·-shm 만들지 않음
+
+
+def test_l3_list_mode_mismatch_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    db = _closed_db(tmp_path, Mode.BACKTEST)
+    assert confirm_unknown_main(["--mode", "PAPER", "--db", str(db), "--list"]) == 2
+    out = capsys.readouterr().out
+    assert out.startswith("거부") and "BACKTEST" in out
+
+
+def test_l3_list_no_schema_creation_on_foreign_db(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    db = tmp_path / "other.db"
+    c = sqlite3.connect(str(db))
+    c.execute("CREATE TABLE unrelated(a)")
+    c.commit()
+    c.close()
+    assert confirm_unknown_main(["--mode", "PAPER", "--db", str(db), "--list"]) == 2
+    assert capsys.readouterr().out.startswith("거부")
+    c = sqlite3.connect(str(db))
+    tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+    c.close()
+    assert tables == ["unrelated"]                                        # 스키마·모드 기록 없음
+
+
+def test_l3_list_unreadable_file_exit2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    db = tmp_path / "trading.db"
+    db.write_bytes(b"not a database file at all" * 100)
+    assert confirm_unknown_main(["--mode", "PAPER", "--db", str(db), "--list"]) == 2
+    assert capsys.readouterr().out.startswith("거부")
+
+
+def test_l3_list_while_writer_open_sees_committed_rows(env: Env, tmp_path: Path,
+                                                       capsys: pytest.CaptureFixture[str]) -> None:
+    iid = unknown_entry(env)                                              # env.repo 연결이 열린 채(WAL 사용 중)
+    assert confirm_unknown_main(_db(tmp_path) + ["--list"]) == 0
+    assert iid in capsys.readouterr().out
+
+
+def test_l4_confirm_before_escalation_warns_but_records(env: Env, tmp_path: Path,
+                                                        capsys: pytest.CaptureFixture[str]) -> None:
+    iid = unknown_entry(env)                                              # 자동 조회 해소 중 (K3 전)
+    assert confirm_unknown_main(_db(tmp_path) + [iid, "--not-accepted"]) == 0
+    out = capsys.readouterr().out
+    assert "주의" in out and "조회 해소 중" in out
+    assert len(_commands(env)) == 1
+
+
+def test_l4_no_warning_after_escalation(env: Env, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    iid = _k3_escalated(env)
+    assert confirm_unknown_main(_db(tmp_path) + [iid, "--not-accepted"]) == 0
+    assert "주의" not in capsys.readouterr().out
 
 
 # --- 래퍼 ----------------------------------------------------------------------------------------

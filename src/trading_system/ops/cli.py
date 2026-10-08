@@ -15,8 +15,9 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import sqlite3
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, time
 from pathlib import Path
 
@@ -26,7 +27,8 @@ from trading_system.domain.clock import KST, Clock, SystemClock, to_iso
 from trading_system.domain.enums import HaltType, IntentState, Mode
 from trading_system.domain.heartbeat import watchdog_check
 from trading_system.storage.jsonlog import Masker
-from trading_system.storage.repository import ModeMismatch, Repository, SchemaMismatch, StorageFailure
+from trading_system.storage.repository import (
+    ModeMismatch, Repository, SchemaMismatch, StorageFailure, open_read_only)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # src/trading_system/ops/cli.py → 저장소 루트
@@ -182,13 +184,15 @@ def confirm_unknown_main(argv: Sequence[str] | None = None) -> int:
     if mode is Mode.LIVE:   # A-084 ⑤: 저장소를 열기 전에 거부
         print(LIVE_REFUSAL.format(tool="confirm-unknown"))
         return 2
-    if not ns.list:
-        refused = _confirm_args_refusal(ns)
-        if refused:
-            print(f"거부: {refused}")
-            return 2
     if not db.exists():   # Repository는 없는 DB를 만든다 — 확정·목록 모두 기존 DB만
         print(f"거부: DB 없음: {db}")
+        return 2
+    if ns.list:
+        return _list_unknown(db, mode, ns.account)
+    order_no = (ns.order_no or "").strip() or None   # 검사와 기록에 같은 값 (재검토 L-1)
+    refused = _confirm_args_refusal(ns, order_no)
+    if refused:
+        print(f"거부: {refused}")
         return 2
     try:
         repo = Repository(db, mode)
@@ -196,33 +200,34 @@ def confirm_unknown_main(argv: Sequence[str] | None = None) -> int:
         print(f"거부: {exc}")
         return 2
     try:
-        if ns.list:
-            _print_unknown_intents(repo, ns.account)
-            return 0
         refused = _confirm_target_refusal(repo, ns.intent_id)
+        escalated = refused is None and _escalated(repo.select, ns.intent_id)
     finally:
         repo.close()
     if refused:
         print(f"거부: {refused}")
         return 2
-    args = {"intent_id": ns.intent_id, "accepted": bool(ns.accepted), "order_no": ns.order_no if ns.accepted else None}
+    if not escalated:   # 허용하되 경고 (재검토 L-4): 자동 조회가 곧 해소할 수 있다
+        print(f"주의: {ns.intent_id}는 아직 자동 조회 해소 중(사람 확인 요청·K3 전). 조회 결과와 다르게 확정하면 "
+              "대조에서 불일치로 드러난다 — 브로커 화면 확인 뒤에만 확정")
+    args = {"intent_id": ns.intent_id, "accepted": bool(ns.accepted), "order_no": order_no if ns.accepted else None}
     try:
         cid = _record(db, mode, "CONFIRM_UNKNOWN", args)
     except (StorageFailure, ModeMismatch) as exc:
         print(f"명령 기록 실패(저장소): {exc}")
         return 1
-    print(f"CONFIRM_UNKNOWN 요청 기록: {cid} ({'접수 ' + ns.order_no if ns.accepted else '미접수'})")
+    print(f"CONFIRM_UNKNOWN 요청 기록: {cid} ({'접수 ' + str(order_no) if ns.accepted else '미접수'})")
     print("run이 다음 tick(꺼져 있으면 다음 시작)에 처리 — 결과는 status로 확인. "
           "K3 재개는 확정 뒤 새 대조 일치 후 resume")
     return 0
 
 
-def _confirm_args_refusal(ns: argparse.Namespace) -> str | None:
+def _confirm_args_refusal(ns: argparse.Namespace, order_no: str | None) -> str | None:
     if not ns.intent_id:
         return "의도 ID가 필요 (--list로 확인)"
-    if ns.accepted and not (ns.order_no or "").strip():
+    if ns.accepted and not order_no:
         return "--accepted에는 --order-no <브로커주문번호>가 필요"
-    if ns.not_accepted and ns.order_no:
+    if ns.not_accepted and ns.order_no is not None:
         return "--not-accepted에는 --order-no를 주지 않음"
     return None
 
@@ -244,20 +249,49 @@ def _confirm_target_refusal(repo: Repository, intent_id: str) -> str | None:
     return None
 
 
-def _print_unknown_intents(repo: Repository, account: str | None) -> None:
-    """결과 불명 의도 목록 (읽기 전용 SELECT만). 사람 확인 요청(UNKNOWN_ESCALATED)·K3 활성 여부 표시."""
+_Query = Callable[[str, tuple], Sequence[Mapping]]
+
+
+def _escalated(q: _Query, intent_id: str) -> bool:
+    """해소 조회 5회 소진 → 사람 확인 요청(UNKNOWN_ESCALATED, CP-031) 기록이 있는지."""
     from trading_system.execution.resolver import ESCALATED
-    unknown = [i for i in repo.intents_in_state(IntentState.UNKNOWN) if account is None or i.account == account]
-    print(f"결과 불명 의도: {len(unknown)}건")
-    for i in unknown:
-        sent = repo.select("SELECT created_at FROM attempt WHERE intent_id=?", (i.intent_id,))
-        created = repo.select("SELECT created_at FROM intent WHERE intent_id=?", (i.intent_id,))[0]["created_at"]
-        escalated = bool(repo.select("SELECT 1 FROM audit_event WHERE kind=? AND ref=? LIMIT 1",
-                                     (ESCALATED, i.intent_id)))
-        k3 = "K3 활성" if HaltType.K3.value in repo.active_halts(i.account) else "K3 아님"
-        print(_MASK.text(f"  {i.intent_id} {i.account} {i.instrument} {i.side} {i.quantity} {i.request_type} "
-                         f"전송 {_kst(sent[0]['created_at'] if sent else created)} {k3}"
-                         f"{' 사람 확인 요청됨' if escalated else ' 조회 해소 중'}"))
+    return bool(q("SELECT 1 FROM audit_event WHERE kind=? AND ref=? LIMIT 1", (ESCALATED, intent_id)))
+
+
+def _list_unknown(db: Path, mode: Mode, account: str | None) -> int:
+    """--list: 진짜 읽기 전용 연결로 목록만 (재검토 L-3). 쓰기 저장소(Repository)는 열지 않는다."""
+    try:
+        conn = open_read_only(db, mode)
+    except (ModeMismatch, SchemaMismatch, StorageFailure) as exc:
+        print(f"거부: {exc}")
+        return 2
+    try:
+        _print_unknown_intents(lambda sql, prm=(): conn.execute(sql, prm).fetchall(), account)
+    except sqlite3.Error as exc:
+        print(f"거부: 읽기 실패 ({type(exc).__name__}: {exc}) — 잠김이면 잠시 뒤 다시 실행")
+        return 2
+    finally:
+        conn.close()
+    return 0
+
+
+def _print_unknown_intents(q: _Query, account: str | None) -> None:
+    """결과 불명 의도 목록 (SELECT만). 사람 확인 요청(UNKNOWN_ESCALATED)·K3 활성 여부 표시.
+    의도 ID는 가리지 않는다 — 운영자가 그대로 복사해 확정에 쓴다 (재검토 M-1: 숫자열 ID가 계좌번호 형태 가림에 걸림).
+    가림은 비밀·계좌번호가 들어갈 수 있는 계좌 칸에만 (별칭이지만 방어적으로)."""
+    sql = ("SELECT intent_id, account, instrument, side, quantity, request_type, created_at FROM intent "
+           "WHERE state=?" + (" AND account=?" if account else "") + " ORDER BY created_seq")
+    rows = q(sql, (IntentState.UNKNOWN.value, account) if account else (IntentState.UNKNOWN.value,))
+    print(f"결과 불명 의도: {len(rows)}건")
+    for r in rows:
+        iid = r["intent_id"]
+        # 첫 전송 시각 (재검토 L-2: 순서 고정). 전송 시도가 없으면 의도 생성 시각
+        sent = q("SELECT created_at FROM attempt WHERE intent_id=? ORDER BY created_seq, created_at LIMIT 1", (iid,))
+        k3 = q("SELECT 1 FROM halt WHERE halt_type=? AND state<>'RELEASED' AND (account IS NULL OR account=?) "
+               "LIMIT 1", (HaltType.K3.value, r["account"]))
+        print(f"  {iid} {_MASK.text(r['account'])} {r['instrument']} {r['side']} {r['quantity']} {r['request_type']} "
+              f"전송 {_kst(sent[0]['created_at'] if sent else r['created_at'])} {'K3 활성' if k3 else 'K3 아님'} "
+              f"{'사람 확인 요청됨' if _escalated(q, iid) else '조회 해소 중'}")
 
 
 def _k1_released(db: Path, mode: Mode) -> bool:
