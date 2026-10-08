@@ -134,7 +134,10 @@ def test_rv08_sync_resolve_still_reevaluates(env: Env) -> None:
     iid = unknown_entry(env)
     env.broker.query_failures = 1
     assert resolver(env).resolve(iid) is ResolveOutcome.AMBIGUOUS
-    assert resolver(env).resolve(iid) is ResolveOutcome.NOT_ACCEPTED   # 조회 모두 성공, 후보 없음
+    q = env.broker.queries
+    # 요구사항 변경 A-084/CP-031: 조회 모두 성공·후보 없음이어도 자동 미접수 종결 없음 → 다시 조회하되 AMBIGUOUS(K3 유지)
+    assert resolver(env).resolve(iid) is ResolveOutcome.AMBIGUOUS
+    assert env.broker.queries > q and env.repo.intent(iid).state is IntentState.UNKNOWN
 
 
 # --- RV-09 전일 전송 의도 ---------------------------------------------------------------------------

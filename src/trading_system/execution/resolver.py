@@ -4,7 +4,9 @@
 - 매칭(D-029): 내부에 없는 주문번호 중 (종목, 방향, 종류)가 같고 수량·가격이 의도와 같은 주문.
   취소·정정은 원주문번호가 대상 주문과 같아야 한다.
 - 한 번이라도 유일 매칭 → 접수로 반영하고 조회된 체결·종결 상태를 반영한다 (재전송 없음).
-- 5회 모두 조회에 성공했고 매칭 후보가 없고, 그동안 짝 없는 실시간 통보도 없으면 → 미접수 종결.
+- 5회 모두 조회에 성공했고 매칭 후보가 없고, 그동안 짝 없는 실시간 통보도 없어도 → **자동 미접수 종결 없음**
+  (CP-031, A-084). 결과 불명 유지 + 정지 K3 + 긴급 알림 "조회 N회 주문 없음". 미접수 종결은 사람 확정(confirm_unknown)만.
+  ResolveOutcome.NOT_ACCEPTED는 자동 경로에서 더 이상 만들지 않는다.
 - 그 밖(후보 여럿, 부분 일치, 조회 실패 섞임, 짝 없는 통보) → 결과 불명 유지 + 정지 K3 + 긴급 알림.
 - 전송 거래일 ≠ 오늘이면 미접수로 확정하지 않는다 — 조회(kt00009·ka10075)가 당일 주문만 보기 때문 (RV-09).
 - K3로 넘긴 의도는 "사람 대기"(감사 UNKNOWN_ESCALATED로 영속)다. 단계형 begin()은 조회·알림을 다시 시작하지 않고
@@ -137,10 +139,11 @@ class UnknownResolver:
             p.notes.append("짝 없는 실시간 통보 있음")
         if not p.clean:
             return self._ambiguous(intent, "; ".join(p.notes), p)
-        with self._repo.tx():
-            self._executor.close(self._repo.intent(p.intent_id), IntentState.NOT_ACCEPTED,
-                                 f"조회 {len(self._waits)}회 모두 주문 없음 (D-047)")
-        return ResolveOutcome.NOT_ACCEPTED
+        # [CP-031, A-084] 5회 모두 "주문 없음"이어도 자동 미접수 종결하지 않는다. 종결은 예약·소유권을 풀어 재진입을 허용하므로
+        # 브로커 접수 반영이 늦으면 이중 포지션이 된다. 결과 불명 유지 + K3 + 사람 확정(confirm_unknown)으로만 종결한다 (D-111과 같은 규칙).
+        n_q = len(self._waits)
+        return self._escalate(intent, f"조회 {n_q}회 모두 주문 없음",
+                              f"결과 불명: 조회 {n_q}회 주문 없음 → K3, 사람 확인 필요", p)
 
     # --- 매칭 -------------------------------------------------------------------
     def _match(self, intent: IntentRow, orders: list[BrokerOrderRecord]) -> tuple[list, list]:
@@ -183,8 +186,12 @@ class UnknownResolver:
                 self._executor.apply_event(OrderEvent(kind=rec.state, order_no=rec.order_no))
 
     def _ambiguous(self, intent: IntentRow, reason: str, p: ResolveProgress) -> ResolveOutcome:
+        return self._escalate(intent, reason, f"결과 불명 미해소 → K3, 사람 확인 필요: {reason}", p)
+
+    def _escalate(self, intent: IntentRow, reason: str, message: str, p: ResolveProgress) -> ResolveOutcome:
+        """결과 불명 유지 + K3 + 긴급 알림 + 사람 대기 영속. 같은 범위의 K3가 이미 있으면 정지 관리자가 재사용한다."""
         self._executor.raise_halt(HaltType.K3, "resolver", reason, intent.account, instrument=intent.instrument)
-        self._executor.alert("EMERGENCY", f"결과 불명 미해소 → K3, 사람 확인 필요: {reason}", intent.intent_id)
+        self._executor.alert("EMERGENCY", message, intent.intent_id)
         # 사람 대기 표시 (RV-08): 다음 begin()이 조회·알림을 되풀이하지 않게 영속 기록
         self._audit(intent, ESCALATED, {"unmatched": self._repo.audit_count_since("UNMATCHED_EVENT", p.since)})
         return ResolveOutcome.AMBIGUOUS

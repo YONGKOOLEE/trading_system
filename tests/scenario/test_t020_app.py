@@ -171,7 +171,7 @@ def test_v59_v58_restart_settles_pending_and_unknown(tmp_path: Path) -> None:
 
 
 def test_v124_stepwise_resolution_does_not_block_other_work(tmp_path: Path) -> None:
-    w = World(tmp_path, FakeBehavior.UNKNOWN)              # 브로커도 받지 않음 → 5회 모두 없음 → 미접수
+    w = World(tmp_path, FakeBehavior.UNKNOWN)              # 브로커도 받지 않음 → 5회 모두 없음 → K3 (A-084/CP-031)
     try:
         w.engine.start()
         w.resume_k8()
@@ -194,7 +194,9 @@ def test_v124_stepwise_resolution_does_not_block_other_work(tmp_path: Path) -> N
             w.clock.advance(timedelta(seconds=1))
             w.engine.tick()
         assert rounds == [0, 1, 2, 3, 4]                   # 간격 2·4·8·16·32초 전에는 조회하지 않음
-        assert w.repo.intent(it["intent_id"]).state is IntentState.NOT_ACCEPTED
+        # 요구사항 변경 A-084/CP-031: 자동 미접수 종결 대신 결과 불명 유지 + K3
+        assert w.repo.intent(it["intent_id"]).state is IntentState.UNKNOWN
+        assert "K3" in w.repo.active_halts(ACCOUNT) and it["intent_id"] not in w.engine.progress
     finally:
         w.close()
 
