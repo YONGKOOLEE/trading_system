@@ -31,7 +31,8 @@
   0 = 정상 (휴장일 포함)
   1 = 하루를 돌았으나 문제 있음 (K8 자동 재개 못 함, 마감 대조 미완료·불일치, 하트비트 멈춤 미회복, paper-review·백업 실패)
   2 = run 시작 전 거부·중단 (PAPER 아님, 설정 오류, 달력 없음, 늦은 시작, 중복 실행, 시작 점검 실패)
-  3 = run 시작 뒤 중단 (run 조기 종료, 자동 운영 결함)
+  3 = run 시작 뒤 중단 (run 조기 종료, 자동 운영 결함), 또는 처리되지 않은 예외로 끝남(재검토 — 어느 단계든.
+      traceback은 일 로그에 가림 처리해 남기고 긴급 알림 1건을 최선 노력으로 보낸다. 1로 끝나지 않게)
 """
 
 from __future__ import annotations
@@ -44,7 +45,7 @@ import sys
 import time as _time
 import traceback
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
@@ -60,7 +61,7 @@ from trading_system.marketdata.calendar import KrxCalendar
 from trading_system.monitoring.liveness import watchdog_check
 from trading_system.ops.cli import REPO_ROOT
 from trading_system.reporting.day_summary import build_day_summary
-from trading_system.storage.jsonlog import Masker
+from trading_system.storage.jsonlog import SENSITIVE_KEYS, Masker
 from trading_system.storage.repository import Repository
 
 from .instance_lock import AUTOPILOT_LOCK, InstanceLocked, acquire_instance_lock, instance_running
@@ -512,7 +513,13 @@ class DayLog:
     def __init__(self, logs: Path, clock: Clock) -> None:
         self._logs = logs
         self._clock = clock
+        self._secrets: set[str] = set()
         self._mask = Masker()
+
+    def add_secrets(self, values: Iterable[str]) -> None:
+        """이후 기록에서 이 값들을 "***"로 가린다 (예외 traceback에 비밀값이 섞여도 남지 않게 — 재검토)."""
+        self._secrets |= {v for v in values if v}
+        self._mask = Masker(self._secrets)
 
     def __call__(self, message: str) -> None:
         now = self._clock.now().astimezone(KST)
@@ -630,18 +637,44 @@ def captured(fn: Callable[[], int]) -> tuple[int, str]:
     return rc, buf.getvalue()
 
 
-def _refusal_notifier(root: Path, log: Callable[[str], None], base_url: str) -> TelegramNotify | None:
-    """거부 알림용 텔레그램 (A-084). .env.paper의 텔레그램 키 2개만 쓴다(run과 같은 check_telegram_secrets 경로).
-    값은 로그·오류 문구에 싣지 않는다. 못 읽으면 None — 로그만 남긴다."""
+def _register_secrets(log: Callable[[str], None], store: object) -> None:
+    """비밀 설정의 민감 키(토큰·앱키·시크릿·계좌번호 등) 값을 일 로그 가림에 등록한다. 값은 어디에도 쓰지 않는다."""
+    add = getattr(log, "add_secrets", None)
+    keys = getattr(store, "keys", None)
+    if add is None or keys is None:
+        return
+    add([store.get(k).reveal() for k in keys() if SENSITIVE_KEYS.search(k)])  # type: ignore[attr-defined]
+
+
+def _safe_notify(notify: Callable[[str, str], None], log: Callable[[str], None], level: str, text: str) -> None:
+    """예외 처리 경로의 알림 — 실패해도 두 번째 예외를 내지 않는다(재검토). 오류는 종류만 기록(문구에 값이 섞일 수 있음)."""
+    try:
+        notify(level, text)
+    except Exception as exc:  # noqa: BLE001
+        log(f"알림 전송 실패: {type(exc).__name__}")
+
+
+def _safe_flush(notify: TelegramNotify, log: Callable[[str], None]) -> None:
+    try:
+        notify.flush()
+    except Exception as exc:  # noqa: BLE001
+        log(f"밀린 알림 재전송 실패: {type(exc).__name__}")
+
+
+def _refusal_notifier(root: Path, log: Callable[[str], None], base_url: str,
+                      purpose: str = "거부 알림") -> TelegramNotify | None:
+    """거부·예외 종료 알림용 텔레그램 (A-084). .env.paper의 텔레그램 키 2개만 쓴다(run과 같은 check_telegram_secrets
+    경로). 값은 로그·오류 문구에 싣지 않는다(일 로그 가림에 등록). 못 읽으면 None — 로그만 남긴다."""
     try:
         from trading_system.config.envfile import parse_env_file
         from trading_system.ops.telegram import TelegramApi
 
         from .telegram_run import CHAT_KEY, TOKEN_KEY, check_telegram_secrets
         secrets = parse_env_file(root / ".env.paper")
+        _register_secrets(log, secrets)
         check_telegram_secrets(secrets)
-    except Exception as exc:  # noqa: BLE001 — 거부 알림은 최선 노력, 거부 자체를 막지 않는다
-        log(f"거부 알림 못 보냄(텔레그램 비밀값 확인 불가: {type(exc).__name__}) — 로그만 기록")
+    except Exception as exc:  # noqa: BLE001 — 알림은 최선 노력, 거부·종료 자체를 막지 않는다
+        log(f"{purpose} 못 보냄(텔레그램 비밀값 확인 불가: {type(exc).__name__}) — 로그만 기록")
         return None
     api = TelegramApi(secrets.get(TOKEN_KEY).reveal, base_url)
     return TelegramNotify(api, secrets.get(CHAT_KEY).reveal().strip(), log,
@@ -655,13 +688,66 @@ def _refused(root: Path, log: Callable[[str], None], why: str, base_url: str, ki
     notify = _refusal_notifier(root, log, base_url)
     if notify is not None:
         log("거부 알림 텔레그램 전송")
-        notify("WARNING", text)
-        notify.flush()
+        _safe_notify(notify, log, "WARNING", text)
+        _safe_flush(notify, log)
     return EXIT_REFUSED
+
+
+@dataclass
+class _MainCtx:
+    """진입점 상태 — 처리되지 않은 예외 때 일 로그·알림을 찾는 데 쓴다."""
+    base_url: str
+    root: Path = REPO_ROOT
+    log: DayLog | None = None
+    notify: TelegramNotify | None = None
 
 
 def autopilot_main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = None, *,
                    telegram_base_url: str = "https://api.telegram.org") -> int:
+    """작업 스케줄러 진입점. 처리되지 않은 예외는 어느 단계든 코드 3으로 끝낸다(재검토 — Python 기본 종료 코드 1은
+    "문제 있음"과 겹치고, pythonw에서는 traceback이 사라진다). SystemExit(argparse --help·인자 오류 등)은 코드 그대로."""
+    ctx = _MainCtx(telegram_base_url)
+    try:
+        return _autopilot_main(ctx, argv, environ)
+    except SystemExit:
+        raise
+    except BaseException as exc:  # noqa: BLE001 — KeyboardInterrupt 포함: 기록하고 3으로 끝낸다
+        return _aborted(ctx, exc)
+
+
+def _aborted(ctx: _MainCtx, exc: BaseException) -> int:
+    """처리되지 않은 예외: traceback을 일 로그(가림 처리)에, 긴급 알림 1건(최선 노력, 예외를 내지 않음), 코드 3."""
+    logs = ctx.root / "var" / "paper" / "logs"
+    name = type(exc).__name__
+    try:
+        tb = "".join(traceback.format_exception(exc))
+    except Exception:  # noqa: BLE001
+        tb = name
+    log = ctx.log or DayLog(logs, SystemClock())
+
+    def say(message: str) -> None:
+        try:
+            log(message)
+        except Exception:  # noqa: BLE001 — 일 로그도 못 쓰면 같은 폴더의 최후 기록 파일에 종류만 (가림 불가 → 본문 없음)
+            write_fallback(logs / "autopilot-fatal.log", f"자동 운영 예외 종료 {name} (일 로그 기록 실패)")
+
+    try:
+        from trading_system.config.envfile import parse_env_file
+        _register_secrets(log, parse_env_file(ctx.root / ".env.paper"))   # traceback 속 비밀값 가림
+    except Exception:  # noqa: BLE001 — 없거나 못 읽으면 기본 가림(토큰 형태·계좌번호 형태)만
+        pass
+    say(f"자동 운영 예외 종료 (코드 {EXIT_ABORTED}) {name}:\n{tb}")
+    notify = ctx.notify or _refusal_notifier(ctx.root, say, ctx.base_url, purpose="예외 종료 알림")
+    if notify is not None:
+        _safe_notify(notify, say, "EMERGENCY", f"자동 운영 예외 종료 {name} — 종료 코드 {EXIT_ABORTED}. run 실행 여부는 "
+                                               f"/status·PC로 확인, var/paper/logs/autopilot 로그 확인")
+        _safe_flush(notify, say)
+    say(f"자동 운영 끝 (코드 {EXIT_ABORTED})")
+    return EXIT_ABORTED
+
+
+def _autopilot_main(ctx: _MainCtx, argv: Sequence[str] | None, environ: Mapping[str, str] | None) -> int:
+    telegram_base_url = ctx.base_url
     p = argparse.ArgumentParser(prog="scripts/autopilot.py",
                                 description="PAPER 무인 자동 운영 (CP-029). 작업 스케줄러가 평일 06:45에 실행한다",
                                 epilog=EXIT_HELP)
@@ -669,10 +755,10 @@ def autopilot_main(argv: Sequence[str] | None = None, environ: Mapping[str, str]
     p.add_argument("--root", default=str(REPO_ROOT), help="저장소 루트")
     ns = p.parse_args(argv)
     env = dict(os.environ if environ is None else environ)
-    root = Path(ns.root).resolve()
+    root = ctx.root = Path(ns.root).resolve()
     base = root / "var" / "paper"
     clock = SystemClock()
-    log = DayLog(base / "logs", clock)   # 거부 사유까지 남긴다 — pythonw에는 콘솔이 없다 (A-084)
+    log = ctx.log = DayLog(base / "logs", clock)   # 거부 사유까지 남긴다 — pythonw에는 콘솔이 없다 (A-084)
     why = mode_refusal(ns.mode, env, root / ".env")   # .env는 TRADE_MODE 한 줄만 읽는다 (config/modes)
     if why:
         return _refused(root, log, why, telegram_base_url)
@@ -704,9 +790,10 @@ def autopilot_main(argv: Sequence[str] | None = None, environ: Mapping[str, str]
     from .preflight import preflight_main
     from .review_tool import review_main
     assert startup.secrets is not None
+    _register_secrets(log, startup.secrets)   # 이후 traceback·출력 기록에서 비밀값 가림 (재검토)
     api = TelegramApi(startup.secrets.get(TOKEN_KEY).reveal, telegram_base_url)
-    notify = TelegramNotify(api, startup.secrets.get(CHAT_KEY).reveal().strip(), log,
-                            fallback=base / "logs" / AUTOPILOT_FALLBACK)
+    notify = ctx.notify = TelegramNotify(api, startup.secrets.get(CHAT_KEY).reveal().strip(), log,
+                                         fallback=base / "logs" / AUTOPILOT_FALLBACK)
     child_env = {**env, "TRADE_MODE": Mode.PAPER.value, "PYTHONIOENCODING": "utf-8",
                  "PYTHONPATH": os.pathsep.join(x for x in (str(root / "src"), env.get("PYTHONPATH", "")) if x)}
     common = ["--mode", Mode.PAPER.value, "--root", str(root)]
@@ -726,10 +813,11 @@ def autopilot_main(argv: Sequence[str] | None = None, environ: Mapping[str, str]
                        reference_time=startup.limits.daily_reference_time, rates=rates).run()
     except Exception as exc:  # noqa: BLE001 — run 시작 전 단계의 결함 (시작 뒤는 Autopilot._day가 처리)
         log(f"자동 운영 예외:\n{traceback.format_exc()}")
-        notify("EMERGENCY", f"자동 운영 오류(run 시작 전) {type(exc).__name__} — PC에서 var/paper/logs/autopilot 로그 확인")
+        _safe_notify(notify, log, "EMERGENCY",
+                     f"자동 운영 오류(run 시작 전) {type(exc).__name__} — PC에서 var/paper/logs/autopilot 로그 확인")
         rc = EXIT_REFUSED
     finally:
-        notify.flush()   # 밀린 알림 1회 재전송 (A-084)
+        _safe_flush(notify, log)   # 밀린 알림 1회 재전송 (A-084). 실패해도 두 번째 예외를 내지 않는다
     log(f"자동 운영 끝 (코드 {rc})")
     return rc
 

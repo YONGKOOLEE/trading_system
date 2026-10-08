@@ -368,3 +368,150 @@ def test_a084_429_with_real_http_client_waits_retry_after(tmp_path: Path, tg: Fa
     tg.send_reply = reply
     n("INFO", "제한 뒤 성공")
     assert sleeps == [3.0] and len(tg.sent) == 1 and n.failed == []
+
+
+# --- 재검토: SNTP 음수 왕복 지연 표본 제외 ---------------------------------------------------------------------
+
+def test_a084_negative_delay_samples_excluded(env: Env) -> None:
+    # 왕복 지연 음수 = 측정 중 시계 점프·쓰레기 응답 — "가장 짧은 지연"으로 뽑히면 안 된다
+    q = SampleQuery({"a": [S("0.900", "-0.500"), S("0.300", "0.100"), S("0.200", "0.200")]})
+    res = monitor(env, q, [("a", 1)], []).check()
+    assert res.ok is True and res.offset == Decimal("0.300") and res.delay == Decimal("0.100"), res
+    assert res.samples == 2 and res.source == "a:1"                        # 유효 표본 수 (음수 제외)
+
+
+def test_a084_all_negative_delay_samples_mean_no_valid_sample(env: Env) -> None:
+    neg = [S("0.1", "-0.01"), S("0.2", "-0.02"), S("0.3", "-0.03")]
+    q = SampleQuery({"a": list(neg), "b": [S("0.4", "0.05")] * 3})
+    res = monitor(env, q, [("a", 1), ("b", 2)], []).check()
+    assert res.ok is True and res.source == "b:2" and res.offset == Decimal("0.4")   # 다음 서버로
+    q_all = SampleQuery({"a": list(neg), "b": list(neg)})
+    res2 = monitor(env, q_all, [("a", 1), ("b", 2)], []).check()
+    assert res2.ok is None and res2.offset is None and res2.samples == 0, res2
+    assert "a:1" in res2.source and "b:2" in res2.source and "음수" in res2.source
+    assert "K6" in env.repo.active_halts(ENV_ACCOUNT)                       # 판정 불가 = 모두 실패와 같음
+
+
+# --- 재검토: 처리되지 않은 예외 → 종료 코드 3 · traceback 일 로그 · 비밀값 없음 ------------------------------------
+
+FAKE_APP_KEY = "virtual-appkey-Q7Z9X1"
+
+
+def _secrets_root(root: Path) -> None:
+    (root / ".env").write_text("TRADE_MODE=PAPER\n", encoding="utf-8")
+    (root / ".env.paper").write_text(f"TRADE_MODE=PAPER\nTELEGRAM_BOT_TOKEN={TOKEN}\nTELEGRAM_CHAT_ID={CHAT}\n",
+                                     encoding="utf-8")
+
+
+def _assert_no_secrets(text: str) -> None:
+    assert TOKEN not in text and "virtual-token" not in text and FAKE_APP_KEY not in text, text
+
+
+def test_a084_unhandled_exception_exits_3_with_traceback_in_day_log(tmp_path: Path, tg: FakeTelegram,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    _secrets_root(tmp_path)
+
+    def boom(*a: object, **k: object) -> None:
+        raise RuntimeError(f"주입 결함 {TOKEN}")
+    monkeypatch.setattr("trading_system.app.startup.check_startup", boom)   # 설정 단계에서 예상 밖 예외
+    rc = autopilot_main(["--mode", "PAPER", "--root", str(tmp_path)], environ={}, telegram_base_url=tg.url)
+    assert rc == EXIT_ABORTED                                                # 1(문제 있음)이 아니라 3
+    text = _day_log(tmp_path)
+    assert "Traceback" in text and "RuntimeError" in text and "주입 결함" in text and "boom" in text, text
+    assert "자동 운영 예외 종료" in text
+    _assert_no_secrets(text)
+    assert len(tg.sent) == 1 and tg.sent[0]["text"].startswith("[긴급] [자동 운영] 자동 운영 예외 종료"), tg.sent
+    _assert_no_secrets(tg.sent[0]["text"])
+
+
+def test_a084_unhandled_exception_without_secrets_still_logged(tmp_path: Path, tg: FakeTelegram,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".env").write_text("TRADE_MODE=PAPER\n", encoding="utf-8")
+
+    def boom(*a: object, **k: object) -> None:
+        raise KeyError("주입")
+    monkeypatch.setattr("trading_system.app.autopilot.mode_refusal", boom)
+    assert autopilot_main(["--mode", "PAPER", "--root", str(tmp_path)], environ={},
+                          telegram_base_url=tg.url) == EXIT_ABORTED
+    text = _day_log(tmp_path)
+    assert "Traceback" in text and "KeyError" in text, text
+    assert tg.sent == []                                                     # 비밀값 없음 → 로그만
+
+
+def test_a084_system_exit_code_passes_through(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _secrets_root(tmp_path)
+
+    def bye(*a: object, **k: object) -> None:
+        raise SystemExit(5)
+    monkeypatch.setattr("trading_system.app.startup.check_startup", bye)
+    with pytest.raises(SystemExit) as e:
+        autopilot_main(["--mode", "PAPER", "--root", str(tmp_path)], environ={})
+    assert e.value.code == 5
+
+
+def test_a084_refusal_notify_exception_does_not_escape(tmp_path: Path, tg: FakeTelegram,
+                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    _secrets_root(tmp_path)
+
+    def broken(self: TelegramNotify, level: str, text: str) -> None:
+        raise RuntimeError(f"전송 결함 {TOKEN}")
+    monkeypatch.setattr(TelegramNotify, "__call__", broken)
+    assert autopilot_main(["--mode", "LIVE", "--root", str(tmp_path)], environ={},
+                          telegram_base_url=tg.url) == EXIT_REFUSED              # 거부는 거부 그대로
+    text = _day_log(tmp_path)
+    assert "자동 운영 거부" in text and "RuntimeError" in text, text
+    _assert_no_secrets(text)
+
+
+def _stub_main_setup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """autopilot_main이 Autopilot.run까지 가도록 설정 적재를 가상 값으로 대체 (네트워크·실제 자격정보 없음)."""
+    from types import SimpleNamespace
+
+    from trading_system.config.envfile import parse_env_text
+    secrets = parse_env_text(f"TELEGRAM_BOT_TOKEN={TOKEN}\nTELEGRAM_CHAT_ID={CHAT}\n"
+                             f"KIWOOM_PAPER_APP_KEY={FAKE_APP_KEY}\n")
+    startup = SimpleNamespace(account="KR-PAPER-01", secrets=secrets,
+                              limits=SimpleNamespace(daily_reference_time=datetime(2026, 1, 1, 9).time()))
+    monkeypatch.setattr("trading_system.app.startup.check_startup", lambda *a, **k: startup)
+    monkeypatch.setattr("trading_system.config.app_file.load_app_settings",
+                        lambda *a, **k: SimpleNamespace(account="KR-PAPER-01", telegram_enabled=True))
+    monkeypatch.setattr(KrxCalendar, "load_dir", staticmethod(lambda p: None))
+    monkeypatch.setattr("trading_system.config.market_file.load_market_settings",
+                        lambda *a, **k: SimpleNamespace(cost_rates=None))
+
+
+def test_a084_autopilot_exception_then_notify_exception_does_not_escape(tmp_path: Path, tg: FakeTelegram,
+                                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    from trading_system.app.autopilot import Autopilot
+    _secrets_root(tmp_path)
+    _stub_main_setup(monkeypatch)
+
+    def fault(self: Autopilot) -> int:
+        raise ValueError(f"결함 {FAKE_APP_KEY}")
+
+    def broken(self: TelegramNotify, level: str, text: str) -> None:
+        raise RuntimeError(f"전송 결함 {TOKEN}")
+    monkeypatch.setattr(Autopilot, "run", fault)
+    monkeypatch.setattr(TelegramNotify, "__call__", broken)
+    rc = autopilot_main(["--mode", "PAPER", "--root", str(tmp_path)], environ={}, telegram_base_url=tg.url)
+    assert rc == EXIT_REFUSED                                                # run 시작 전 결함 (기존 분류 유지)
+    text = _day_log(tmp_path)
+    assert "Traceback" in text and "ValueError" in text and "RuntimeError" in text, text
+    assert "자동 운영 끝 (코드 2)" in text
+    _assert_no_secrets(text)                                                 # 시작 설정의 비밀값을 일 로그 가림에 등록
+
+
+def test_a084_autopilot_base_exception_exits_3(tmp_path: Path, tg: FakeTelegram,
+                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    from trading_system.app.autopilot import Autopilot
+    _secrets_root(tmp_path)
+    _stub_main_setup(monkeypatch)
+
+    def interrupted(self: Autopilot) -> int:
+        raise KeyboardInterrupt
+    monkeypatch.setattr(Autopilot, "run", interrupted)
+    rc = autopilot_main(["--mode", "PAPER", "--root", str(tmp_path)], environ={}, telegram_base_url=tg.url)
+    assert rc == EXIT_ABORTED
+    text = _day_log(tmp_path)
+    assert "KeyboardInterrupt" in text and "자동 운영 예외 종료" in text, text
+    assert len(tg.sent) == 1 and "자동 운영 예외 종료" in tg.sent[0]["text"], tg.sent

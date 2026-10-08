@@ -5,6 +5,8 @@
 - 서버당 표본 SAMPLES개(기본 3, 약 0.2초 간격)를 받아 **왕복 지연이 가장 짧은 표본**으로 판정한다(A-084 — 표본 1개로
   0.976초가 나온 사례: 지연이 큰 표본의 오차는 믿지 않는다). 허용 오차 의미는 그대로(|offset| ≤ 1초). 표본을 받다가
   실패하면 그때까지 받은 표본(1개 이상)으로 판정하고, 첫 표본부터 실패하면 다음 서버로 넘어간다.
+- 왕복 지연이 음수인 표본(측정 중 시계 점프·이상 응답)은 버린다(재검토). 서버의 표본이 모두 그렇다면 그 서버는 실패와
+  같게 보고 다음 서버로 넘어간다.
 - 모든 서버가 실패하면 "판정 불가" → K6. 허용 오차 초과 → K6.
 - 정상이면 K6 재개 조건 `clock_ok`를 보고해 자동 해제한다. 결과는 시계 점검 기록(ENT-28)에 남긴다.
 - 실제 서버 연결은 사용자 승인 후에만 한다(05 T-012). 시험은 로컬 가짜 서버로만.
@@ -108,11 +110,19 @@ def query_offset(host: str, port: int = 123, timeout: float = 2.0,
     return query_sample(host, port, timeout, now).offset
 
 
-def best_sample(samples: Sequence[SntpSample]) -> SntpSample:
-    """왕복 지연이 가장 짧은 표본 (지연을 모르는 표본은 뒤로, 같으면 먼저 받은 것)."""
-    if not samples:
-        raise ValueError("표본 없음")
-    return min(samples, key=lambda s: (s.delay is None, s.delay if s.delay is not None else Decimal(0)))
+def valid_samples(samples: Sequence[SntpSample]) -> list[SntpSample]:
+    """왕복 지연이 음수인 표본(시계 점프·이상 응답)을 뺀다. 지연을 모르는 표본(None)은 남긴다."""
+    return [s for s in samples if s.delay is None or s.delay >= 0]
+
+
+def best_sample(samples: Sequence[SntpSample]) -> SntpSample | None:
+    """유효 표본 중 왕복 지연이 가장 짧은 표본 (지연을 모르는 표본은 뒤로, 같으면 먼저 받은 것).
+
+    유효 표본이 없으면(빈 목록·모두 왕복 지연 음수) None."""
+    valid = valid_samples(samples)
+    if not valid:
+        return None
+    return min(valid, key=lambda s: (s.delay is None, s.delay if s.delay is not None else Decimal(0)))
 
 
 @dataclass(frozen=True)
@@ -121,7 +131,7 @@ class ClockResult:
     offset: Decimal | None
     source: str
     delay: Decimal | None = None   # 채택한 표본의 왕복 지연(초)
-    samples: int = 0               # 받은 표본 수
+    samples: int = 0               # 판정에 쓴 유효 표본 수 (왕복 지연 음수 제외)
 
     @property
     def detail(self) -> str:
@@ -181,8 +191,11 @@ class ClockMonitor:
                 errors.append(err)
                 continue
             best = best_sample(got)
+            if best is None:   # 표본이 모두 왕복 지연 음수 — 유효 표본 없음, 이 서버는 실패와 같다
+                errors.append(f"{host}:{port} 유효 표본 없음(왕복 지연 음수 {len(got)}개)" + (f", {err}" if err else ""))
+                continue
             result = ClockResult(abs(best.offset) <= self._tolerance, best.offset, f"{host}:{port}", best.delay,
-                                 len(got))
+                                 len(valid_samples(got)))
             break
         if result is None:
             result = ClockResult(None, None, "; ".join(errors))
