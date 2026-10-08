@@ -419,7 +419,9 @@ def _print_heartbeat(path: Path, now: datetime) -> None:
         print(f"하트비트: {st.detail}")
         return
     state = "살아 있음" if st.alive else f"멈춤 의심 ({st.detail})"
-    print(f"하트비트: {st.age_seconds:.0f}초 전 ({_kst(st.at.isoformat())}) — 본 프로세스 {state}")
+    # 미래 시각은 "-N초 전"이 아니라 preflight와 같은 "N초 미래"로 (판정·문구 "시계 이상 의심"은 watchdog_check 한 곳)
+    age = f"{st.age_seconds:.0f}초 전" if st.age_seconds >= 0 else f"{-st.age_seconds:.0f}초 미래"
+    print(f"하트비트: {age} ({_kst(st.at.isoformat())}) — 본 프로세스 {state}")
 
 
 def _kst(text: str | None) -> str:
