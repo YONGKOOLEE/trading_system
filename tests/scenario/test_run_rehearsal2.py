@@ -338,6 +338,9 @@ def test_r4_runtime_k8_clock_jump_resume_after_next_reconcile(tmp_path: Path, mo
         seen["jump_wall_s"] = (datetime.now(UTC) - t_jump).total_seconds()
         assert r.ops(resume_main, "K8")[0] == 0
         assert wait_until(lambda: "K8" not in r.active(), 10), (r.active(), command_results(r, "RESUME"))
+        # K8 해제(정지 행)와 명령 결과(DONE) 기록은 같은 tick 안에서 순서대로 일어난다 — 결과가 기록될 때까지 기다린다
+        # (2026-10-09 통합 시험에서 PENDING을 읽은 간헐 실패 1회, 대기 조건만 보강)
+        assert wait_until(lambda: command_results(r, "RESUME")[-1][0] != "PENDING", 10), command_results(r, "RESUME")
         seen["resume_late"] = command_results(r, "RESUME")[-1]
         seen["status"] = r.ops(status_main)[1]
 
