@@ -382,3 +382,13 @@
 - 정정: 룩어헤드 검사 22개를 "--checks에 포함"이라 잘못 판단해 중단 → 확인 후 전부 재실행(보고서에 기록).
 - 대화 지시 첫 실행: resume.py --mode PAPER K1 기록(3일차 시작 때 처리). 문서 승인 묶음 요약 작성. 운영 카드 3일차 "보는 자동"으로 갱신.
 - 다음: 3일차 아침 사용자 autopilot 1회 실행 → 결과 확인 → 성공 시 예약 등록 안내.
+
+## 2026-10-08 (39) — PAPER-0 3일차 보는 자동 운영 성공, 3일차 결함 수정 병합, CP-030/A-081~A-084, 전체 점검·문서 정리
+- 3일차(보는 자동, A-080): 06:44 K8 자동 재개(7초) → 07:53 K5 → 07:58 자동 해제(CP-028 P4 첫 관찰) → 09:30 매수 267,500 / 14:30 매도 266,250(v2) → CLOSE MATCH → 15:45 자동 종료·paper-review·백업·요약 정상. 실행 코드 main c17651e 계열. 실제 비용 수수료 1,860+세금 532, 손익 −3,642(시스템 −3,652, 10원 올림 차).
+- 결함 2건 수정 013f2bd(`feat/T-025-day3-fixes`, 요약 기준 금액 = cash+value, 하트비트 읽기 재시도) → main ec84e74 병합, 전체 **1254 passed**.
+- 브랜치 완료(미병합): feat/T-M2-07-cash-risk 8560796(1202), feat/T-009-bt-export 295e74d(1262, CP-030 결과 파일 3종), feat/T-026-validate 03132f7(1304, 검증 실행기·trend-sma 시연), docs/user-manual b8c4a12(user-manual.md v0.1).
+- 승인·결정: A-081(검증 기준 방법 B·권장 1~3·CP-030 작성), **A-082 CP-030 승인**(Q-1~Q-4 권장값), A-083(C-6 무작위 진입 비교 삭제), **A-084**(전체 점검 후속: 코드 수정 9건 착수, 문서 정리, 위임 결정 2-1 결과 불명 5회 → K3(CP-031), 2-2 CAP-ORD-02 미지원(X-U1 전까지), 2-3 텔레그램 금액 제외·비율).
+- 전체 프로젝트 점검(주문 경로·운영/보안·문서·코드 건강 4관점) → 제안 1·2·4 진행. 진행 중 브랜치: feat/T-025-ops-hardening, chore/code-health, feat/T-004-unknown-k3.
+- 문서 정리(브랜치 docs/cp-030-validation-criteria, 이 worklog 포함): CP-029 `[CP-029]` 반영(01·03·04·05), CP-031 신설·반영, A-084 2-2·2-3 반영, "미병합·미커밋·전체 회귀 미실행" 문구를 병합 사실로 갱신, 07-paper-review v0.3(2일차 마감·v2 전환·3일차 — 보고 기반), paper0-verify status·strategy 상태, pv-procedure v0.6(조건문 삭제, 10-12 준비), handoff 전면 개정, .status, README 2종·루트 README, decisions-pending DP-27·31·40.
+- 미확인: 3일차 DB 수치(주문번호·PV-05·PV-10·PV-15·PV-16·알림 통계) — v0.4에서 조회. unknown-k3·ops-hardening·code-health 시험 결과. 시험 실행 없음(이 문서 작업).
+- 다음: 사용자에게 10-12 무인 전환 준비 4단계 안내(시간 서버 time.kriss.re.kr, .env TRADE_MODE 확인, schedule-register, Principal UserId 확인) → 병합 지시 시 T-009 export → T-026 → T-M2-07 순.

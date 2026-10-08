@@ -1,17 +1,17 @@
 # 보조 기록 — 승인 근거가 아니다. 승인 근거는 docs/approvals.md.
 # 이 파일과 approvals.md가 충돌하면 진행하지 말고 사용자에게 확인한다.
-current_stage: 6            # 구현 — PAPER-0 진행 중(1·2일차 완료, 3일차 2026-10-08, 전략 paper0-verify v2). main 병합 완료(A-075). T-018 trend-sma 초안·T-M2 착수(A-071). 인계: docs/handoff.md
-delivery: M1                # 국내주식·ETF (키움 모의)
-business_definition: v0.6 approved   # 근거: A-029 (v0.5·v0.4·v0.3 superseded)
+current_stage: 6            # 구현 — PAPER-0 3일차(2026-10-08) 완료(1~3일차, 전략 paper0-verify v2, 3일차는 "보는 자동 운영" 성공). 10-09 휴장, 10-12(월)부터 무인 자동 운영 예정(CP-029 A-080, 사용자 예약 작업 등록 필요). main ec84e74 1254 passed. 인계: docs/handoff.md
+delivery: M1                # 국내주식·ETF (키움 모의). M2 구현 진행(A-071, 브랜치 미병합)
+business_definition: v0.6 approved   # 근거: A-029 (v0.5·v0.4·v0.3 superseded). v0.7 draft(CP-024) 승인 전
 gates:
-  strategy: approved         # 00-strategy.md v0.4, A-029
-  requirements: approved     # 01-requirements.md v0.8, A-060 (CP-021·022·023)
-  data-model: approved       # 02-data-model.md v0.7, A-029
-  design: approved           # 03-design.md v0.9, A-060 (CP-022·023)
-  validation: approved       # 04-validation.md v0.8, A-060 (CP-022·023)
-  plan: approved             # 05-plan.md v0.5, A-033 (CP-019)
-implementation_start: authorized   # A-022 (2026-10-01)
+  strategy: approved         # 00-strategy.md v0.4, A-029. v0.5 draft(CP-024·CP-030) 승인 전
+  requirements: approved     # 01-requirements.md v0.8, A-060 (CP-021·022·023). v0.9 draft(CP-024~CP-031) 승인 전
+  data-model: approved       # 02-data-model.md v0.7, A-029. v0.8 draft 승인 전
+  design: approved           # 03-design.md v0.9, A-060 (CP-022·023). v1.0 draft(CP-024~CP-031) 승인 전
+  validation: approved       # 04-validation.md v0.8, A-060 (CP-022·023). v0.9 draft(CP-024~CP-031) 승인 전
+  plan: approved             # 05-plan.md v0.5, A-033 (CP-019). v0.6 draft(CP-024·026·027·029·030) 승인 전
+implementation_start: authorized   # A-022 (2026-10-01). M2 구현 시작 A-071 (2026-10-07)
 live_order_code: not-authorized
-live_run: not-authorized    # 시장별: M1/M2/M3 모두 없음
+live_run: not-authorized    # 시장별: M1/M2/M3 모두 없음. PAPER 자동 운영(CP-029)은 PAPER 전용
 commit_policy: D-082 (A-017) + A-030   # 작업 완료·테스트 통과 시 로컬 커밋(문서 포함, A-030), push·main 병합은 지시 시
-last_updated: 2026-10-07   # 마지막 기록 A-076. 게이트 변경 없음(01~05·업무정의서·00은 draft, 검토 요약 docs/changes/draft-bundle-review-2026-10-07.md)
+last_updated: 2026-10-08   # 마지막 기록 A-084(전체 점검 후속 작업 지시·결정 위임 2-1 CP-031 K3, 2-2 CAP-ORD-02 미지원, 2-3 텔레그램 금액 제외). 게이트 변경 없음. CP 승인: CP-026~CP-030(A-070·072·074·080·082), CP-031 A-084 위임, CP-025 미승인
