@@ -2,7 +2,8 @@
 
 - 버전: v0.5
 - 상태: draft (CP-024 반영, A-066 승인 CP. 승인 전 — 이전 승인본 v0.4 → [archive/00-strategy-v0.4.md](archive/00-strategy-v0.4.md)). 이 draft가 승인되기 전까지 v0.4(approved, A-029)가 기준이다
-- 작성일 / 최종 수정일: 2026-10-01 / 2026-10-05
+- 작성일 / 최종 수정일: 2026-10-01 / 2026-10-08
+- [CP-030] 추가 변경 근거: [changes/CP-030-backtest-validation-criteria.md](changes/CP-030-backtest-validation-criteria.md) (**CP 승인 A-082, 2026-10-08**, C-6 무작위 진입 비교 삭제 A-083. 이 문서 v0.5 자체는 draft·미승인) — §2.11 전환 표 "백테스트 통과 → PAPER 중" 조건에 공통 성과 기준(04 §2.9) 판정표 "통과" 추가(03 D-161, 검증용 전략 D-076 제외). M1 PAPER-0 운영 영향 없음. `[CP-030]` 표시 문장·행이 해당 변경이다
 - 단계 / 게이트: 0단계 / strategy:approved (v0.4 기준. 이 draft는 게이트를 바꾸지 않음)
 - 인도 차수: 공통 본문 + M1 부록 + M2 부록 [v0.5 CP-024] (M3는 알려진 차이만)
 - 선행 문서(버전): 업무정의서 v0.6 (A-029), 업무정의서 v0.7 draft (CP-024, 승인 전), CP-024 v0.5 (A-066)
