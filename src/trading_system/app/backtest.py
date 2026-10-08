@@ -96,6 +96,7 @@ class BacktestConfig:
     segment: str = "ALL"
     final_usage_ledger: Path | None = None
     write_exports: bool = True          # 결과 파일(trades.csv·equity.csv·summary.json) 쓰기. 교란 검사 내부 실행은 끈다
+    slippage_pct: Decimal | None = None  # [CP-030 D-164] 주면 % 슬리피지(검증 실행기). None = 틱 방식(기존 기본)
 
 
 @dataclass(frozen=True)
@@ -238,7 +239,16 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
                 return t
         return cfg.slippage_tick
 
-    broker = BacktestBroker(tick_of, cfg.slippage_ticks, cfg.volume_cap)
+    def price_unit(inst: str, price: Decimal) -> Decimal:
+        # % 슬리피지의 맞춤 단위: 호가 표가 있으면 그 가격대 호가, 없으면 1원 (D-164)
+        if cfg.ticks is not None:
+            t = cfg.ticks.tick_of(cfg.infos[inst].kind, price)
+            if t is not None:
+                return t
+        return Decimal("1")
+
+    broker = BacktestBroker(tick_of, cfg.slippage_ticks, cfg.volume_cap, slippage_pct=cfg.slippage_pct,
+                            price_unit=price_unit if cfg.slippage_pct is not None else None)
     executor = Executor(repo, broker, clock, run_dir / "KILL")
     registry = StrategyRegistry(repo, clock, None)
     gate = Gate(repo, clock, GateInputs(_Limits(cfg.account_limits), store, acct, registry, _ClockOk()), policy)
@@ -440,6 +450,7 @@ def _write_exports(cfg: BacktestConfig, result: BacktestResult, details: list[bx
         "cost_rates": {"commission_rate": str(rates.commission_rate), "sell_tax_rate": str(rates.sell_tax_rate)},
         "slippage_ticks": cfg.slippage_ticks,
         "slippage_tick": str(cfg.slippage_tick),
+        **({} if cfg.slippage_pct is None else {"slippage_pct": str(cfg.slippage_pct)}),
         "tick_table": cfg.ticks is not None,
         "volume_cap": str(cfg.volume_cap),
         "price_limit_ratio": str(cfg.gate_settings.price_limit_ratio),

@@ -1,7 +1,9 @@
 """백테스트 체결 모델 브로커 (04 D-071·D-072·§2.2). 실운영과 같은 BrokerAdapter 계약.
 
 - 주문은 접수만 하고, `match_bar`가 다음 봉에서 체결 여부를 정한다 (판정 봉 종가 체결 금지 — 룩어헤드).
-- 시장가: 봉 시가 + 불리한 방향 슬리피지(틱 수 × 틱). 지정가: 가격이 **관통**해야 지정가로 체결(접촉만은 미체결).
+- 시장가: 봉 시가 + 불리한 방향 슬리피지(틱 수 × 틱). [CP-030 D-164] `slippage_pct`를 주면 % 방식:
+  기준가 × (1 ± s)를 불리한 방향으로 `price_unit`(호가 표가 있으면 호가 단위, 없으면 1원) 배수에 맞춘다
+  (매수 올림, 매도 내림). 상·하한가 규칙은 두 방식 모두 같다. 기본(None)은 틱 방식 그대로. 지정가: 가격이 **관통**해야 지정가로 체결(접촉만은 미체결).
 - 봉 거래량의 상한 비율(기본 10%)을 넘는 수량은 미체결로 남는다(부분 체결).
 - 상한가 매수·하한가 매도는 체결 없음(보수적). 거래정지일은 체결 없음.
 - `end_of_day`: 남은 미체결은 만료(일봉 기준 당일 주문). 결과는 통보로 낸다.
@@ -12,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
-from decimal import ROUND_FLOOR, Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 
 from trading_system.broker.base import BrokerQueryError
 from trading_system.domain.enums import OrderType, SubmitOutcome
@@ -45,9 +47,14 @@ class _Order:
 
 class BacktestBroker:
     def __init__(self, tick_of: Callable[[str, Decimal], Decimal], slippage_ticks: int = 1,
-                 volume_cap: Decimal = Decimal("0.10")) -> None:
+                 volume_cap: Decimal = Decimal("0.10"), slippage_pct: Decimal | None = None,
+                 price_unit: Callable[[str, Decimal], Decimal] | None = None) -> None:
         if slippage_ticks < 0 or not (Decimal("0") < volume_cap <= Decimal("1")):
             raise ValueError("슬리피지 틱 ≥ 0, 거래량 상한 0 초과 1 이하")
+        if slippage_pct is not None and (not (Decimal("0") <= slippage_pct < Decimal("1")) or price_unit is None):
+            raise ValueError("슬리피지 비율은 0 이상 1 미만이고 가격 단위 함수가 필요")
+        self.slippage_pct = slippage_pct
+        self._price_unit = price_unit
         self._tick_of = tick_of
         self.slippage_ticks = slippage_ticks
         self.volume_cap = volume_cap
@@ -110,8 +117,13 @@ class BacktestBroker:
         if not buy and bar.lower_limit is not None and bar.open <= bar.lower_limit:
             return None
         if r.order_type is OrderType.MARKET:
-            slip = self._tick_of(r.instrument, bar.open) * self.slippage_ticks
-            price = bar.open + slip if buy else bar.open - slip
+            if self.slippage_pct is not None and self._price_unit is not None:
+                raw = bar.open * (1 + self.slippage_pct) if buy else bar.open * (1 - self.slippage_pct)
+                unit = self._price_unit(r.instrument, raw)
+                price = (raw / unit).to_integral_value(rounding=ROUND_CEILING if buy else ROUND_FLOOR) * unit
+            else:
+                slip = self._tick_of(r.instrument, bar.open) * self.slippage_ticks
+                price = bar.open + slip if buy else bar.open - slip
             if buy and bar.upper_limit is not None:
                 price = min(price, bar.upper_limit)
             if not buy and bar.lower_limit is not None:
