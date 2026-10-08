@@ -261,3 +261,24 @@ def test_v110_report_failure_is_recorded_and_alerted(env: Env, monkeypatch: pyte
     assert env.repo.daily_reports(ACCOUNT)[0]["status"] == "FAILED"
     assert any("일일 보고 생성 실패" in m for m in alerts(env, "EMERGENCY"))
     assert replace and scenario_limits and GateResult and HaltType  # 표시용
+
+
+def test_day3_watchdog_retries_transient_read_failure(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """3일차(2026-10-08 15:09) 허위 경보: run이 하트비트 파일을 교체하는 순간 읽으면 Windows가 PermissionError →
+    한 번의 읽기 실패로 "읽을 수 없음" 긴급 알림. 쓰는 쪽(RV-06)처럼 읽는 쪽도 짧게 재시도한다."""
+    hb = tmp_path / "heartbeat"
+    write_heartbeat(hb, T0)
+    real = Path.read_text
+    fails = {"n": 2}
+
+    def flaky(self: Path, *a, **k):  # type: ignore[no-untyped-def]
+        if self == hb and fails["n"] > 0:
+            fails["n"] -= 1
+            raise PermissionError("교체 중")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", flaky)
+    assert watchdog_check(hb, T0 + timedelta(seconds=5), sleep=lambda s: None).alive
+    fails["n"] = 99   # 계속 실패하면 여전히 이상으로 본다
+    st = watchdog_check(hb, T0 + timedelta(seconds=5), sleep=lambda s: None)
+    assert not st.alive and "읽을 수 없음" in st.detail
