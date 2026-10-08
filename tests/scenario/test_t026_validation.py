@@ -226,8 +226,11 @@ def test_v226_buy_and_hold_hand_calculation() -> None:
                      CostRates(Decimal("0.00015"), Decimal("0.0018")), lambda i, p: Decimal("1"))
     # 첫날 봉 있는 A·B만, 종목당 500,000원: A 10010×49 = 490,490 + 비용 74, B 20020×24 = 480,480 + 비용 73
     # 현금 28,883 + A 49×12,000 + B 24×18,000(마지막 봉 종가) = 1,048,883
+    # [재검토 M-4, 2026-10-08] 창 끝 매도 비용(수수료+세금 0.00195, 원 미만 올림)도 반영:
+    #   A 588,000 → 1,147, B 432,000 → 843 → 1,048,883 − 1,990 = 1,046,893 (이전 기대값 1,048,883은 매도 비용 미반영)
     assert r["instruments"] == ["A", "B"] and r["excluded"] == ["C"]
-    assert r["final_equity"] == "1048883" and r["total_return"] == "0.048883"
+    assert r["final_equity"] == "1046893" and r["total_return"] == "0.046893"
+    assert r["sell_costs"] == "1990"
 
 
 # --- V-227 무작위 진입 -----------------------------------------------------------------------------
@@ -338,7 +341,7 @@ def test_d170_runner_end_to_end_outputs_and_determinism(tmp_path: Path) -> None:
     assert "생존편향" in v["banner"]                                        # 기본: 사후 선택 목록으로 본다
     md = (out / "validation-v1.md").read_text(encoding="utf-8")
     assert md.index("생존편향") < md.index("## 판정표")
-    assert "합산)" + chr(10) * 2 + "| 파라미터 |" in md                          # 표 앞 빈 줄
+    assert "합산)" + chr(10) * 2 + "- 유효 변형" in md                          # 제목 뒤 빈 줄 (M-3 줄 추가)
     assert "C-2" in md and "C-6" in md and "단순 보유" in md and "무작위 진입" in md
     b = go("b", workers=2)                                                 # 병렬 실행도 같은 결과
     strip = lambda x: {k: v for k, v in x.items() if k not in ("runtime_seconds", "out_dir")}   # noqa: E731
@@ -417,3 +420,125 @@ def test_cli_final_check_needs_confirmation_then_once(tmp_path: Path, capsys: py
     assert (tmp_path / "out" / "t-cross-v1-final" / "final-check.json").exists()
     assert validate_main([*base, "--report-version", "2", "--confirmed-by", "A-999"], REPO) == 2
     assert "한 번만" in capsys.readouterr().out
+
+
+# --- 재검토 반영 (2026-10-08 독립 검토 H-1·M-1~M-5·L-1·L-2) -----------------------------------------
+
+from trading_system.app.backtest import BacktestConfig, BacktestError  # noqa: E402
+
+
+def test_h1_backtest_default_final_from_is_cp030_date() -> None:
+    import dataclasses
+    f = {x.name: x for x in dataclasses.fields(BacktestConfig)}
+    assert f["final_from"].default == date(2026, 1, 1) == FINAL_FROM and f["final_check"].default is False
+
+
+@pytest.mark.parametrize("segment", ["ALL", "TRAIN", "VALIDATION", "FINAL"])
+def test_h1_general_backtest_refuses_final_period(tmp_path: Path, segment: str) -> None:
+    cfg = config(tmp_path, f"h1-{segment}", final_from=FINAL_FROM, segment=segment)   # 운영 기본값
+    with pytest.raises(BacktestError, match="최종 확인"):
+        run_backtest(cfg)
+    assert not (tmp_path / "var" / "backtest" / f"h1-{segment}").exists()
+    assert not (tmp_path / "var" / "backtest" / "final-usage.jsonl").exists()
+
+
+def test_h1_run_ending_before_final_from_allowed_overlap_refused(tmp_path: Path) -> None:
+    run_backtest(config(tmp_path, "before", final_from=date(2026, 2, 1), end=date(2026, 1, 30)))
+    with pytest.raises(BacktestError, match="최종 확인"):
+        run_backtest(config(tmp_path, "over", final_from=date(2026, 2, 1), end=date(2026, 2, 2)))
+
+
+def test_h1_final_check_run_needs_ledger_record_and_final_only(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.json"
+    kw = dict(final_from=date(2026, 2, 1), final_check=True, final_usage_ledger=ledger)
+    with pytest.raises(BacktestError, match="장부"):
+        run_backtest(config(tmp_path, "nofc", start=date(2026, 2, 2), **kw))       # 기록 없음
+    claim_final_check(ledger, config(tmp_path).strategy.spec, "fc", confirmed_by="A-1")
+    with pytest.raises(BacktestError, match="최종 확인 구간만"):
+        run_backtest(config(tmp_path, "early", start=date(2026, 1, 5), **kw))      # 최종 구간 앞 날짜 포함
+    r = run_backtest(config(tmp_path, "ok", start=date(2026, 2, 2), **kw))
+    assert r.days[0] >= date(2026, 2, 1)
+
+
+def test_h1_validator_overrides_template_with_its_final_from(tmp_path: Path) -> None:
+    out = run_validation(ValidationInputs(template=config(tmp_path, final_from=FINAL_FROM), out_dir=tmp_path / "v",
+                                          report_version=1, windows=(W1,), final_from=date(2027, 1, 1),
+                                          random_runs=0))
+    assert out["windows"][0]["base"]["trades"] >= 0
+
+
+def test_m1_reproducibility_failure_is_undecidable() -> None:
+    v = _v(reproducible=False)
+    assert v["verdict"] == "판단 불가" and any("재현성" in x for x in v["reasons"])
+    assert _v(reproducible=False, c3_expectancy=Decimal("-1"))["verdict"] == "판단 불가"
+
+
+def test_m2_no_numeric_params_c4_undecidable() -> None:
+    v = _v(c4_expectancies=[])
+    assert v["C-4"] == "판단 불가" and v["verdict"] == "판단 불가"
+    assert any("[제안]" in x and "C-4" in x for x in v["reasons"])
+    assert _v(c4_expectancies=[], c3_expectancy=Decimal("-1"))["verdict"] == "미충족"
+
+
+def _dummy_strategy_cfg(tmp_path: Path) -> object:
+    from tests.support.sample_strategies import CrossStrategy, PARAMS, cross_spec
+    spec = cross_spec()
+    spec = replace(spec, params=spec.params + (ParamSpec("dummy", "int", "개", "효과 없는 값", Decimal("1"),
+                                                         Decimal("100")),))
+    strat = CrossStrategy(spec)
+    return config(tmp_path, strategy=strat, params=validate_params(spec, {**PARAMS, "dummy": 10}))
+
+
+def test_m3_m4_m5_tables(tmp_path: Path) -> None:
+    out = run_validation(ValidationInputs(template=_dummy_strategy_cfg(tmp_path), out_dir=tmp_path / "v",  # type: ignore[arg-type]
+                                          report_version=1, windows=(W1, W2), final_from=date(2027, 1, 1),
+                                          random_runs=3))
+    same = {(x["param"], x["direction"]): x["same_as_base"] for x in out["variants"]}
+    assert same[("dummy", "+")] and same[("dummy", "-")] and not same[("qty", "+")]
+    assert out["effective_variants"] == len(out["variants"]) - 2
+    md = (tmp_path / "v" / "validation-v1.md").read_text(encoding="utf-8")
+    assert "결과 동일(한도에 묶임 가능)" in md and f"유효 변형 {len(out['variants']) - 2}/{len(out['variants'])}" in md
+    w = out["windows"][0]
+    assert {"avg", "max"} <= set(w["base"]["invested_ratio"]) and "sell_costs" in w["buy_hold"]   # M-4
+    assert "평균·최대 투자 비중" in md
+    assert w["random"]["strategy_trades"] == w["base"]["trades"]                                   # M-5
+    assert "CP 기준 200회 미충족, 3회" in md
+
+
+def test_l1_final_check_validates_before_ledger(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.json"
+    cfg = config(tmp_path)
+    for end in (date(2027, 3, 31), date(2026, 1, 15)):     # 달력 없는 연도 / 최종 구간 시작 전 종료
+        with pytest.raises((ValidationError, BacktestError)):
+            run_final_check(cfg, tmp_path / f"fc-{end}", final_from=date(2026, 2, 1), end=end, ledger=ledger,
+                            confirmed_by="A-999")
+    empty = replace(cfg, data={i: [r for r in raw if r.day < date(2026, 2, 1)] for i, raw in cfg.data.items()})
+    with pytest.raises(ValidationError, match="일봉"):
+        run_final_check(empty, tmp_path / "fc-e", final_from=date(2026, 2, 1), end=date(2026, 3, 31),
+                        ledger=ledger, confirmed_by="A-999")
+    assert not ledger.exists()
+    assert not any((tmp_path / n).exists() for n in ("fc-2027-03-31", "fc-2026-01-15", "fc-e"))
+
+
+def test_l2_input_errors_do_not_consume_report_version(tmp_path: Path) -> None:
+    bad = Window(1, date(2023, 1, 1), date(2023, 12, 31), date(2024, 1, 1), date(2024, 12, 31))   # 달력 없음
+    with pytest.raises((ValidationError, BacktestError)):
+        run_validation(ValidationInputs(template=config(tmp_path), out_dir=tmp_path / "v", report_version=1,
+                                        windows=(bad,), final_from=date(2027, 1, 1), random_runs=0))
+    with pytest.raises(ValidationError):
+        run_validation(ValidationInputs(template=config(tmp_path), out_dir=tmp_path / "v", report_version=1,
+                                        windows=(W1,), final_from=date(2027, 1, 1), random_runs=0,
+                                        window_params={9: {}}))
+    assert not (tmp_path / "v").exists()
+
+
+def test_l2_rmtree_failure_is_logged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                     caplog: pytest.LogCaptureFixture) -> None:
+    import trading_system.app.validation as val
+
+    def fake_rmtree(path: object, onexc: object = None) -> None:
+        onexc(lambda: None, str(path), PermissionError("잠김"))  # type: ignore[operator]
+    monkeypatch.setattr(val.shutil, "rmtree", fake_rmtree)
+    with caplog.at_level("WARNING"):
+        val._remove_tree(tmp_path / "x")
+    assert "잠김" in caplog.text

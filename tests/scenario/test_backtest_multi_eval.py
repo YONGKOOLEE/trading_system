@@ -57,7 +57,8 @@ def cfg_p0(tmp_path: Path, run_id: str, **over: object) -> BacktestConfig:
         caps=CAPS_ALL_SUPPORTED, account_limits=scenario_limits(l7_max_order_amount=Decimal("10000000")),
         gate_settings=SETTINGS, calendar=CAL, ticks=None, slippage_tick=Decimal("10"), data=DATA, infos=P0_INFOS,
         start=START, end=END, initial_cash=Decimal("10000000"), out_dir=tmp_path / "var" / "backtest",
-        data_version="virtual-v1", code_commit="test", eval_time=TWO[0], eval_times=TWO)
+        data_version="virtual-v1", code_commit="test", eval_time=TWO[0], eval_times=TWO,
+        final_from=date(2027, 1, 1))   # [CP-030 D-163] 가상 2026 데이터 시험: 최종 확인 시작일을 시험 설정으로 명시
     return replace(cfg, **over)  # type: ignore[arg-type]
 
 

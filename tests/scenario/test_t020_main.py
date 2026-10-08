@@ -121,8 +121,7 @@ def test_backtest_mode_dry_run_starts_with_k8_and_heartbeat(tmp_path: Path) -> N
     assert run_main(root, {"TRADE_MODE": "BACKTEST"}, max_seconds=0.1) == 0
 
 
-def test_backtest_command_from_csv(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    root = make_root(tmp_path, Mode.BACKTEST)
+def _bt_data(tmp_path: Path) -> Path:
     data = tmp_path / "data"
     data.mkdir()
     lines, d, i = ["date,open,high,low,close,volume"], date(2026, 1, 2), 0
@@ -133,12 +132,46 @@ def test_backtest_command_from_csv(tmp_path: Path, capsys: pytest.CaptureFixture
             i += 1
         d += timedelta(days=1)
     (data / "005930.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return data
+
+
+def test_backtest_command_from_csv(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = make_root(tmp_path, Mode.BACKTEST)
+    data = _bt_data(tmp_path)
+    # [CP-030 D-163] 가상 2026 데이터: 시험 루트 설정으로 최종 확인 시작일을 뒤로 둔다(설정 없으면 2026-01-01 → 거부)
+    (root / "config" / "validation.toml").write_text('final_from = "2027-01-01"\nslippage_base = "0.001"\n',
+                                                     encoding="utf-8")
     rc = main(["backtest", "--root", str(root), "--strategy", "tests.support.sample_strategies:CrossStrategy",
                "--params", "config/strategies/t-cross.toml", "--data", str(data), "--start", "2026-02-02",
                "--end", "2026-03-31", "--run-id", "bt1"])
     assert rc == 0, capsys.readouterr().out
     report = (root / "var" / "backtest" / "bt1" / "report.md").read_text(encoding="utf-8")
     assert "재현성(D-074): 통과" in report and "룩어헤드 교란 검사(D-073): 통과" in report
+
+
+def test_backtest_command_refuses_final_period_by_default(tmp_path: Path,
+                                                          capsys: pytest.CaptureFixture[str]) -> None:
+    """[CP-030 D-163] 설정 파일이 없으면 final_from = 2026-01-01: 구간·날짜와 무관하게 겹치면 거부, DB도 안 만든다."""
+    root = make_root(tmp_path, Mode.BACKTEST)
+    data = _bt_data(tmp_path)
+    args = ["backtest", "--root", str(root), "--strategy", "tests.support.sample_strategies:CrossStrategy",
+            "--params", "config/strategies/t-cross.toml", "--data", str(data), "--start", "2026-02-02",
+            "--end", "2026-03-31"]
+    for seg in ("ALL", "TRAIN", "VALIDATION"):
+        assert main([*args, "--run-id", f"r-{seg}", "--segment", seg]) == 2
+        assert "최종 확인" in capsys.readouterr().out
+        assert not (root / "var" / "backtest" / f"r-{seg}").exists()
+    # 확정 A-ID 없는 최종 확인 요청도 거부, 장부 미기록
+    assert main([*args, "--run-id", "fc0", "--final-check"]) == 2
+    assert main([*args, "--run-id", "fc0", "--final-check", "--confirmed-by", "A-999", "--segment", "TRAIN"]) == 2
+    assert main([*args, "--run-id", "fc0", "--final-check", "--confirmed-by", "A-999", "--start", "2025-12-01"]) == 2
+    assert not (root / "var" / "backtest" / "final-usage.json").exists()
+    # 최종 확인 실행(전략 확정 A-ID): 1회 허용·장부 기록, 두 번째 거부
+    assert main([*args, "--run-id", "fc1", "--final-check", "--confirmed-by", "A-999"]) == 0, capsys.readouterr().out
+    assert (root / "var" / "backtest" / "fc1" / "report.md").exists()
+    assert "A-999" in (root / "var" / "backtest" / "final-usage.json").read_text(encoding="utf-8")
+    assert main([*args, "--run-id", "fc2", "--final-check", "--confirmed-by", "A-999"]) == 2
+    assert "한 번만" in capsys.readouterr().out
 
 
 def test_csv_loader_rejects_bad_rows(tmp_path: Path) -> None:

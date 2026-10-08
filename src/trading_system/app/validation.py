@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import random
 import re
 import shutil
@@ -35,7 +36,9 @@ from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 from trading_system.app import backtest_export as bx
-from trading_system.app.backtest import BacktestConfig, BacktestResult, run_backtest
+from trading_system.app.backtest import (
+    FINAL_FROM_DEFAULT, BacktestConfig, BacktestResult, _run_days, eval_times_of, run_backtest,
+)
 from trading_system.domain.clock import KST
 from trading_system.domain.enums import OrderType, RequestType
 from trading_system.domain.market import CostRates, estimate_cost
@@ -44,7 +47,8 @@ from trading_system.domain.strategy import EvaluationSnapshot, RuleSpec, Strateg
 from trading_system.marketdata.quality import RawDaily
 from trading_system.strategy.base import make_signal
 
-FINAL_FROM = date(2026, 1, 1)          # D-163 (설정값, 변경은 CP)
+FINAL_FROM = FINAL_FROM_DEFAULT        # D-163 2026-01-01 (설정 config/validation.toml, 변경은 CP)
+_log = logging.getLogger(__name__)
 SLIPPAGE_BASE = Decimal("0.001")       # D-164 기본 0.1% (2배 = 0.2%)
 MIN_TRADES = 100                       # D-167
 RANDOM_RUNS = 200                      # D-166 [제안 — 횟수]
@@ -137,7 +141,8 @@ def window_data(data: dict[str, list[RawDaily]], end: date) -> dict[str, list[Ra
 def run_window(template: BacktestConfig, w: Window, *, label: str, out_dir: Path, slippage_pct: Decimal,
                params: dict[str, object] | None = None, export: bool = True, run_id: str | None = None,
                strategy: object | None = None,
-               recorder: list[tuple[str, date, Decimal, Decimal, Decimal | None]] | None = None) -> BacktestResult:
+               recorder: list[tuple[str, date, Decimal, Decimal, Decimal | None]] | None = None,
+               final_check: bool = False, ledger: Path | None = None) -> BacktestResult:
     """창 하나의 검증 구간 실행 (자금·보유 새로 시작). 최종 구간 검사는 호출하는 쪽(run_validation·run_final_check)."""
     data = window_data(template.data, w.val_end)
     strat = strategy if strategy is not None else template.strategy
@@ -146,7 +151,8 @@ def run_window(template: BacktestConfig, w: Window, *, label: str, out_dir: Path
     cfg = replace(template, run_id=run_id or f"w{w.k}-{label}", data=data,
                   infos={i: template.infos[i] for i in data}, start=w.val_start, end=w.val_end,
                   params=dict(template.params if params is None else params), slippage_pct=slippage_pct,
-                  segment="ALL", out_dir=out_dir, final_usage_ledger=None, write_exports=export,
+                  segment="ALL", out_dir=out_dir, final_usage_ledger=ledger, write_exports=export,
+                  final_check=final_check,
                   strategy=strat)  # type: ignore[arg-type]
     return run_backtest(cfg)
 
@@ -247,8 +253,13 @@ def buy_and_hold(data: dict[str, list[RawDaily]], days: Sequence[date], initial_
                 last[i] = rows[pos[i]].close
                 pos[i] += 1
         values.append(cash + sum((q * last[i] for i, q in qty.items() if i in last), Decimal("0")))
+    # 창 끝 매도 비용(수수료+세금, D-065 원 미만 올림)을 마지막 평가액에서 뺀다 (재검토 M-4)
+    sell_costs = sum((estimate_cost(q * last[i], True, rates) for i, q in qty.items() if i in last), Decimal("0"))
+    if values:
+        values[-1] -= sell_costs
     final = values[-1] if values else initial_cash
     return {"instruments": inst, "excluded": excluded, "final_equity": format(final, "f"),
+            "sell_costs": format(sell_costs, "f"),
             "total_return": format(((final - initial_cash) / initial_cash).quantize(_Q6), "f"),
             "max_drawdown": format(_mdd(initial_cash, values).quantize(_Q6), "f"), "costs": format(costs, "f")}
 
@@ -376,28 +387,39 @@ def is_verification_strategy(spec: StrategySpec) -> bool:
 
 
 def decide_verdict(*, exempt: bool, pooled_trades: int, c3_expectancy: Decimal | None,
-                   c4_expectancies: Sequence[Decimal | None], after_the_fact_universe: bool) -> dict[str, object]:
+                   c4_expectancies: Sequence[Decimal | None], after_the_fact_universe: bool,
+                   reproducible: bool = True) -> dict[str, object]:
     banner = BANNER if after_the_fact_universe else ""
     if exempt:
         return {"verdict": "적용 제외(검증용 전략, D-161)", "banner": banner, "C-2": "적용 제외", "C-3": "적용 제외",
                 "C-4": "적용 제외", "reasons": ["검증용 전략(D-076 PAPER-0)은 성과 기준 적용 제외 — 전환 조건 기존대로"]}
     c2 = "충족" if pooled_trades >= MIN_TRADES else "판단 불가"
     c3 = "충족" if c3_expectancy is not None and c3_expectancy > 0 else "미충족"
-    c4 = "충족" if all(e is not None and e > 0 for e in c4_expectancies) else "미충족"
+    if not c4_expectancies:
+        c4 = "판단 불가"
+    else:
+        c4 = "충족" if all(e is not None and e > 0 for e in c4_expectancies) else "미충족"
     reasons = []
+    if not reproducible:
+        reasons.append("재현성(D-074) 실패: 같은 입력 재실행 지문이 다른 창이 있음 → 판단 불가")
     if c2 != "충족":
         reasons.append(f"C-2 합산 거래 {pooled_trades}건 < {MIN_TRADES}")
     if c3 != "충족":
         reasons.append(f"C-3 슬리피지 2배 거래당 기대값 {_d(_fmt(c3_expectancy))}원 ≤ 0 또는 거래 없음")
-    if c4 != "충족":
+    if c4 == "미충족":
         reasons.append("C-4 ±20% 변형 중 거래당 기대값 ≤ 0 또는 거래 없음이 있음")
-    if c2 != "충족":
+    elif c4 == "판단 불가":
+        reasons.append("C-4 수치 파라미터가 없어 ±20% 변형을 만들 수 없음 → 판단 불가 [제안]")
+    if not reproducible or c2 != "충족":
         verdict = "판단 불가"
-    elif c3 != "충족" or c4 != "충족":
+    elif c3 != "충족" or c4 == "미충족":
         verdict = "미충족"
+    elif c4 != "충족":
+        verdict = "판단 불가"
     else:
         verdict = "통과(과대 추정 가능)" if after_the_fact_universe else "통과"
-    return {"verdict": verdict, "banner": banner, "C-2": c2, "C-3": c3, "C-4": c4, "reasons": reasons}
+    return {"verdict": verdict, "banner": banner, "C-2": c2, "C-3": c3, "C-4": c4,
+            "reproducible": "통과" if reproducible else "실패", "reasons": reasons}
 
 
 # --- 실행기 (D-170) -----------------------------------------------------------------------------
@@ -466,7 +488,7 @@ def _execute(job: _Job) -> dict[str, object]:
             r = run_window(template, w, label=job.label, out_dir=Path(tmp), slippage_pct=job.slippage_pct,
                            params=params, export=False, strategy=strat, recorder=rec)
         finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+            _remove_tree(Path(tmp))
     initial = template.initial_cash
     final = r.equity[-1][1] if r.equity else initial
     return {
@@ -481,6 +503,13 @@ def _execute(job: _Job) -> dict[str, object]:
         "signals": len(r.signals), "k2_resumes": r.k2_resumes, "run_dir": r.db_path.parent.as_posix(),
         "seconds": round(_time.perf_counter() - t0, 1),
     }
+
+
+def _remove_tree(path: Path) -> None:
+    """임시 실행 폴더 삭제. 실패는 무시하지 않고 경고로 남긴다(재검토 L-2)."""
+    def warn(_fn: object, p: str, exc: BaseException) -> None:
+        _log.warning("임시 폴더 삭제 실패 %s: %s", p, exc)
+    shutil.rmtree(path, onexc=warn)
 
 
 def _run_jobs(jobs: list[_Job], inputs: ValidationInputs) -> list[dict[str, object]]:
@@ -579,16 +608,51 @@ def _stamps(run_dir: Path) -> dict[str, int]:
     return dict(sorted(c.items()))
 
 
-def run_validation(inputs: ValidationInputs) -> dict[str, object]:
-    t_start = _time.perf_counter()
+def _check_inputs(inputs: ValidationInputs) -> None:
+    """결과 폴더를 만들기 전에 입력을 검사한다 — 실패해도 보고서 버전을 쓰지 않는다(재검토 L-2)."""
     tpl = inputs.template
-    spec = tpl.strategy.spec
+    if not inputs.windows:
+        raise ValidationError("창이 없음")
     for w in inputs.windows:
         check_final_guard(w.val_start, w.val_end, inputs.final_from, final_check=False)
     if inputs.out_dir.exists():
         raise ValidationError(f"결과 폴더가 이미 있음: {inputs.out_dir} (새 보고서 버전으로)")
     if inputs.random_runs < 0 or inputs.slippage_base < 0:
         raise ValidationError("무작위 횟수·슬리피지는 0 이상")
+    unknown = sorted(set(inputs.window_params) - {w.k for w in inputs.windows})
+    if unknown:
+        raise ValidationError(f"창별 파라미터의 창 번호가 창 목록에 없음: {unknown}")
+    eval_times_of(tpl)
+    for w in inputs.windows:
+        days = _run_days(replace(tpl, start=w.val_start, end=w.val_end, segment="ALL"))   # 달력 없으면 거부
+        if not days:
+            raise ValidationError(f"창 {w.k} 검증 구간에 거래일이 없음")
+        if not window_data(tpl.data, w.val_end):
+            raise ValidationError(f"창 {w.k}: 창 끝까지 일봉이 있는 종목이 없음")
+
+
+def _invested_ratio(run_dir: Path) -> dict[str, str | None]:
+    """equity.csv의 보유평가액 / 총자산: 평균·최대 (단순 보유와 규모 비교용, 재검토 M-4)."""
+    p = run_dir / "equity.csv"
+    if not p.exists():
+        return {"avg": None, "max": None}
+    ratios = []
+    for line in p.read_text(encoding="utf-8-sig").splitlines()[1:]:
+        cols = line.split(",")
+        total, held = Decimal(cols[1]), Decimal(cols[3])
+        ratios.append(held / total if total > 0 else Decimal("0"))
+    if not ratios:
+        return {"avg": None, "max": None}
+    return {"avg": format((sum(ratios, Decimal("0")) / len(ratios)).quantize(_Q6), "f"),
+            "max": format(max(ratios).quantize(_Q6), "f")}
+
+
+def run_validation(inputs: ValidationInputs) -> dict[str, object]:
+    t_start = _time.perf_counter()
+    tpl = replace(inputs.template, final_from=inputs.final_from, final_check=False)
+    inputs = replace(inputs, template=tpl)
+    spec = tpl.strategy.spec
+    _check_inputs(inputs)
     s1, s2 = inputs.slippage_base, inputs.slippage_base * 2
     after_the_fact = not inputs.universe_point_in_time
     eval_times = tuple(tpl.eval_times) or (tpl.eval_time,)
@@ -677,10 +741,12 @@ def run_validation(inputs: ValidationInputs) -> dict[str, object]:
             "k": w.k, "train": [w.train_start.isoformat(), w.train_end.isoformat()],
             "validation": [days[0].isoformat(), days[-1].isoformat(), len(days)],
             "reproducible": reproducible, "digest": base["digest"],
-            "base": _run_summary(base), "slip2x": _run_summary(dbl),
+            "base": {**_run_summary(base), "invested_ratio": _invested_ratio(Path(str(base["run_dir"])))},
+            "slip2x": _run_summary(dbl),
             "eval_stamps": _stamps(Path(str(base["run_dir"]))),
             "buy_hold": bh,
             "random": {"runs": len(rnd), "templates": random_meta[w.k]["templates"],
+                       "strategy_trades": len(base["trades"]),  # type: ignore[arg-type]
                        "unplaced_total": random_meta[w.k]["unplaced_total"],
                        "realized_trades_mean": _fmt(Decimal(sum(realized)) / len(realized)) if realized else None,
                        "return_median": _fmt(_median(dist), _Q6) if dist else None,
@@ -695,7 +761,8 @@ def run_validation(inputs: ValidationInputs) -> dict[str, object]:
     for idx, v in enumerate(variants_by_k[first_k]):
         outs = [by[("variant", w.k, variants_by_k[w.k][idx].label)] for w in inputs.windows]
         pv = _pooled(outs)
-        variants_out.append({"param": v.param, "direction": v.direction, "base": str(v.base),
+        same = all(o["digest"] == by[("base", w.k, "base")]["digest"] for o, w in zip(outs, inputs.windows))
+        variants_out.append({"param": v.param, "direction": v.direction, "base": str(v.base), "same_as_base": same,
                              "values_by_window": {str(w.k): str(variants_by_k[w.k][idx].value) for w in inputs.windows},
                              "note": "; ".join(sorted({variants_by_k[w.k][idx].note for w in inputs.windows} - {""})),
                              **{k: x for k, x in pv.items() if k != "_exp"}, "_exp": pv["_exp"]})
@@ -716,7 +783,8 @@ def run_validation(inputs: ValidationInputs) -> dict[str, object]:
     verdict = decide_verdict(exempt=False, pooled_trades=int(pooled_base["trades"]),  # type: ignore[arg-type]
                              c3_expectancy=pooled_dbl["_exp"],  # type: ignore[arg-type]
                              c4_expectancies=[v["_exp"] for v in variants_out],  # type: ignore[misc]
-                             after_the_fact_universe=after_the_fact)
+                             after_the_fact_universe=after_the_fact,
+                             reproducible=all(bool(x["reproducible"]) for x in windows_out))
     for v in variants_out:
         v.pop("_exp")
     pooled_base.pop("_exp")
@@ -727,6 +795,7 @@ def run_validation(inputs: ValidationInputs) -> dict[str, object]:
                                      "buy_hold_chained_return": format(bh_chain.quantize(_Q6), "f"),
                                      "random": pooled_random},
         variants=variants_out, verdict=verdict,
+        effective_variants=sum(1 for v in variants_out if not v["same_as_base"]),
         trials={"param_sets_tried": 1 + (len(variants_out)), "per_window_params": bool(inputs.window_params),
                 "note": "D-077 시도 조합 수 = 기준 1 + ±20% 변형 2P (창별 파라미터 파일이 있으면 그 파일 기준)"},
         runs=len(jobs) + len(rjobs),
@@ -767,16 +836,31 @@ def _write_outputs(inputs: ValidationInputs, out: dict[str, object]) -> None:
 
 def run_final_check(template: BacktestConfig, out_dir: Path, *, final_from: date, end: date, ledger: Path,
                     confirmed_by: str, slippage_pct: Decimal = SLIPPAGE_BASE) -> dict[str, object]:
-    """전략 확정 뒤 1회: final_from ~ end를 기본·2배 슬리피지로 실행. 장부는 실행 전에 기록(실패해도 1회 사용)."""
+    """전략 확정 뒤 1회: final_from ~ end를 기본·2배 슬리피지로 실행. 입력 검사 뒤 장부에 기록하고 실행(검사 통과 뒤 실행 중 실패는 1회 사용으로 남음)."""
+    # 인자를 모두 검사한 뒤에만 장부에 기록한다 — 실패한 입력이 1회 사용을 소모하지 않게 (재검토 L-1)
+    if end < final_from:
+        raise ValidationError(f"종료일 {end}가 최종 확인 시작일 {final_from} 전")
     check_final_guard(final_from, end, final_from, final_check=True)
     if out_dir.exists():
         raise ValidationError(f"결과 폴더가 이미 있음: {out_dir}")
+    if not _LEDGER_APPROVAL.fullmatch(confirmed_by or ""):
+        raise ValidationError("최종 확인은 전략 확정(사용자 선언 A-ID) 뒤에만 실행 (D-163)")
+    if slippage_pct < 0:
+        raise ValidationError("슬리피지는 0 이상")
+    probe = replace(template, final_from=final_from)
+    eval_times_of(probe)
+    days = _run_days(replace(probe, start=final_from, end=end, segment="ALL"))   # 달력 없으면 BacktestError
+    if not days:
+        raise ValidationError("최종 확인 구간에 거래일이 없음")
+    if not any(r.day >= final_from for raw in window_data(template.data, end).values() for r in raw):
+        raise ValidationError("최종 확인 구간에 일봉이 없음")
     claim_final_check(ledger, template.strategy.spec, out_dir.name, confirmed_by=confirmed_by)
     out_dir.mkdir(parents=True)
     w = Window(0, final_from, final_from, final_from, end)
     rows = {}
     for label, s in (("final-base", slippage_pct), ("final-slip2x", slippage_pct * 2)):
-        r = run_window(template, w, label=label, out_dir=out_dir / "runs", slippage_pct=s)
+        r = run_window(probe, w, label=label, out_dir=out_dir / "runs", slippage_pct=s, final_check=True,
+                       ledger=ledger)
         trades = [(t.instrument, t.entry_day.isoformat(), t.exit_day.isoformat(), format(t.pnl, "f"), t.holding_days)
                   for t in r.trades]
         rows[label] = {"metrics": dict(r.metrics), "trades": len(trades), "expectancy": _fmt(_expectancy(trades)),
@@ -814,12 +898,19 @@ def render_validation(o: dict[str, object]) -> str:
           f"| C-2 | 거래 수 | 검증 구간 합산 ≥ {MIN_TRADES} | {pb['trades']}건 | {v['C-2']} |",  # type: ignore[index]
           f"| C-3 | 슬리피지 2배 | {c['slippage_double']}에서 거래당 기대값 > 0 | {_d(pd['expectancy'])}원 "  # type: ignore[index]
           f"({pd['trades']}건) | {v['C-3']} |",  # type: ignore[index]
-          f"| C-4 | 파라미터 ±20% | 모든 변형 거래당 기대값 > 0 [제안 정의] | 변형 {len(var)}개 중 "  # type: ignore[arg-type]
-          f"{sum(1 for x in var if x['expectancy_positive'])}개 > 0 | {v['C-4']} |",  # type: ignore[index, union-attr]
+          f"| C-4 | 파라미터 ±20% | 모든 변형 거래당 기대값 > 0 [제안 정의] | "
+          + (f"변형 {len(var)}개 중 {sum(1 for x in var if x['expectancy_positive'])}개 > 0, "  # type: ignore[arg-type, union-attr]
+             f"유효 변형 {o.get('effective_variants', '—')}/{len(var)}" if var  # type: ignore[arg-type]
+             else "수치 파라미터 없음 — 변형 0개 [제안: 판단 불가]") + f" | {v['C-4']} |",  # type: ignore[index]
           f"| C-5 | 단순 보유 비교 | 같은 기간 나란히 (참고) | 연결 수익률 {o['pooled']['buy_hold_chained_return']} "  # type: ignore[index]
           f"vs 전략 {pb['chained_return']} | 참고 |",
-          f"| C-6 | 무작위 진입 비교 | {c['random_runs']}회 분포 대비 백분위 (참고) [제안] | "  # type: ignore[index]
-          + (f"{pr['strategy_percentile']} 백분위 ({pr['runs']}회)" if pr else "미실행") + " | 참고 |",
+          f"| C-6 | 무작위 진입 비교 | {RANDOM_RUNS}회 분포 대비 백분위 (참고) [제안] | "
+          + (f"{pr['strategy_percentile']} 백분위 ({pr['runs']}회)" if pr else "미실행")
+          + (f" — CP 기준 {RANDOM_RUNS}회 미충족, {c['random_runs']}회" if c["random_runs"] < RANDOM_RUNS else "")  # type: ignore[index, operator]
+          + " | 참고 |",
+          f"| 재현성 | 같은 입력 재실행 지문 (D-074) | 모든 창 같음 | "
+          f"{sum(1 for w in o['windows'] if w['reproducible'])}/{len(o['windows'])} 창 통과 | "  # type: ignore[union-attr, arg-type]
+          f"{v.get('reproducible', '—')} (실패면 판단 불가) |",  # type: ignore[union-attr]
           f"| C-7 | 생존편향 | 사후 선택 목록이면 표시 | {'표시함' if v['banner'] else '판정 시점 목록(표시 없음)'} | "  # type: ignore[index]
           f"{'해당' if v['banner'] else '해당 없음'} |",  # type: ignore[index]
           f"| C-8 | 최종 확인 | {c['final_from']} 이후는 전략 확정 뒤 1회 | 이 실행에서 미사용 | 해당 없음 |", "",  # type: ignore[index]
@@ -841,36 +932,49 @@ def render_validation(o: dict[str, object]) -> str:
           f"- 데이터 `{c['data_version']}` / 설정 해시 `{c['settings_hash']}` / 코드 `{c['code_commit']}`",  # type: ignore[index]
           f"- 최종 확인 구간(D-163): {c['final_from']} 이후 — 사용 안 함, 창 끝 이후 일봉은 실행 전에 잘라냄",  # type: ignore[index]
           "", "## 창별 결과 (기본 슬리피지, 비용 반영 후 — 기간별 일관성 §2.6)", "",
-          "| 창 | 검증 구간 | 거래 | 기대값(원) | 총수익률 | MDD | 미청산 | 2배: 거래·기대값 | 단순 보유 | 무작위 백분위 | 재현성 |",
-          "|---|---|---|---|---|---|---|---|---|---|---|"]
+          "| 창 | 검증 구간 | 거래 | 기대값(원) | 총수익률 | MDD | 미청산 | 평균·최대 투자 비중 | 2배: 거래·기대값 | 단순 보유 "
+          "| 무작위 백분위 | 재현성 |",
+          "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for w in o["windows"]:  # type: ignore[union-attr]
         b, d, bh, r = w["base"], w["slip2x"], w["buy_hold"], w["random"]
         L.append(f"| {w['k']} | {w['validation'][0]}~{w['validation'][1]} ({w['validation'][2]}일) | {b['trades']} | "
                  f"{_d(b['expectancy'])} | {b['total_return']} | {b['max_drawdown']} | {b['open_positions']} | "
+                 f"{_d(b.get('invested_ratio', {}).get('avg'))}·{_d(b.get('invested_ratio', {}).get('max'))} | "
                  f"{d['trades']}·{_d(d['expectancy'])} | {bh['total_return']} | {_d(r['strategy_percentile'])} | "
                  f"{'통과' if w['reproducible'] else '실패'} |")
-    L += [f"| 합산 | | {pb['trades']} | {_d(pb['expectancy'])} | 연결 {pb['chained_return']} | 최악 {pb['worst_mdd']} | | "
+    L += [f"| 합산 | | {pb['trades']} | {_d(pb['expectancy'])} | 연결 {pb['chained_return']} | 최악 {pb['worst_mdd']} | | | "
           f"{pd['trades']}·{_d(pd['expectancy'])} | 연결 {o['pooled']['buy_hold_chained_return']} | "  # type: ignore[index]
           f"{pr['strategy_percentile'] if pr else '—'} | |", "",
           f"## 파라미터 ±20% (D-165, 기본 슬리피지, {len(o['windows'])}개 창 합산)", "",  # type: ignore[arg-type]
+          f"- 유효 변형 {o.get('effective_variants', '—')}/{len(var)} — 모든 창에서 결과 지문이 기준 실행과 같은 변형은 "  # type: ignore[arg-type]
+          "`결과 동일(한도에 묶임 가능)`으로 표시(실제로는 그 파라미터를 시험하지 못함)", "",
           "| 파라미터 | 방향 | 기준 | 변형 값 | 거래 | 기대값(원) | 연결 수익률 | 최악 MDD | 손실 창 | 비고 |",
           "|---|---|---|---|---|---|---|---|---|---|"]
     for x in var:  # type: ignore[union-attr]
         vals = sorted(set(x["values_by_window"].values()))
         L.append(f"| {x['param']} | {x['direction']} | {x['base']} | {', '.join(vals)} | {x['trades']} | "
-                 f"{_d(x['expectancy'])} | {x['chained_return']} | {x['worst_mdd']} | {x['loss_windows']} | {x['note'] or '—'} |")
+                 f"{_d(x['expectancy'])} | {x['chained_return']} | {x['worst_mdd']} | {x['loss_windows']} | "
+                 + "; ".join(n for n in (("결과 동일(한도에 묶임 가능)" if x.get("same_as_base") else ""), x["note"]) if n)
+                 + (" |" if x.get("same_as_base") or x["note"] else "— |"))
     L += ["", "## 비교 (D-166, 참고 — 판정 제외)", "",
           "- 단순 보유: 창 첫 거래일 시가 × (1 + 기본 슬리피지)로 첫날 봉 있는 유니버스 종목을 동일 금액 매수·끝까지 보유, "
-          "매수 비용 반영, 평가는 종가(매도 비용 미반영 — 전략 평가액과 같은 기준). 게이트 한도는 적용하지 않음.",
+          "매수 비용과 창 끝 매도 비용(수수료+세금) 반영, 평가는 종가. 게이트 한도는 적용하지 않음 — 자금을 거의 전부 투자하므로 "
+          "전략의 평균·최대 투자 비중(창별 결과 표)과 규모가 다르다. 수익률을 그대로 비교하지 말 것.",
           "- 무작위 진입: 창마다 전략 기본 실행의 거래별 (보유 거래일 수, 진입 금액, 손절 거리)를 그대로 쓰고 종목·진입일만 "
           "무작위(시드 고정, 같은 종목 구간 겹침 없음). 같은 run_backtest(게이트·한도·비용·슬리피지)로 실행 — 한도 거부로 실제 "
           "거래 수는 전략보다 적을 수 있음. 백분위 = (무작위 수익률 < 전략 + 같음 × ½) / 횟수.",
-          "", "| 창 | 단순 보유 수익률 | 단순 보유 MDD | 제외 종목(첫날 봉 없음) | 무작위 횟수 | 무작위 중앙값 | 무작위 평균 실현 거래 | 자리 못 찾은 거래 |",
-          "|---|---|---|---|---|---|---|---|"]
+          *([f"- **무작위 진입 횟수: CP 기준 {RANDOM_RUNS}회 미충족, {c['random_runs']}회** (`--random-runs`)"]  # type: ignore[index]
+            if c["random_runs"] < RANDOM_RUNS else []),  # type: ignore[index, operator]
+          "", "| 창 | 단순 보유 수익률 | 단순 보유 MDD | 단순 보유 매도 비용 | 전략 평균·최대 투자 비중 | 제외 종목(첫날 봉 없음) "
+          "| 무작위 횟수 | 무작위 중앙값 | 실현 거래(무작위 평균 / 전략) | 자리 못 찾은 거래 |",
+          "|---|---|---|---|---|---|---|---|---|---|"]
     for w in o["windows"]:  # type: ignore[union-attr]
         bh, r = w["buy_hold"], w["random"]
-        L.append(f"| {w['k']} | {bh['total_return']} | {bh['max_drawdown']} | {len(bh['excluded'])} | {r['runs']} | "
-                 f"{_d(r['return_median'])} | {_d(r['realized_trades_mean'])} (전략 {w['base']['trades']}) | {r['unplaced_total']} |")
+        ir = w["base"].get("invested_ratio", {})
+        L.append(f"| {w['k']} | {bh['total_return']} | {bh['max_drawdown']} | {_d(bh.get('sell_costs'))} | "
+                 f"{_d(ir.get('avg'))}·{_d(ir.get('max'))} | {len(bh['excluded'])} | {r['runs']} | "
+                 f"{_d(r['return_median'])} | {_d(r['realized_trades_mean'])} / {r.get('strategy_trades', w['base']['trades'])} | "
+                 f"{r['unplaced_total']} |")
     L += ["", "## 판정 시각별 체결 시각 (trades.csv 진입·청산 일시, 기본 실행)", "",
           "| 창 | 시각별 건수 |", "|---|---|"]
     L += [f"| {w['k']} | {', '.join(f'{t} × {n}' for t, n in w['eval_stamps'].items()) or '—'} |"
