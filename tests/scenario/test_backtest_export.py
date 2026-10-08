@@ -162,3 +162,31 @@ def test_multi_eval_fill_times(tmp_path: Path) -> None:
     s = json.loads((d / "summary.json").read_text(encoding="utf-8"))
     assert s["eval_times"] == ["09:05", "14:30"]
     assert s["digest"] == r.digest
+
+
+def test_trade_rows_partial_increase_decrease_same_day_reentry() -> None:
+    """재검토(2026-10-08) 중간: 왕복 집계를 부분 체결·증액·감액·같은 날 재진입·미청산으로 손계산과 대조 (가상 체결)."""
+    from datetime import date
+
+    from trading_system.app.backtest_export import FillDetail, trade_rows
+
+    d1, d2, d3 = date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7)
+    fills = [
+        (d1, "1", "A", "BUY", "10", "100"), (d1, "1", "A", "BUY", "5", "101"),   # 같은 주문 부분 체결 2건
+        (d2, "2", "A", "SELL", "5", "102"),                                      # 감액
+        (d2, "3", "A", "BUY", "5", "104"),                                       # 증액
+        (d2, "4", "B", "BUY", "3", "50"),                                        # 끝까지 미청산
+        (d3, "5", "A", "SELL", "15", "103"),                                     # 전량 청산 → 1번째 왕복
+        (d3, "6", "A", "BUY", "10", "103"), (d3, "7", "A", "SELL", "10", "105"),  # 같은 날 재진입·청산
+    ]
+    details = [FillDetail(f"{d.isoformat()} 09:05", r) for (d, *_), r in zip(fills, [
+        "ENTRY", "ENTRY", "TRIM", "ADD", "ENTRY", "EXIT-2", "ENTRY", "STOP"], strict=True)]
+    cost = lambda amount, sell: Decimal("2") if sell else Decimal("1")  # noqa: E731 — 손계산용 고정 비용
+    rows, n_open = trade_rows(fills, details, cost, lambda a, b: (b - a).days, d3)
+    assert n_open == 1
+    assert rows == [
+        # 매수 1000+505+520=2025/20주, 매도 510+1545=2055/20주, 비용 매수 3건×1 + 매도 2건×2 = 7, 손익 2055−2025−7=23
+        ("A", "2026-01-05 09:05", "2026-01-07 09:05", "101.25", "102.75", "20", "23", "7", "2", "EXIT-2"),
+        ("A", "2026-01-07 09:05", "2026-01-07 09:05", "103.00", "105.00", "10", "17", "3", "0", "STOP"),
+        ("B", "2026-01-06 09:05", "", "50.00", "", "3", "", "1", "1", OPEN_REASON),
+    ]
