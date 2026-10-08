@@ -72,7 +72,8 @@ AUTO_ACTOR = "autopilot"
 # 종료 코드 (A-084) — 모듈 설명 참조
 EXIT_OK, EXIT_PROBLEMS, EXIT_REFUSED, EXIT_ABORTED = 0, 1, 2, 3
 EXIT_HELP = ("종료 코드: 0 정상 | 1 하루를 돌았으나 문제 있음(요약의 '확인 필요') | 2 run 시작 전 거부·중단 "
-             "| 3 run 시작 뒤 중단. 사유는 var/paper/logs/autopilot-YYYYMMDD.log")
+             "| 3 run 시작 뒤 중단 또는 처리하지 못한 예외(traceback은 일 로그, 못 쓰면 autopilot-fatal.log). "
+             "사유는 var/paper/logs/autopilot-YYYYMMDD.log")
 AUTOPILOT_FALLBACK = "alerts-fallback-autopilot.log"   # A-084: 자동 운영 알림 최종 실패 기록 (var/paper/logs)
 RETRY_AFTER_CAP_SECONDS = 60.0                         # A-084: 429 Retry-After 대기 상한(초)
 # 사람이 확인·재개하는 정지 — 걸려 있으면 K8 자동 재개 명령을 넣지 않는다(A-078). K9(전략 범위)는 다른 전략을 막지 않고
