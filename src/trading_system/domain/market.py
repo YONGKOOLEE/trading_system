@@ -120,18 +120,25 @@ class CostRates:
 
     commission_rate: Decimal  # 매수·매도 공통 수수료율
     sell_tax_rate: Decimal    # 매도 시 세금 요율
+    # 비용 추정 올림 단위. None = 원 미만 올림(M1, 03 D-065 — 기존 동작 그대로).
+    # M2는 호가 자산 자릿수(quoteAssetPrecision, 예: 0.00000001)로 올림 (CP-024 D-118, T-M2-07)
+    cost_quantum: Decimal | None = None
 
     def __post_init__(self) -> None:
         for n in ("commission_rate", "sell_tax_rate"):
             if _dec(n, getattr(self, n)) < 0:
                 raise ValueError(f"{n}은 0 이상이어야 한다")
+        if self.cost_quantum is not None and _dec("cost_quantum", self.cost_quantum) <= 0:
+            raise ValueError("cost_quantum은 0보다 커야 한다")
 
 
 def estimate_cost(amount: Decimal, is_sell: bool, rates: CostRates) -> Decimal:
-    """주문 금액의 추정 비용. 원 미만 올림 (03 D-065, 02 §2.2)."""
+    """주문 금액의 추정 비용. 올림(보수): M1 원 미만 올림 (03 D-065, 02 §2.2), M2 cost_quantum 자릿수 올림 (D-118)."""
     _dec("amount", amount)
     rate = rates.commission_rate + (rates.sell_tax_rate if is_sell else Decimal("0"))
-    return (amount * rate).to_integral_value(rounding=ROUND_CEILING)
+    if rates.cost_quantum is None:
+        return (amount * rate).to_integral_value(rounding=ROUND_CEILING)
+    return (amount * rate).quantize(rates.cost_quantum, rounding=ROUND_CEILING)
 
 
 @dataclass(frozen=True)
