@@ -27,6 +27,8 @@
 - (3) 기준선 설정 = set_baseline(사람 확정, D-103 최초 시작·리셋 확인). 감사 기록 SPOT_QUOTE_BASELINE으로 남기고
   재시작 때 마지막 값을 복원한다. 기준선 확정 절차·대조(K4)는 T-M2-06.
 - (4) 기준 금액은 일 경계 이후에 조회한 거래소 잔고로만 정한다(경계 이전 조회값 거부). 같은 거래일의 첫 성공 값으로 고정.
+  조회 시각 이후(같은 시각 포함) 체결이 있으면 정하지 않는다 — 현금은 조회 시점, 평가액은 현재 포지션이라 매도가
+  끼면 가짜 이익으로 L4가 가려진다(재검토 2026-10-08). 다음 조회 뒤 다시 정한다.
 - (5) "유니버스 보유"는 이 계좌의 내부 포지션(수량 > 0) 전체로 본다. 평가 가격을 모르면 기준 금액을 정하지 않는다.
 """
 
@@ -178,6 +180,8 @@ class SpotAccountFacts:
         bal = self._fresh_balance(account)
         if bal is None or bal.at < boundary:  # [제안](4) 일 경계 이전 조회값으로 정하지 않음
             return None
+        if self._has_fill_since(account, bal.at):  # 조회 뒤 체결: 현금(조회 시점)·평가액(현재) 시점 불일치
+            return None
         value = self._positions_value(account)
         if value is None or bal.total + value <= 0:
             return None
@@ -212,6 +216,11 @@ class SpotAccountFacts:
         if bal is None or self._clock.now() - bal.at > self._max_age:
             return None
         return bal
+
+    def _has_fill_since(self, account: str, since: datetime) -> bool:
+        rows = self._repo.select(
+            "SELECT f.at FROM fill f JOIN broker_order b ON f.order_key=b.order_key WHERE b.account=?", (account,))
+        return any(from_iso(r["at"]) >= since for r in rows)
 
     def _positions_value(self, account: str) -> Decimal | None:
         total = _ZERO

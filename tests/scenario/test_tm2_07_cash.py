@@ -257,6 +257,33 @@ def test_v140_start_day_requires_balance_after_boundary(env: M2Env) -> None:
     assert facts(env).daily_risk(ACCOUNT) is None
 
 
+def test_v140_start_day_refuses_when_fill_after_balance_query(env: M2Env) -> None:
+    """재검토 높음(2026-10-08): 잔고 조회(bal.at)와 start_day 사이 체결 → 현금(조회 시점)과 평가액(현재)이 어긋나
+    매도면 가짜 이익으로 L4가 가려진다. 그 사이 체결이 있으면 기준 금액을 정하지 않는다(다음 조회 뒤 다시)."""
+    at(env, T0)
+    open_day(env)
+    assert run(env, signal(env, RequestType.ENTRY)).result is GateResult.APPROVED
+    held = env.repo.position(ACCOUNT, "TSTA-USDT").quantity
+    f = facts(env)
+    at(env, DAY_START + timedelta(days=1, seconds=10))
+    balance(env, "8995")
+    at(env, DAY_START + timedelta(days=1, seconds=20))
+    sold = run(env, signal(env, RequestType.EXIT, quantity=str(held), evaluation="e-exit"))
+    assert sold.result is GateResult.APPROVED, sold.reason
+    assert env.repo.position(ACCOUNT, "TSTA-USDT").quantity == 0
+    at(env, DAY_START + timedelta(days=1, seconds=30))
+    assert f.start_day(ACCOUNT) is None
+    assert f.daily_risk(ACCOUNT) is None  # 기준 미고정 → 위험 확대 거부
+    assert not [e for e in env.repo.audit_events() if e["kind"] == "DAILY_BASE"
+                and json.loads(e["summary"])["trade_date"] == "2026-10-08"]
+    # 체결 뒤 새로 조회한 잔고로는 정한다: 현금·평가액이 같은 시점 → 당일 손익 0에서 시작
+    balance(env, "9993")
+    base = f.start_day(ACCOUNT)
+    assert base == Decimal("9993")
+    risk = f.daily_risk(ACCOUNT)
+    assert risk is not None and risk.loss_ratio == 0
+
+
 def test_v140_l4_daily_loss_splits_at_utc_midnight_not_kst(env: M2Env) -> None:
     at(env, T0)
     open_day(env)
