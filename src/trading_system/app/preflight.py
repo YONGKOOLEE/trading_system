@@ -5,8 +5,10 @@
 - 토큰 발급(au10001) → 사용할 조회 API 1회씩(8104 = 모의 미지원 확인) → 시작 대조 → 토큰 폐기(au10002).
 - HTTP 경계(GuardedHttp)에서 주문 API(kt10000~kt10003, 주문 경로)를 **전송 전에** 막는다. 이 경로로는 주문이 나갈 수 없다.
 - 기록은 API별 호출 결과(HTTP 상태·코드·분류)와 건수만 남긴다. 응답 본문·금액·앱키·토큰·계좌번호는 남기지 않는다.
-- 시계(SNTP): 외부 연결 승인 A-042에 따라 설정의 sntp_servers에 1회 질의한다(조회만). 오차 1초 초과는 실패,
-  모든 서버 무응답은 경고(판정 불가 — 본 프로세스의 ClockMonitor가 K6로 막는다). 결과는 clock_check에 남는다.
+- 시계(SNTP): 외부 연결 승인 A-042에 따라 설정의 sntp_servers에 질의한다(조회만, 서버당 표본 3개 중 왕복 지연 최소
+  표본으로 판정 — A-084). 오차 1초 초과는 실패, 모든 서버 무응답은 경고(판정 불가 — 본 프로세스의 ClockMonitor가
+  K6로 막는다). 결과는 clock_check에 남는다.
+- 달력: 올해 달력이 없으면 경고. 오늘+30일이 달력 없는 다음 해로 넘어가면 경고(실패 아님, A-084·X-U3).
 - 본 프로세스(run)가 살아 있으면(하트비트 30초 이내) 연결 전에 거부한다. 점검 끝의 토큰 폐기가 실행 중인
   엔진의 토큰을 무효화할 수 있기 때문이다 (검토 RV-15·RV-17).
 """
@@ -38,7 +40,7 @@ from trading_system.marketdata.calendar import KrxCalendar
 from trading_system.marketdata.errors import MarketDataError
 from trading_system.marketdata.kiwoom_feed import KiwoomMarketFeed
 from trading_system.marketdata.store import MarketDataStore
-from trading_system.monitoring.sntp import TOLERANCE_SECONDS, ClockMonitor, SntpError, query_offset
+from trading_system.monitoring.sntp import TOLERANCE_SECONDS, ClockMonitor, SntpError, SntpSample, query_sample
 from trading_system.reconciliation.reconciler import Reconciler
 from trading_system.storage.jsonlog import Masker
 from trading_system.storage.repository import Repository
@@ -49,6 +51,7 @@ ORDER_API_IDS = frozenset({"kt10000", "kt10001", "kt10002", "kt10003"})
 # 이 시스템이 쓰는 조회 API (adapter: 예수금·잔고·주문·미체결, kiwoom_feed: 일봉·시세·종목 정보·VI)
 QUERY_APIS = ("kt00001", "kt00018", "kt00009", "ka10075", "ka10081", "ka10001", "ka10099", "ka10054")
 PROBE_DEFAULT = "005930"   # 배포 설정에 종목이 없을 때 시세 조회에 쓸 종목 (조회만)
+CALENDAR_AHEAD_DAYS = 30   # A-084: 다음 해 달력 사전 경고 기간(일)
 SECRET_KEYS = ("KIWOOM_PAPER_APP_KEY", "KIWOOM_PAPER_SECRET_KEY", "KIWOOM_PAPER_ACCOUNT_NO",
                "KIWOOM_PAPER_ACCOUNT_ALIAS")
 
@@ -132,6 +135,7 @@ class PreflightReport:
     order_api_blocked: list[str] = field(default_factory=list)
     clock_offset: str | None = None      # SNTP 오차(초). 판정 불가면 None
     clock_source: str | None = None
+    clock_delay: str | None = None       # 채택한 표본의 왕복 지연(초) (A-084)
     warnings: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
 
@@ -322,20 +326,23 @@ def engine_alive(heartbeat: Path, now: datetime) -> str | None:
     return None
 
 
-def _sntp_query(query: Callable[[str, int], Decimal] | None) -> Callable[[str, int], Decimal]:
+SntpQuery = Callable[[str, int], Decimal | SntpSample]
+
+
+def _sntp_query(query: SntpQuery | None) -> SntpQuery:
     if query is not None:
         return query
 
-    def ask(host: str, port: int) -> Decimal:
+    def ask(host: str, port: int) -> SntpSample:
         if host.lower().rstrip(".").endswith(".invalid"):  # RFC 6761 예약 이름: 소켓을 열지 않는다
             raise SntpError(f"{host}:{port} 예약된 이름(.invalid) — 조회하지 않음")
-        return query_offset(host, port)
+        return query_sample(host, port)
     return ask
 
 
 def check_clock(rep: PreflightReport, repo: Repository, clock: Clock, servers: list[tuple[str, int]],
-                query: Callable[[str, int], Decimal] | None = None) -> None:
-    """SNTP 1회 점검 (승인 A-042, 조회만). 오차 1초 초과 → 실패, 모든 서버 무응답 → 경고."""
+                query: SntpQuery | None = None) -> None:
+    """SNTP 점검 1회 (승인 A-042, 조회만; 서버당 표본 3개 — A-084). 오차 1초 초과 → 실패, 모든 서버 무응답 → 경고."""
     if not servers:
         rep.warnings.append("시계(SNTP) 미점검 — 설정에 sntp_servers 없음")
         return
@@ -349,14 +356,15 @@ def check_clock(rep: PreflightReport, repo: Repository, clock: Clock, servers: l
         rep.warnings.append(f"시계(SNTP) 판정 불가 — 모든 서버 무응답: {_masked(Exception(res.source))}")
         return
     rep.clock_offset = str(res.offset)
+    rep.clock_delay = None if res.delay is None else str(res.delay)
     if not res.ok:
-        rep.failures.append(f"시계 오차 {res.offset}초 > 허용 {TOLERANCE_SECONDS}초 ({res.source}) — PC 시간 동기화 후 재점검")
+        rep.failures.append(f"시계 오차 {res.offset}초 > 허용 {TOLERANCE_SECONDS}초 ({res.detail}) — PC 시간 동기화 후 재점검")
 
 
 def preflight_main(root: Path, environ: Mapping[str, str] | None = None, *, rest_url: str = MOCK_REST,
                    ws_url: str = MOCK_WS, clock: Clock | None = None, probe_code: str | None = None,
                    per_tr_interval: float = 1.1,
-                   sntp_query: Callable[[str, int], Decimal] | None = None) -> int:
+                   sntp_query: SntpQuery | None = None) -> int:
     clock = clock or SystemClock()
     if instance_running(root / "var" / "paper"):   # 시작 직후(하트비트 전)도 막는다 (RV-15)
         return _refuse("PAPER 엔진이 실행 중(실행 잠금 보유) — 동시에 점검하지 않는다. 엔진 종료 후 다시 실행")
@@ -381,8 +389,12 @@ def preflight_main(root: Path, environ: Mapping[str, str] | None = None, *, rest
         check_clock(rep, repo, clock, list(app.sntp_servers), sntp_query)
     finally:
         repo.close()
-    if calendar.session(clock.now().astimezone(KST).date()) is None:
+    today = clock.now().astimezone(KST).date()
+    if calendar.session(today) is None:
         rep.warnings.append("올해 시장 달력 없음(config/calendar) — 운영 시 모든 주문 거부. X-U3 작성 필요")
+    missing = calendar.missing_year_within(today, CALENDAR_AHEAD_DAYS)
+    if missing is not None:   # A-084: 실패가 아니라 경고 — 새해 첫 거래일 전에 작성할 시간을 준다
+        rep.warnings.append(f"다음 해 달력 없음 — config/calendar/krx-{missing}.toml을 {missing}-01-01 전에 작성 (X-U3)")
     _write(base, rep, clock.now())
     _print(rep)
     return 0 if rep.ok else 1
@@ -405,7 +417,8 @@ def _print(rep: PreflightReport) -> None:
         detail = f", {a.error_class} 코드 {a.code} {a.message}" if a.error_class else ""
         print(f"  {a.api_id}: {'정상' if a.ok else '실패'} (호출 {a.calls}회{detail})")
     print(f"  시작 대조: {rep.reconcile or '안 함'}")
-    print(f"  시계(SNTP): {'오차 ' + rep.clock_offset + '초 (' + (rep.clock_source or '') + ')' if rep.clock_offset else '판정 불가'}")
+    delay = f", 지연 {rep.clock_delay}초" if rep.clock_delay else ""
+    print(f"  시계(SNTP): {'오차 ' + rep.clock_offset + '초' + delay + ' (' + (rep.clock_source or '') + ')' if rep.clock_offset else '판정 불가'}")
     print(f"  주문 API 전송: 0건{' (차단 ' + str(len(rep.order_api_blocked)) + '회)' if rep.order_api_blocked else ''}")
     for w in rep.warnings:
         print(f"  경고: {w}")

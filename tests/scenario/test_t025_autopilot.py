@@ -80,6 +80,12 @@ class FakeRun:
         self.started = False
         self.code: int | None = None
         self.stopped_by_file = False
+        self.frozen = False      # A-084: True면 step()을 건너뛴다(하트비트도 안 씀) — run 멈춤 시험
+
+    def step(self) -> None:
+        if self.frozen:
+            return
+        self._step()
 
     def alive(self) -> bool:
         return self.code is None
@@ -87,7 +93,7 @@ class FakeRun:
     def exit_code(self) -> int | None:
         return self.code
 
-    def step(self) -> None:
+    def _step(self) -> None:
         if self.code is not None:
             return
         stop = self.base / STOP_REQUEST
@@ -218,7 +224,9 @@ def test_v201_non_paper_refused_before_anything(tmp_path: Path, capsys: pytest.C
                                                 env: dict, expect: str) -> None:
     assert autopilot_main([*argv, "--root", str(tmp_path)], environ=env) == 2
     assert expect in capsys.readouterr().out
-    assert not (tmp_path / "var").exists()           # 저장소·로그·잠금 어느 것도 만들지 않음
+    # A-084 항목 2: 거부 사유는 일 로그(var/paper/logs)에 남긴다 — 저장소·잠금은 여전히 만들지 않음
+    assert not (tmp_path / "var" / "paper" / "trading.db").exists()
+    assert not (tmp_path / "var" / "paper" / AUTOPILOT_LOCK).exists()
 
 
 def test_v201_missing_mode_refused(tmp_path: Path) -> None:
@@ -226,7 +234,7 @@ def test_v201_missing_mode_refused(tmp_path: Path) -> None:
         autopilot_main(["--root", str(tmp_path)], environ={})
     assert e.value.code == 2
     assert mode_refusal(None, {}) is not None
-    assert not (tmp_path / "var").exists()
+    assert not (tmp_path / "var").exists()           # 인자 오류는 argparse가 끝낸다 — 로그도 없음
 
 
 @pytest.mark.parametrize("mode", [Mode.LIVE, Mode.BACKTEST])
@@ -249,13 +257,13 @@ def test_v202_holiday_exits_with_one_line(tmp_path: Path) -> None:
 
 def test_v202_late_start_after_deadline_does_nothing(tmp_path: Path) -> None:
     r = Rig(tmp_path, start=kst(9, 10))
-    assert r.ap.run() == 1
+    assert r.ap.run() == 2                                  # A-084 항목 5: run 시작 전 거부 = 2 (전에는 1)
     assert r.events == [] and "08:55" in r.text()
 
 
 def test_v202_missing_calendar_refused(tmp_path: Path) -> None:
     r = Rig(tmp_path, start=kst(6, 45, d=date(2027, 1, 4)))
-    assert r.ap.run() == 1
+    assert r.ap.run() == 2                                  # A-084 항목 5: run 시작 전 거부 = 2
     assert r.events == [] and "달력" in r.text()
 
 
@@ -263,7 +271,7 @@ def test_v202_missing_calendar_refused(tmp_path: Path) -> None:
 
 def test_v203_preflight_failure_no_run_and_alert(tmp_path: Path) -> None:
     r = Rig(tmp_path, preflight_rc=1)
-    assert r.ap.run() == 1
+    assert r.ap.run() == 2                                  # A-084 항목 5: 시작 점검 실패 = run 미시작 거부 = 2
     assert r.events == ["preflight"]
     assert any(lv == "EMERGENCY" and "시작 점검 실패" in t and "시계 오차" in t for lv, t in r.notes), r.notes
     assert not (r.base / "trading.db").exists() or r.auto_commands() == []
@@ -392,7 +400,7 @@ def test_v208_close_reconcile_missing_waits_then_stops_with_warning(tmp_path: Pa
 def test_v208_run_dies_midday_alerts_and_still_reviews(tmp_path: Path) -> None:
     r = Rig(tmp_path)
     r.hooks.append((kst(11, 0), lambda: kill_now(r)))
-    assert r.ap.run() == 1
+    assert r.ap.run() == 3                                  # A-084 항목 5: run 시작 뒤 중단 = 3 (전에는 1)
     assert any(lv == "EMERGENCY" and "run 프로세스가 종료" in t for lv, t in r.notes), r.notes
     assert r.events[-2:] == ["review alive=False", "backup"]
     assert r.clock.now() < kst(12, 0)                    # 15:45를 기다리지 않음
@@ -524,7 +532,7 @@ def test_v213_autopilot_crash_alerts_writes_stop_and_logs_traceback(tmp_path: Pa
         raise RuntimeError("가상 결함")
 
     r.hooks.append((kst(10, 0), boom))
-    assert r.ap.run() == 1
+    assert r.ap.run() == 3                                  # A-084 항목 5: run 시작 뒤 자동 운영 결함 = 3
     assert any(lv == "EMERGENCY" and "자동 운영 오류" in t and "RuntimeError" in t for lv, t in r.notes), r.notes
     assert (r.base / STOP_REQUEST).exists()               # run에 정지 요청
     assert any("Traceback" in m for m in r.logs)          # pythonw에는 표준 오류가 없으므로 일 로그에
@@ -582,7 +590,7 @@ def test_v215_dotenv_trade_mode_must_be_paper(tmp_path: Path, capsys: pytest.Cap
     assert autopilot_main(["--mode", "PAPER", "--root", str(tmp_path)], environ={}) == 2
     out = capsys.readouterr().out
     assert expect in out and "PAPER" in out, out
-    assert not (tmp_path / "var").exists()
+    assert not (tmp_path / "var" / "paper" / "trading.db").exists()   # A-084 항목 2: 일 로그만 생김
 
 
 # --- V-216 자동 운영 알림 가림 처리 --------------------------------------------------------------------------
@@ -590,7 +598,7 @@ def test_v215_dotenv_trade_mode_must_be_paper(tmp_path: Path, capsys: pytest.Cap
 def test_v216_notifications_are_masked(tmp_path: Path) -> None:
     r = Rig(tmp_path, preflight_rc=1)
     r.preflight_text = "  실패: 계좌 12345678 조회 거부 token=abcd1234efgh\n결과: 실패"
-    assert r.ap.run() == 1
+    assert r.ap.run() == 2                                  # A-084 항목 5: 시작 점검 실패 = 2
     text = r.text()
     assert "12345678" not in text and "abcd1234efgh" not in text and "실패" in text, text
 

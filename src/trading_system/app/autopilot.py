@@ -19,6 +19,19 @@
 자동 운영은 주문하지 않는다. 주문·정지·재개 판정은 모두 run(엔진·게이트·정지 관리자)이 기존 경로로 한다(CLAUDE.md §8-2).
 자동 운영의 알림은 텔레그램으로 직접 보낸다(감사 ALERT에 쓰지 않음 — run이 꺼진 뒤 다음 실행 때 밀린 알림으로 다시
 보내지지 않게). 모든 진행은 var/paper/logs/autopilot-YYYYMMDD.log에 남는다(비밀값 없음, 가림 처리).
+
+운영 보강 (사용자 결정 A-084, 2026-10-08):
+  - 거부 사유(모드·설정)는 일 로그에 먼저 남기고, .env.paper의 텔레그램 키를 읽을 수 있으면 경고 1건을 보낸다.
+  - 알림 전송 최종 실패는 var/paper/logs/alerts-fallback-autopilot.log에 남기고 종료 전 1회 재전송한다.
+    429(전송 제한)는 Retry-After만큼(상한 60초) 기다린다.
+  - 오늘+30일이 달력 없는 다음 해로 넘어가면 경고(실패 아님) — X-U3.
+  - 장중 하트비트 멈춤이 같은 날 회복되면 "확인 필요"로 세지 않는다(진행 메모에는 남긴다).
+
+종료 코드 (A-084):
+  0 = 정상 (휴장일 포함)
+  1 = 하루를 돌았으나 문제 있음 (K8 자동 재개 못 함, 마감 대조 미완료·불일치, 하트비트 멈춤 미회복, paper-review·백업 실패)
+  2 = run 시작 전 거부·중단 (PAPER 아님, 설정 오류, 달력 없음, 늦은 시작, 중복 실행, 시작 점검 실패)
+  3 = run 시작 뒤 중단 (run 조기 종료, 자동 운영 결함)
 """
 
 from __future__ import annotations
@@ -52,8 +65,15 @@ from trading_system.storage.repository import Repository
 
 from .instance_lock import AUTOPILOT_LOCK, InstanceLocked, acquire_instance_lock, instance_running
 from .main import STOP_REQUEST
+from .supervisor import write_fallback
 
 AUTO_ACTOR = "autopilot"
+# 종료 코드 (A-084) — 모듈 설명 참조
+EXIT_OK, EXIT_PROBLEMS, EXIT_REFUSED, EXIT_ABORTED = 0, 1, 2, 3
+EXIT_HELP = ("종료 코드: 0 정상 | 1 하루를 돌았으나 문제 있음(요약의 '확인 필요') | 2 run 시작 전 거부·중단 "
+             "| 3 run 시작 뒤 중단. 사유는 var/paper/logs/autopilot-YYYYMMDD.log")
+AUTOPILOT_FALLBACK = "alerts-fallback-autopilot.log"   # A-084: 자동 운영 알림 최종 실패 기록 (var/paper/logs)
+RETRY_AFTER_CAP_SECONDS = 60.0                         # A-084: 429 Retry-After 대기 상한(초)
 # 사람이 확인·재개하는 정지 — 걸려 있으면 K8 자동 재개 명령을 넣지 않는다(A-078). K9(전략 범위)는 다른 전략을 막지 않고
 # 교체로 중지된 이전 버전에 계속 남으므로 제외한다(CP-029 결정 필요 Q-3). K5·K6·K10·K11은 조건 충족 시 자동 해제 유형
 HUMAN_HALTS = frozenset({HaltType.K1, HaltType.K2, HaltType.K3, HaltType.K4, HaltType.K7})
@@ -101,6 +121,7 @@ class Schedule:
     heartbeat_stale: timedelta = timedelta(seconds=90)  # 하트비트 멈춤 판정 (감시 스레드 5초 주기)
     poll_seconds: float = 5.0                          # K8·마감 단계 확인 간격
     day_poll_seconds: float = 30.0                     # 장중 감시 간격
+    calendar_ahead_days: int = 30                      # 다음 해 달력 사전 경고 기간 (A-084)
 
 
 class RunHandle(Protocol):
@@ -154,20 +175,20 @@ class Autopilot:
         session = self.calendar.session(day)
         if session is None:
             self._notify("WARNING", f"{day} 시장 달력 없음(config/calendar) — 자동 운영 안 함, 오늘 매매 없음")
-            return 1
+            return EXIT_REFUSED
         if not session.is_open:
             self._notify("INFO", f"{day} 휴장일 — 자동 운영 쉼")
-            return 0
+            return EXIT_OK
         deadline = _at(day, self.s.k8_deadline)
         if now >= deadline:
             self._notify("WARNING", f"늦은 시작({_hm(now)}) — K8 재개 시한 {self.s.k8_deadline:%H:%M}이 지나 자동 운영 "
                                     f"안 함, 오늘 매매 없음")
-            return 1
+            return EXIT_REFUSED
         try:
             lock = acquire_instance_lock(self.base, AUTOPILOT_LOCK)
         except InstanceLocked:
             self._notify("WARNING", "자동 운영이 이미 실행 중 — 두 번째 실행 거부")
-            return 2
+            return EXIT_REFUSED
         try:
             if instance_running(self.base):
                 started = self._read(self._last_start_day)
@@ -176,9 +197,9 @@ class Autopilot:
                     self._write_stop("이전 거래일 run")
                     self._notify("EMERGENCY", f"어제 run이 아직 실행 중(시작 {started}) — 정지 요청 파일 작성. 오늘 자동 운영 "
                                               f"안 함(오늘 매매 없음). PC에서 종료 확인 후 수동 절차 또는 다음 거래일")
-                    return 2
+                    return EXIT_REFUSED
                 self._notify("WARNING", "run이 이미 실행 중(수동 실행?) — 자동 운영 안 함(시작 점검·run 시작 없음)")
-                return 2
+                return EXIT_REFUSED
             return self._day(day, session, deadline)
         finally:
             lock.release()
@@ -199,12 +220,16 @@ class Autopilot:
         return True
 
     def _day(self, day: date, session: SessionInfo, deadline: datetime) -> int:
+        missing = self.calendar.missing_year_within(day, self.s.calendar_ahead_days)
+        if missing is not None:   # A-084: 경고만 — 오늘 운영은 그대로
+            self._notify("WARNING", f"다음 해 달력 없음 — config/calendar/krx-{missing}.toml을 {missing}-01-01 전에 작성 "
+                                    f"(없으면 새해 첫 거래일부터 자동 운영 거부·모든 주문 거부, X-U3)")
         rc, out = self.d.preflight()
         self.d.log(f"시작 점검 출력:\n{out}")
         if rc != 0:
             lines = [ln.strip() for ln in out.splitlines() if "실패" in ln or "거부" in ln][:6]
             self._notify("EMERGENCY", "시작 점검 실패(코드 %d) — run 시작 안 함, 오늘 매매 없음\n%s" % (rc, "\n".join(lines)))
-            return 1
+            return EXIT_REFUSED
         self._note("시작 점검 통과")
         stop_file = self.base / STOP_REQUEST
         if stop_file.exists():
@@ -223,7 +248,7 @@ class Autopilot:
             self._notify("EMERGENCY", f"자동 운영 오류 {type(exc).__name__} — "
                                       f"{'run에 정지 요청 파일 작성(정상 종료 경로)' if stopped else 'run은 실행 중 아님'}. "
                                       f"종료 절차·요약 없음, PC에서 var/paper/logs/autopilot 로그 확인")
-            return 1
+            return EXIT_ABORTED
 
     def _after_launch(self, run: RunHandle, day: date, session: SessionInfo, deadline: datetime,
                       launched: datetime) -> int:
@@ -236,7 +261,7 @@ class Autopilot:
             # 확인과 시작 사이에 수동 run이 켜져 자식 run이 실행 잠금에 막힘 — 사망이 아니라 경합 (재검토 L6)
             self._notify("WARNING", "수동 run이 이미 실행 중 — 자동 운영 중단(자식 run은 실행 잠금에 막혀 종료). "
                                     "paper-review·백업은 수동 절차로")
-            return 2
+            return EXIT_REFUSED
         if outcome == "DIED" or not self._day_phase(run, stop_at):
             return self._finish(run, day, died=True)
         if outcome != "RESUMED":
@@ -353,6 +378,9 @@ class Autopilot:
                 self._notify("EMERGENCY", f"run 하트비트 멈춤: {hb.detail} — 자동 재시작 없음, PC·/status 확인")
             elif hb.alive and stale:
                 stale = False
+                if "하트비트 멈춤" in self.problems:   # A-084: 같은 날 회복하면 "확인 필요"로 세지 않는다 (메모에는 남김)
+                    self.problems.remove("하트비트 멈춤")
+                self._note("하트비트 멈춤 → 회복됨")
                 self._notify("INFO", "run 하트비트 회복")
             self.d.sleep(min(self.s.day_poll_seconds, max(1.0, (stop_at - now).total_seconds())))
 
@@ -428,7 +456,9 @@ class Autopilot:
         if self.problems:
             text += "\n확인 필요: " + ", ".join(self.problems)
         self._notify("INFO", text)
-        return 1 if self.problems else 0
+        if died:
+            return EXIT_ABORTED
+        return EXIT_PROBLEMS if self.problems else EXIT_OK
 
     # --- 보조 ---------------------------------------------------------------------------------
     def _read(self, fn: Callable[[Repository], object]):  # type: ignore[no-untyped-def]
@@ -506,24 +536,60 @@ def _say(text: str) -> None:
 
 
 class TelegramNotify:
-    """자동 운영 알림을 텔레그램으로 직접 보낸다(최대 3회 시도). 실패는 로그에만 — 토큰은 오류 문구에 없다."""
+    """자동 운영 알림을 텔레그램으로 직접 보낸다(최대 3회 시도, 429는 Retry-After만큼·상한 60초 대기). 토큰은 오류 문구에 없다.
+
+    최종 실패(A-084): fallback 파일(var/paper/logs/alerts-fallback-autopilot.log)에 남기고, 메시지 자체가 거부된 것(400)이
+    아니면 큐에 두었다가 종료 전 flush()로 1회씩 다시 보낸다."""
 
     def __init__(self, api, chat: str, log: Callable[[str], None],  # type: ignore[no-untyped-def]
-                 sleep: Callable[[float], None] = _time.sleep) -> None:
+                 sleep: Callable[[float], None] = _time.sleep, *, fallback: Path | None = None,
+                 attempts: int = 3) -> None:
         self._api, self._chat, self._log, self._sleep = api, chat, log, sleep
+        self._fallback = fallback
+        self._attempts = attempts
+        self.failed: list[str] = []
 
     def __call__(self, level: str, text: str) -> None:
-        from trading_system.ops.telegram import TelegramError
         msg = Masker().text(f"[{LEVEL_KO.get(level, level)}] [자동 운영] {text}")
-        for i in range(3):
+        sent, permanent = self._send(msg, self._attempts)
+        if sent:
+            return
+        write_fallback(self._fallback, msg)
+        self._log(f"텔레그램 전송 최종 실패 — {AUTOPILOT_FALLBACK}에 기록"
+                  + ("(메시지 거부, 재전송 안 함)" if permanent else ", 종료 전 1회 재전송"))
+        if not permanent:
+            self.failed.append(msg)
+
+    def _send(self, msg: str, attempts: int) -> tuple[bool, bool]:
+        """(보냄, 영구 거부). 시도 사이에만 기다린다 — 2초, 429면 Retry-After(상한 RETRY_AFTER_CAP_SECONDS)."""
+        from trading_system.ops.telegram import TelegramError
+        for i in range(attempts):
             try:
                 self._api.send_message(self._chat, msg)
-                return
+                return True, False
             except TelegramError as exc:
-                self._log(f"텔레그램 전송 실패 {i + 1}/3: {exc}")
+                self._log(f"텔레그램 전송 실패 {i + 1}/{attempts}: {exc}")
                 if exc.permanent:
-                    return
-            self._sleep(2.0)
+                    return False, True
+                if i + 1 < attempts:
+                    self._sleep(2.0 if exc.retry_after is None else min(exc.retry_after, RETRY_AFTER_CAP_SECONDS))
+        return False, False
+
+    def flush(self) -> int:
+        """큐에 남은 실패 메시지를 1회씩 다시 보낸다(프로세스 끝 직전). 성공 건수."""
+        if not self.failed:
+            return 0
+        pending, self.failed = self.failed, []
+        sent = 0
+        for msg in pending:
+            ok, permanent = self._send(msg, 1)
+            if ok:
+                sent += 1
+            elif not permanent:
+                self.failed.append(msg)
+        self._log(f"밀린 알림 재전송 {sent}/{len(pending)}건"
+                  + (f" — 못 보낸 {len(self.failed)}건은 {AUTOPILOT_FALLBACK} 참고" if self.failed else ""))
+        return sent
 
 
 class SubprocessRun:
@@ -564,21 +630,52 @@ def captured(fn: Callable[[], int]) -> tuple[int, str]:
     return rc, buf.getvalue()
 
 
-def autopilot_main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = None) -> int:
+def _refusal_notifier(root: Path, log: Callable[[str], None], base_url: str) -> TelegramNotify | None:
+    """거부 알림용 텔레그램 (A-084). .env.paper의 텔레그램 키 2개만 쓴다(run과 같은 check_telegram_secrets 경로).
+    값은 로그·오류 문구에 싣지 않는다. 못 읽으면 None — 로그만 남긴다."""
+    try:
+        from trading_system.config.envfile import parse_env_file
+        from trading_system.ops.telegram import TelegramApi
+
+        from .telegram_run import CHAT_KEY, TOKEN_KEY, check_telegram_secrets
+        secrets = parse_env_file(root / ".env.paper")
+        check_telegram_secrets(secrets)
+    except Exception as exc:  # noqa: BLE001 — 거부 알림은 최선 노력, 거부 자체를 막지 않는다
+        log(f"거부 알림 못 보냄(텔레그램 비밀값 확인 불가: {type(exc).__name__}) — 로그만 기록")
+        return None
+    api = TelegramApi(secrets.get(TOKEN_KEY).reveal, base_url)
+    return TelegramNotify(api, secrets.get(CHAT_KEY).reveal().strip(), log,
+                          fallback=root / "var" / "paper" / "logs" / AUTOPILOT_FALLBACK)
+
+
+def _refused(root: Path, log: Callable[[str], None], why: str, base_url: str, kind: str = "") -> int:
+    """run 시작 전 거부: 일 로그에 사유를 남기고, 가능하면 텔레그램 경고 1건 (A-084). 코드 2."""
+    text = f"자동 운영 거부{kind}: {why}"
+    log(text)
+    notify = _refusal_notifier(root, log, base_url)
+    if notify is not None:
+        log("거부 알림 텔레그램 전송")
+        notify("WARNING", text)
+        notify.flush()
+    return EXIT_REFUSED
+
+
+def autopilot_main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = None, *,
+                   telegram_base_url: str = "https://api.telegram.org") -> int:
     p = argparse.ArgumentParser(prog="scripts/autopilot.py",
-                                description="PAPER 무인 자동 운영 (CP-029). 작업 스케줄러가 평일 06:45에 실행한다")
+                                description="PAPER 무인 자동 운영 (CP-029). 작업 스케줄러가 평일 06:45에 실행한다",
+                                epilog=EXIT_HELP)
     p.add_argument("--mode", required=True, help="PAPER만 허용 (LIVE·BACKTEST는 거부)")
     p.add_argument("--root", default=str(REPO_ROOT), help="저장소 루트")
     ns = p.parse_args(argv)
     env = dict(os.environ if environ is None else environ)
     root = Path(ns.root).resolve()
-    why = mode_refusal(ns.mode, env, root / ".env")   # .env는 TRADE_MODE 한 줄만 읽는다 (config/modes)
-    if why:
-        _say(f"자동 운영 거부: {why}")
-        return 2
     base = root / "var" / "paper"
     clock = SystemClock()
-    log = DayLog(base / "logs", clock)
+    log = DayLog(base / "logs", clock)   # 거부 사유까지 남긴다 — pythonw에는 콘솔이 없다 (A-084)
+    why = mode_refusal(ns.mode, env, root / ".env")   # .env는 TRADE_MODE 한 줄만 읽는다 (config/modes)
+    if why:
+        return _refused(root, log, why, telegram_base_url)
     try:
         from trading_system.config.app_file import load_app_settings
         from trading_system.config.market_file import load_market_settings
@@ -597,11 +694,9 @@ def autopilot_main(argv: Sequence[str] | None = None, environ: Mapping[str, str]
             calendar = KrxCalendar.load_dir(root / "config" / "calendar")
             rates = load_market_settings(root / "config" / "market.paper.toml").cost_rates
         except (ConfigError, MarketDataError, OSError) as exc:
-            log(f"자동 운영 거부(설정): {exc}")
-            return 2
+            return _refused(root, log, str(exc), telegram_base_url, kind="(설정)")
     except ImportError as exc:   # pragma: no cover — 설치 문제
-        log(f"자동 운영 거부(모듈): {type(exc).__name__}")
-        return 2
+        return _refused(root, log, type(exc).__name__, telegram_base_url, kind="(모듈)")
 
     from trading_system.ops.cli import backup_main
     from trading_system.ops.telegram import TelegramApi
@@ -609,8 +704,9 @@ def autopilot_main(argv: Sequence[str] | None = None, environ: Mapping[str, str]
     from .preflight import preflight_main
     from .review_tool import review_main
     assert startup.secrets is not None
-    api = TelegramApi(startup.secrets.get(TOKEN_KEY).reveal)
-    notify = TelegramNotify(api, startup.secrets.get(CHAT_KEY).reveal().strip(), log)
+    api = TelegramApi(startup.secrets.get(TOKEN_KEY).reveal, telegram_base_url)
+    notify = TelegramNotify(api, startup.secrets.get(CHAT_KEY).reveal().strip(), log,
+                            fallback=base / "logs" / AUTOPILOT_FALLBACK)
     child_env = {**env, "TRADE_MODE": Mode.PAPER.value, "PYTHONIOENCODING": "utf-8",
                  "PYTHONPATH": os.pathsep.join(x for x in (str(root / "src"), env.get("PYTHONPATH", "")) if x)}
     common = ["--mode", Mode.PAPER.value, "--root", str(root)]
@@ -630,8 +726,10 @@ def autopilot_main(argv: Sequence[str] | None = None, environ: Mapping[str, str]
                        reference_time=startup.limits.daily_reference_time, rates=rates).run()
     except Exception as exc:  # noqa: BLE001 — run 시작 전 단계의 결함 (시작 뒤는 Autopilot._day가 처리)
         log(f"자동 운영 예외:\n{traceback.format_exc()}")
-        notify("EMERGENCY", f"자동 운영 오류 {type(exc).__name__} — PC에서 var/paper/logs/autopilot 로그 확인")
-        return 1
+        notify("EMERGENCY", f"자동 운영 오류(run 시작 전) {type(exc).__name__} — PC에서 var/paper/logs/autopilot 로그 확인")
+        rc = EXIT_REFUSED
+    finally:
+        notify.flush()   # 밀린 알림 1회 재전송 (A-084)
     log(f"자동 운영 끝 (코드 {rc})")
     return rc
 
@@ -669,5 +767,6 @@ def ops_stop_main(argv: Sequence[str] | None = None, environ: Mapping[str, str] 
     return 0
 
 
-__all__ = ["AUTO_ACTOR", "Autopilot", "AutopilotDeps", "AutopilotRefused", "Schedule", "autopilot_main",
-           "mode_refusal", "HUMAN_HALTS", "ops_stop_main"]
+__all__ = ["AUTO_ACTOR", "AUTOPILOT_FALLBACK", "Autopilot", "AutopilotDeps", "AutopilotRefused", "EXIT_ABORTED",
+           "EXIT_OK", "EXIT_PROBLEMS", "EXIT_REFUSED", "Schedule", "TelegramNotify", "autopilot_main", "mode_refusal",
+           "HUMAN_HALTS", "ops_stop_main"]
