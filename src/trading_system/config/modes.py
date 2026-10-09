@@ -30,7 +30,7 @@ def parse_trade_mode(raw: str | None) -> Mode:
 def _mode_line_from_file(path: Path) -> str | None:
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):  # PowerShell 5.1 `>`·Out-File 기본(UTF-16)으로 만든 파일 → 모드 없음으로 거부
         return None
     for line in text.lstrip("﻿").splitlines():
         match = _MODE_LINE.match(line.strip())
