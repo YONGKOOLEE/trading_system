@@ -41,7 +41,7 @@ def test_m2_rejected_message_is_dropped_and_others_flow(env: Env, tg: FakeTelegr
     n = notifier(env, tg)
     for _ in range(5):
         n.pump()
-    assert [m["text"] for m in tg.sent] == ["[경고] 정상 메시지"]
+    assert [m["text"] for m in tg.sent] == ["[M1] [경고] 정상 메시지"]  # [M1] 표시: T-M2-13 D-117 A-065 Q5
     assert "K11" not in halts(env)
     assert env.repo.pending_notifications() == []
     assert any(e["kind"] == "NOTIFY_DROPPED" for e in env.repo.audit_events())
@@ -72,7 +72,7 @@ def test_m3_429_waits_retry_after_without_k11(env: Env, tg: FakeTelegram) -> Non
     limited["on"] = False
     env.clock.advance(timedelta(seconds=10))     # 30초 경과
     n.pump()
-    assert [m["text"] for m in tg.sent] == ["[경고] x"]
+    assert [m["text"] for m in tg.sent] == ["[M1] [경고] x"]  # [M1] 표시: T-M2-13 D-117 A-065 Q5
 
 
 def test_m3_send_spacing_and_per_round_cap(env: Env, tg: FakeTelegram) -> None:  # noqa: F811
@@ -128,7 +128,7 @@ def test_m4_poison_update_skipped_after_three_failures(env: Env, tg: FakeTelegra
     assert any("저장하지 못해 건너뜀" in m for m in msgs)
     texts = [m["text"] for m in tg.sent]
     assert any("접수하지 않았습니다" in t for t in texts)       # 사용자 채팅에 직접 회신 (재검토 H-2)
-    assert texts[-1].startswith("정지")                          # 다음 명령(/status)은 정상 처리
+    assert texts[-1].startswith("[M1] 정지")                     # [M1]: T-M2-13 D-117 / 다음 명령(/status)은 정상 처리
     assert env.repo.pending_commands() == []
 
 
@@ -209,4 +209,4 @@ def test_emergency_sent_before_backlog(env: Env, tg: FakeTelegram) -> None:  # n
         alert(env, f"m{i}")
     AuditAlertSink(env.repo, env.clock, dedup_window=None, console=False).alert("EMERGENCY", "정지 K4", None)
     notifier(env, tg).pump()
-    assert tg.sent[0]["text"] == "[긴급] 정지 K4"
+    assert tg.sent[0]["text"] == "[M1] [긴급] 정지 K4"  # [M1] 표시: T-M2-13 D-117 A-065 Q5

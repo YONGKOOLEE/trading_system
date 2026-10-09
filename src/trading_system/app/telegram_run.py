@@ -39,15 +39,16 @@ NOTIFY_FAULTS_TO_K11 = 3   # CP-028 D-146: 알림 전송 처리 예외 연속 3�
 def telegram_threads(engine: "Engine", repo: Repository, enabled: bool, secrets: SecretStore | None, clock: Clock,
                      kill_file: Path, stop: threading.Event, *, base_url: str = "https://api.telegram.org",
                      notify_every: float = NOTIFY_EVERY, poll_timeout: int = POLL_SECONDS,
-                     log_dir: Path | None = None) -> list[threading.Thread]:
-    """enabled면 시작 전 스레드 2개를 만들어 돌려준다(시작은 호출자). 비밀값이 없으면 시작 거부(ConfigError)."""
+                     log_dir: Path | None = None, market: str = "M1") -> list[threading.Thread]:
+    """enabled면 시작 전 스레드 2개를 만들어 돌려준다(시작은 호출자). 비밀값이 없으면 시작 거부(ConfigError).
+    market: 메시지 시장 표시·/exit·/reduce 수량 단위 (CP-024 D-117). 봇 토큰은 그 체크아웃의 비밀 설정에서 읽는다."""
     if not enabled:
         return []
     check_telegram_secrets(secrets)
     assert secrets is not None
     token = secrets.get(TOKEN_KEY)
     chat = secrets.get(CHAT_KEY).reveal().strip()
-    api = TelegramApi(token.reveal, base_url)
+    api = TelegramApi(token.reveal, base_url, market=market)
     halts = QueuedHalts(engine)
 
     def alert(level: str, text: str) -> None:
@@ -59,7 +60,7 @@ def telegram_threads(engine: "Engine", repo: Repository, enabled: bool, secrets:
         alert("INFO", f"텔레그램 첫 연결: 이전 알림 {skipped}건은 보내지 않음")
     notifier = Notifier(repo, api, chat, clock, halts, sleep=stop.wait, should_stop=stop.is_set)
     faults = NotifyFaults(halts)
-    bot = CommandBot(repo, api, chat, engine.account, clock, kill_file, alert)
+    bot = CommandBot(repo, api, chat, engine.account, clock, kill_file, alert, market=market)
 
     def notify_loop() -> None:
         while not stop.is_set():

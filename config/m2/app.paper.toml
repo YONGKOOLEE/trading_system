@@ -1,0 +1,21 @@
+# M2(크립토 현물, 바이낸스 Spot 테스트넷) PAPER 배포 설정 (CP-024 D-096·D-097, T-M2-08). 비밀정보 없음.
+# 로더: trading_system.config.app_file (market·broker 키), 검사: app/startup.check_m2_startup (시작 일치 표·DB 메타).
+# M2 체크아웃(C:\AI\trading_system\m2-binance, A-065 Q2)에서 --market M2로 쓴다. M1 설정(config/app.paper.toml)과 별개.
+# 현재 M2 실행 경로(엔진 조립·바이낸스 연결)는 없다 — run --market M2는 검사 뒤 거부한다. 테스트넷 연결은 T-M2-14 별도 승인.
+# 종목은 config/m2/universe.paper.toml에 둔다([[instruments]]는 M1 형식). 전략 판정 시각은 UTC(D-108) — 전략은 미정(T-M2-15·17).
+
+[app]
+account = "BN-PAPER-01"                 # 비식별 계좌 별칭 (한도 파일과 같게, 접두어 BN-)
+market = "M2"
+broker = "binance-spot-testnet"
+loop_seconds = "0.5"
+reconcile_minutes = 1                   # M2 주기 대조 60초 (D-109)
+sntp_servers = ["time.kriss.re.kr:123", "time.bora.net:123"]   # M1과 같은 서버 (외부 연결 승인 A-042)
+
+# 바이낸스 테스트넷 접속 스위치. 테스트넷 연결 승인(T-M2-14) 뒤 **사용자가 직접** true로 바꾼다. 에이전트는 바꾸지 않는다.
+[paper]
+connection_approved = false
+
+# M2 전용 텔레그램 봇(D-117). 봇 생성·토큰 입력(M2 체크아웃의 비밀 설정)·텔레그램 연결 승인 뒤 사용자가 직접 켠다.
+[telegram]
+enabled = false
