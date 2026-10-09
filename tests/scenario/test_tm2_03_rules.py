@@ -23,6 +23,7 @@ from trading_system.broker.fake.broker import FakeBehavior
 from trading_system.domain.enums import (
     Check, GateResult, IntentState, Mode, OrderType, RequestSource, RequestType, Side,
 )
+from trading_system.domain.market import Quote
 from trading_system.domain.models import GateRequest
 from trading_system.domain.trading_rules import apply_spot_terms
 
@@ -157,6 +158,18 @@ def test_v134_rules_missing_rejects_buy_allows_sell(env: M2Env) -> None:
     assert run(env, sell).result is GateResult.APPROVED
 
 
+def test_v134_rules_missing_allows_limit_sell_despite_m1_price_band(env: M2Env) -> None:
+    """[M2 재통합 2026-10-09] 규칙 미적재 위험 축소는 M1 G10 경로로 넘어간다. T-027(CP-032 D-174) 상·하한가 검사가
+    생겨도 M2 시세에는 상·하한가·기준가가 없으므로 IOC 지정가 매도는 그대로 허용된다 (V-134, M2 동작 불변)."""
+    buy_position(env, "0.0100")
+    env.rules.table.pop("TSTA-USDT")
+    sell = dataclasses.replace(raw(RequestType.EXIT, "0.0090", "s-lim"), order_type=OrderType.LIMIT,
+                               price=D("9950.00"))
+    d = run(env, sell)
+    assert d.result is GateResult.APPROVED, d.reason
+    assert env.broker.sent[-1].order_type is OrderType.LIMIT
+
+
 # --- V-154 시세 지연 중 감액·청산 = IOC 지정가 매도 ------------------------------------------------------------
 def test_v154_stale_quote_market_sell_rejected_then_limit_ioc_next_request(env: M2Env) -> None:
     buy_position(env, "0.0100")
@@ -204,12 +217,27 @@ def test_v160_stale_limit_sell_uses_limit_notional(env: M2Env) -> None:
     assert d.result is GateResult.REJECTED and "NOTIONAL" in (d.reason or "")
 
 
-def test_m1_rules_unchanged_when_no_spot_rules(tmp_path: Path) -> None:
-    """spot 규칙 공급자가 없으면(M1) G10은 기존 수량 단위·호가 단위 검사만 한다 (V-152)."""
+def test_m1_rules_unchanged_when_no_spot_rules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """spot 규칙 공급자가 없으면(M1) G10은 M1 검사(수량 단위·호가 단위·상·하한가)만 하고 M2 거래 규칙은 보지 않는다 (V-152).
+
+    [M2 재통합 2026-10-09, CP-032 D-174·A-085 Q-1] T-027 뒤 M1 경로의 위험 확대 지정가는 상·하한가를 알아야 승인된다.
+    그래서 M1 시세처럼 상·하한가를 넣어 같은 의도(minNotional 미적용)를 확인하고, 상·하한가 모름 거부도 함께 고정한다.
+    M2 실경로(spot 규칙 공급자 있음)는 이 검사 전에 판정을 끝낸다 — 동작 불변.
+    """
     e = build_m2_env(tmp_path, spot_rules=False)
     try:
         req = dataclasses.replace(raw(RequestType.ENTRY, "0.0004", "m1"), order_type=OrderType.LIMIT,
                                   price=D("10050.00"))
+        no_band = e.gate.decide(dataclasses.replace(req, idem_key="m1-no-band"))
+        assert no_band.result is GateResult.REJECTED and no_band.failed_check is Check.G10
+        assert "D-174" in (no_band.reason or "")      # 상·하한가 모름 → 위험 확대 지정가 거부 (T-027)
+        quote = e.market.quote
+
+        def banded(instrument: str) -> Quote | None:   # M1 시세처럼 상·하한가를 아는 경우 (가상 값)
+            q = quote(instrument)
+            return None if q is None else dataclasses.replace(q, upper_limit=D("13000.00"), lower_limit=D("7000.00"))
+
+        monkeypatch.setattr(e.market, "quote", banded)
         assert e.gate.decide(req).result is GateResult.APPROVED   # minNotional은 보지 않는다
     finally:
         e.repo.close()
