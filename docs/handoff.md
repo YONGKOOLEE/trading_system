@@ -3,33 +3,37 @@
 - 갱신: 2026-10-08 저녁. **PAPER-0 3일차(10-08) "보는 자동 운영" 성공** — 06:44 K8 자동 재개(7초), 07:53 K5 → 07:58 자동 해제(CP-028 P4), 09:30 매수 267,500 / 14:30 매도 266,250, 마감 대조 MATCH, 15:45 자동 종료·paper-review·백업·요약 정상. 결함 2건(요약 기준 금액 표시, 15:09 하트비트 거짓 경보) 수정 013f2bd 병합. 실제 비용 수수료 1,860 + 세금 532, 손익 −3,642(시스템 −3,652, 10원 올림 차). 마지막 승인 기록 **A-084**. 운영 카드: https://claude.ai/artifact/XXZrAhidXPAFo1hUDRgVdw
 - **최신 (2026-10-09 낮)**: 사용자가 집 PC에서 **10-12 무인 전환 준비 완료** — ① Windows 시간 서버 time.kriss.re.kr 변경 ② 루트 `.env`(TRADE_MODE 한 줄, `Set-Content -Encoding ascii`) 생성·확인 ③ `schedule-register.ps1 -DryRun` → 등록 ④ 실행 계정 확인 — 사용자 보고 "전부 정상". 등록 중 결함 2건 발견·수정(2e2f713): PS 5.1 `-File`에서 param 기본값의 `$PSScriptRoot` 빈 값, 루트 `.env` 부재(사용자가 `.env.paper`로 확인했었음 — 자동 운영은 루트 `.env`로 모드 판단). 사용자 계획: PC를 끄고 **10-11(일) 저녁 켜고 로그인·화면 잠금 상태로 둔다**(예약 작업은 로그인 상태에서만 실행).
 - **체크아웃 `main`** HEAD **2418489**(정지 요청 파일 삭제 재시도 e1fbb2b 병합 — 2e2f713 전체 회귀에서 test_v208 간헐 실패(1/12 재현) 원인 수정, 브랜치 전체 **1452 passed**) ← 2e2f713(2026-10-09 낮 예약 등록 수정 병합. 이전: 4e76347 2차 병합 `integ/final` 1449 passed — 백테스트 결과 파일·검증 실행기, confirm-unknown, 운영 낮음 항목, 문서; 9a494f1 1차 병합 1335 passed — ops-hardening·code-health·unknown-k3(CP-031)). push 없음. 10-09~11 휴장·주말. **10-12(월) 06:40 시계 맞춤 → 06:45 첫 무인 자동 운영.**
-- **최신 (2026-10-09 오후, 세션 43)**: 사용자 "CP-032 Q-1, Q-2 승인하고 전략실 만들어" → **A-085**(Q-1 단계 1 지정가 세부 (a)(b)(c) 권장값, Q-2 조회·구독 실측, 전략실 생성. 단계 2~5·Q-3 미승인 → 지정가 PAPER 사용 금지). T-027 지정가 오프라인 구현(c397a26)·실측 도구(2ee2242) 완료, 둘 다 **미병합**. 전략실 `C:\AI\strategy-lab` 생성·견본 1회 검증 성공(아래).
+- **최신 (2026-10-09 밤, 세션 43)**: 사용자 "CP-032 Q-1, Q-2 승인하고 전략실 만들어" → **A-085**. 이어서 "병합 후 진행" → "승인 없이 할 수 있거나 권장인 일 전부 진행". 결과:
+  - **main 3ee9f97 (1566 passed)** = T-027 지정가 오프라인 구현 + 실측 도구(kiwoom-probe) + capabilities.md 반영(CAP-ORD-03 → 03a 미지원·03b M1 검증 중, CAP-ORD-02 검증 중 유지 — PAPER는 "지원"만이라 지정가 PAPER 불가 유지) + CP-032 단계 1 draft 반영(00·01·03·04·05·kiwoom-kr·krx-market) + 설명서 v0.3(실측 도구 §11·전략실 §12·일일 기준 기록 손상 부록 A·confirm-unknown 안내). **10-12 무인 운영은 이 main으로 돈다** — 바뀐 점: krx.toml 로드(시세 호가 칸 채워짐), 운영 요청 지정가 거부. 시장가 동작 불변(V-240).
+  - **실측 도구 실행은 에이전트 권한 거부**(자동 권한 판정 "Sensitive Remote Exec") → 사용자 실행 대기.
+  - **M2 오프라인 작업 전부 완료, 미병합**: `integ/m2-2026-10-09` 2f0b277 **2222 passed**(아래 표). main 병합은 10-12 성공 뒤(권장, 사용자 지시).
 - 실전 주문 코드·LIVE 승인 없음. 게이트 변경 없음(00~05·업무정의서 draft 묶음 승인 전, 검토 요약 docs/changes/draft-bundle-review-2026-10-07.md).
 
-## 브랜치·worktree (2026-10-09)
-**미병합 (에이전트 판단: 10-12 첫 무인 운영 성공 뒤 병합, main 병합은 사용자 지시)**
+## 브랜치·worktree (2026-10-09 밤)
+**미병합 — M2 통합 1개 (10-12 성공 뒤 병합, 사용자 지시)**
 | 브랜치 (worktree) | HEAD | 전체 시험 | 상태 |
 |---|---|---|---|
-| docs/a-085-cp032-q1q2 (메인 체크아웃) | fc0b5e2 + 이 인계 커밋 | 문서 | A-085 기록, CP-032 상태 "부분 승인", worklog (43), .status |
-| feat/T-027-limit-order (`.claude\worktrees\agent-a2eb9cfc280345e99`) | c397a26 | **1514 passed**(리드 실행) | krx.toml, G10 D-174, CAP-ORD-03/03b(D-175), 백테스트 P-5 표시, 리드 추가: 운영 요청 지정가 거부(Q-3 전). **병합하면 PAPER run이 krx.toml을 읽음**(시세 호가 칸·슬리피지 틱 칸 채워짐, 시장가 동작 불변 V-240) → 병합은 run 꺼진 저녁. capabilities.md M1 CAP-ORD-02·03b "검증 중" 반영은 별도 지시(§3.1). 지금 표로는 03b도 "미지원"이라 등록 거부 |
-| feat/cp032-probe (`.claude\worktrees\agent-aa5940286badb5435`) | 2ee2242 | **1504 passed**(에이전트 실행), 리드 관련 286 passed | `scripts\kiwoom-probe.py` 읽기 전용 실측(D-180). 거래일 06:30~17:00·run/autopilot 실행 중 거부, REST 허용 au10001·au10002·ka10080·ka10079, WS LOGIN·REG·REMOVE(0B·0D)만. **실행 안 함**. 가격 값 미기록 → D-180 "KRX 시가·종가 교차"는 이 도구로 불가(시각 분포로만 K-U31 판단) |
-| integ/backtest-m2 (integ2) | cb698ed | **1758 passed** | main d59095f + 백테스트 + M2(T-M2-01·02·03·07·10) 통합. cb698ed = M1 daily_base가 market≠M1 행을 건너뜀(시장 충돌 수정, 시험 3건). 충돌 0건 |
-- M2 병합 때: main(4e76347) 위에 새 통합 브랜치 → `integ/backtest-m2`의 M2 병합분(feat/T-M2-02-03 → feat/T-M2-07-cash-risk → feat/T-M2-10-adapter + cb698ed) 다시 합치기 → 전체 회귀 → main. 남은 위험: paper_review DAILY_BASE 목록이 시장 구분 없음(보고용), spot_cash._saved_day가 같은 별칭의 깨진 M1 행에 예외(별칭 분리로 현실성 낮음), 바이낸스 어댑터는 합성 응답 시험만(B-U4·B-U10).
+| integ/m2-2026-10-09 (`.claude\worktrees\agent-adf1305a61821e485`) | 2f0b277 | **2222 passed**(리드 실행) | main 3ee9f97 + M2 T-M2-01·02·03·07·10(재통합) + **T-M2-04·05·06·12·09**(feat/T-M2-04-06 83cf082) + **T-M2-08·11·13**(feat/T-M2-08-11-13 9fe6b1d). 충돌 0. 병합은 `git checkout main` → `git merge --no-ff integ/m2-2026-10-09`(run 꺼진 저녁) |
+- **M2 병합 시 M1에 생기는 변화**(사용자에게 미리 알릴 것): ① 텔레그램 보내는 모든 메시지 앞에 `[M1] `(T-M2-13 D-117, 명령 해석·/confirm 불변) ② 시작 일치 표(모드·시장·브로커·도메인·계좌 별칭 접두어 `KR-`) 불일치면 시작 거부 — 현 설정 통과 ③ 새 DB에 market·broker 메타 2행, 기존 M1 DB는 쓰지 않음(기록은 migrate가 백업 뒤 — PAPER-1 중에는 migrate 금지) ④ 운영 도구 출력 첫 줄 `시장: … · 디렉터리: …` ⑤ 새 표 fill_fee·client_order·recon_asset을 DB 열 때 추가(SCHEMA_VERSION "2" 유지, 기존 M1 DB 그대로 열림 시험) ⑥ 시험 지원 불변 조건 검사기 INV-04·06 Decimal 합·남은 수량 기준(02 INV-06·G9 정의).
+- **M2 사용자 결정 필요**(에이전트가 임시 값으로 진행): T-M2-12 슬리피지 값(시험은 0.001 임시, 05 §2-M2.4 착수 차단 항목), T-M2-09 기대값(V-41 5회 무응답 K3, V-48 정정 G10 거부·취소 종결 확인, V-125/126 결과 불명 24시간 보류·같은 조건 외부 주문 K4), 스키마를 번호 붙은 전진 마이그레이션(05-plan) 대신 추가 전용 표로 한 것(A-072 ⑤ 방식, 무인 운영 시작 실패 방지), [제안] 다수(B줄기 9건·A줄기 7건 — worklog (43) 참조).
+- **M2 남은 것**: T-M2-09의 V-157 공통 항목 24개 미실행(V-02·57·61·72·76·85~87·100~102·104·107·110~118·127·128, 대부분 T-M2-14·17 범위, V-116/117은 감시기 UTC 일 기준 변경 필요) → T-M2-09 완료 기준 **미충족**. -1021 3회 K6·418 즉시 K5 미구현(T-M2-14와 함께). T-M2-14 테스트넷 연결·M2 엔진 조립은 **별도 승인**. M2 유니버스 심볼(D-105) 사용자 결정. 미확인 B-U3·B-U4·B-U13·B-U16·B-U21, referencePrice 형식.
+- 남은 위험(기존): paper_review DAILY_BASE 목록 시장 구분 없음(보고용), spot_cash._saved_day 깨진 M1 행 예외, 바이낸스 어댑터 합성 응답 시험만.
 
 **병합 완료 (2026-10-09)**
 - 1차(지시 "운영 묶음과 문서 main 병합"): ops-hardening(7e71480·d71ebc1·242476e), code-health(6bac802·f6d5090), unknown-k3(0f6aef6·2109f81), docs/cp-030-validation-criteria, docs/user-manual → 9a494f1, main 1335 passed.
 - 3차(사용자 등록 오류 보고, 2026-10-09 낮): fix/schedule-register-root 308f43d → 2e2f713 — schedule-register.ps1 Root 본문 계산·루트 `.env` 모드 줄 사전 검사·`-DryRun`, config/modes UTF-16 모드 파일 → 거부(예외 아님), 설명서 §2.2·§2.3·pv-procedure §3.5. 관련 시험 128 passed. (병합 커밋 메시지에 비밀 파일 이름이 있으면 권한 거부됨 — 메시지에서 이름 빼고 재시도.)
 - 2차(지시 "남은 개발 전부 시행"): integ/final = fc2790f(test_r4 대기 보강) + integ/backtest(T-009 295e74d·T-026 03132f7, 충돌 0) + fix/confirm-unknown-cli(15b5ceb·f836f12, 재검토 반영) + docs/manual-v02-cp032 + docs/paper-review-v04(kiwoom-kr.md 충돌 1건 — §7e 다음에 확장 사양 조사 절, 둘 다 보존) + fix/ops-low-items(c7e16da·b2b535e, 재검토 반영) → 4e76347.
-- 정리 대상 worktree(병합 끝남, 사용자가 `git worktree remove ..\<이름>` 실행 — 에이전트 권한 거부): sched-fix·stop-fix·cp028·autopilot·t018-multi·day3-fixes·ops-hardening·code-health·unknown-k3·integ·docs-cp030·docs-manual·bt-export·t026·confirm-cli·ops-low·docs2·docs3·final·m2-t07(M2 병합 뒤)·m2-binance·m2-adapter·m2-next(M2 병합 뒤). integ2는 M2 병합 때까지 유지.
+- 4차(2026-10-09 밤, 지시 "병합 후 진행"·"전부 진행"): docs/a-085 → 9f67e59, feat/T-027-limit-order → 0e96677, feat/cp032-probe → abb6885(1566 passed) → docs/capabilities-cp032(f73456c capabilities·시험 1건 변경) + docs/cp032-stage1-reflect(a0b82eb) + docs/manual-probe-recovery(66430f0) + 후속 3ee9f97 → main 3ee9f97(1566 passed).
+- 정리 대상 worktree(병합 끝남, 사용자가 `git worktree remove ..\<이름>` 실행 — 에이전트 권한 거부): sched-fix·stop-fix·cp028·autopilot·t018-multi·day3-fixes·ops-hardening·code-health·unknown-k3·integ·docs-cp030·docs-manual·bt-export·t026·confirm-cli·ops-low·docs2·docs3·final·m2-t07·m2-binance·m2-adapter·m2-next·integ2(M2 병합 뒤). `.claude\worktrees\` 아래 agent-* 7개(T-027·probe·문서 2·M2 A·B — 병합 끝남, integ/m2는 agent-adf1305a61821e485로 M2 병합 때까지 유지).
 
 ## 다음 세션 첫 행동
-1. `git status`(체크아웃 docs/a-085-cp032-q1q2, `.claude/` 미추적은 worktree 폴더)·이 파일·`docs/approvals.md` 끝 3행(A-083~A-085)·`docs/worklog.md` 마지막 항목(43) 확인.
+1. `git status`(체크아웃 main, `.claude/` 미추적은 worktree 폴더)·이 파일·`docs/approvals.md` 끝 3행(A-083~A-085)·`docs/worklog.md` 마지막 항목(43) 확인.
 2. **10-12(월) 첫 무인 자동 운영 결과 확인**(PAPER-0 4일차, V-212 실측). 사용자에게서 텔레그램 결과를 받거나 "로그 봐 줘" 지시가 오면 읽기 전용으로: `var\paper\logs\autopilot-20261012.log`·`run-console-20261012.log`·`ops-20261012.jsonl`, `var\paper\review\`, 작업 스케줄러 "마지막 실행 결과"(종료 코드 0/1/2/3). 볼 것: 06:40 ClockSync·06:45 시작 여부, 시작 점검 시계 오차(시간 서버 변경 효과, 3일차 최대 0.981초), K8 자동 재개, 07:53 K5 자동 해제, 09:30 매수·14:30 매도, CLOSE MATCH, 15:45 종료·집계·백업·요약, "확인 필요" 줄. 이번 2e2f713·4e76347·9a494f1 보강의 **첫 실제 실행**이다.
    - 06:50까지 "run 시작"이 없었다면: PC 로그인 상태 여부(예약 작업 Interactive), 루트 `.env` 모드 줄, `autopilot-fatal.log`, `alerts-fallback-autopilot.log` 순서로 확인.
 3. 결과를 07-paper-review §12B 형식(4일차)으로 기록. 무인 운영일에는 엔진 "일일 보고"(16:00)가 생성되지 않는다(run 15:45 종료) — 텔레그램 요약은 정상. 설계 공백(낮음).
-4. 10-12 성공 뒤: M2 병합(위 절차), PAPER-0 종료 판정 준비(권장 3~5거래일, 무인일 포함).
+4. 10-12 성공 뒤: M2 병합(위 표, M1 변화 6가지를 사용자에게 먼저 알림), PAPER-0 종료 판정 준비(권장 3~5거래일, 무인일 포함). M2 결정 필요 항목 질문.
 5. **CP-032 후속 (A-085)**:
-   - 실측 도구 실행(사용자, 저녁·주말, PAPER run 꺼진 뒤): 실측 브랜치가 main에 없으므로 **병합 지시 뒤**에 안내하거나, 사용자가 원하면 worktree에서 실행하도록 안내. 명령(병합 뒤): `cd C:\AI\trading_system\trading_system` → `$env:TRADE_MODE='PAPER'` → `.venv\Scripts\python scripts\kiwoom-probe.py --mode PAPER --codes 005930,000660,069500`(약 1~2분, 결과 `var\paper\probe\<시각>-probe.md`). 종목 000660·069500은 에이전트 제안. 결과는 kiwoom-kr에 "② 모의 실측"으로 기록 → K-U30·K-U31·K-U32·K-U34 판정 → **단계 2 승인 질문**(별도).
+   - 실측 도구 실행(**사용자** — 에이전트 실행은 권한 거부됨, 저녁·주말, PAPER run 꺼진 뒤, main에 있음): `cd C:\AI\trading_system\trading_system` → `$env:TRADE_MODE='PAPER'` → `.venv\Scripts\python scripts\kiwoom-probe.py --mode PAPER --codes 005930,000660,069500`(약 1~2분, 결과 `var\paper\probe\<시각>-probe.md`, 설명서 §11). 종목 000660·069500은 에이전트 제안. 결과는 kiwoom-kr에 "② 모의 실측"으로 기록 → K-U30·K-U31·K-U32·K-U34 판정 → **단계 2 승인 질문**(별도).
    - Q-3(모의 지정가 ①② 실측)·Q-4·Q-5는 미결. 지정가 PAPER 사용은 Q-3 뒤.
    - 사용자 오해 주의: 현재 PAPER 지원 = 일봉·정해진 시각 판정·시장가·고정 종목 목록. T-027은 오프라인 구현이라 지정가 전략을 PAPER에 쓸 수 없다.
 6. 사용자는 터미널 명령에 익숙하지 않다 — 실행 안내는 **복사해 붙일 전체 명령**, 용어는 풀어서. "실전"은 LIVE에만 쓴다(모의 서버 실행은 "모의 서버 실행"). 평일 07:15 출발·장중 부재·텔레그램만 가능.
@@ -53,7 +57,7 @@
 6. 호가 격자: KRX 표(200k~500k = 500원) 확인, 모의 체결가 250원 격자는 KRX 중간가주문(2025-03-04)으로 설명[부분 확인] — 지정가 PAPER 사용 전 모의 실측(CP-032 Q-3).
 
 ## 진행 중
-- A-084 후속 전부 main 병합 완료. 남은 낮음(기록): 손상 DAILY_BASE 복구 절차 문서 없음, 무인 운영일 엔진 일일 보고 미생성, confirm-unknown 목록의 immutable 읽기(run 시작 직후 오래된 내용 가능 — 읽기 오류면 거부), 429 시 requests 시간 초과가 전체 한도가 아님(30초는 최선 노력). A-084의 "429 상한 60초"는 "메시지당 총 30초·종료 전 재전송 총 60초"로 대체(더 보수적, 에이전트 판단).
+- A-084 후속 전부 main 병합 완료. 남은 낮음(기록): ~~손상 DAILY_BASE 복구 절차 문서 없음~~(설명서 부록 A로 해소, 2026-10-09 — 날짜·시각 모두 읽을 수 없는 손상 행은 매일 매수가 막히는 문제 남음, CP 필요할 수 있음), 무인 운영일 엔진 일일 보고 미생성, confirm-unknown 목록의 immutable 읽기(run 시작 직후 오래된 내용 가능 — 읽기 오류면 거부), 429 시 requests 시간 초과가 전체 한도가 아님(30초는 최선 노력). A-084의 "429 상한 60초"는 "메시지당 총 30초·종료 전 재전송 총 60초"로 대체(더 보수적, 에이전트 판단).
 - A-084 2-2 CAP-ORD-02 "미지원(X-U1 전까지)"는 docs/changes/CP-024-capabilities-draft.md에 선반영 — **docs/capabilities.md 실제 반영은 PAPER run이 꺼진 저녁 + 전체 회귀 + 사용자 지시**. 2-3 텔레그램 금액 제외·비율은 01 §2.10·03 §6.6 반영, 코드는 ops-hardening에서.
 - CP-029 적용 완료 기준 중 남은 것: 사용자 예약 작업 등록 + 10-12 첫 무인 운영일 결과 확인(05 T-025).
 
@@ -66,11 +70,11 @@
 | 순서 | 작업 | 선행·승인 |
 |---|---|---|
 | 1 | 10-12 무인 자동 운영 시작 → PAPER-0 계속(3~5거래일 권장 중 3일 경과) | 사용자 등록 4단계 |
-| 2 | M2 병합(integ/backtest-m2 기반 재통합) | 10-12 성공 뒤, 전체 회귀 |
-| 2a | CP-032 단계 1 지정가: 오프라인 구현 완료(feat/T-027-limit-order, 미병합) → 병합(저녁) → capabilities 반영 지시 → Q-3 모의 실측 → PAPER 사용 | Q-1 승인 A-085, Q-3 미승인 |
+| 2 | M2 병합(integ/m2-2026-10-09 2f0b277, 2222 passed — 재통합·T-M2-04~13 완료) | 10-12 성공 뒤, 사용자 지시 |
+| 2a | CP-032 단계 1 지정가: 오프라인 구현·capabilities 반영 완료(main 3ee9f97) → 실측 도구 사용자 실행 → Q-3 모의 지정가 실측 → PAPER 사용 | Q-1 승인 A-085, Q-3 미승인 |
 | 3 | 문서 승인 묶음(CP-025 → 00~05 draft) · DP-31·40 재검토 | 사용자 |
 | 4 | PAPER-0 종료 판정(PV 항목별) → T-018 실제 전략 결정(T-026 판정) → T-019 PAPER-1 | 사용자 |
-| 5 | M2 T-M2-08~ 구현 → 테스트넷 연결(별도 승인) → M2 PAPER-0 | 사용자 |
+| 5 | M2 남은 것: V-157 미실행 24개·K6/K5 규칙 → 테스트넷 연결·엔진 조립 T-M2-14(별도 승인) → M2 PAPER-0 | 사용자 |
 | 6 | LIVE 준비(시장별, 04 §5.1 C-01~C-14) | 별도 승인 |
 
 ## 도구 (사람 실행, 먼저 `cd C:\AI\trading_system\trading_system`)
