@@ -33,6 +33,7 @@ from trading_system.execution.executor import Executor
 from trading_system.gate.gate import Gate
 from trading_system.gate.ports import GateInputs, GatePolicy
 from trading_system.halt.manager import HaltManager
+from trading_system.monitoring.spot_cash import SpotAccountFacts
 from trading_system.storage.repository import Repository
 
 ACCOUNT = "BN-BT-01"
@@ -41,6 +42,8 @@ BASE_AMOUNT = Decimal("10000")          # 가상 기준 금액 (USDT)
 FEE_RATE = Decimal("0.001")             # 가상 수수료율 0.1% (실제 테스트넷 요율 미확인 B-U10)
 BUY_BUFFER = Decimal("0.005")           # 매수 가격 완충 0.5% (A-064, D-104)
 T0 = datetime(2026, 10, 7, 1, 0, tzinfo=UTC)  # UTC 01:00 = KST 10:00
+QUOTE_QUANTUM = Decimal("0.00000001")   # 가상 USDT 금액 자릿수 (D-118 비용 추정 올림 단위)
+CASH_MAX_AGE = timedelta(minutes=3)     # 가상 거래소 잔고 조회 신선도 (T-M2-07 시험값)
 
 
 @dataclass(frozen=True)
@@ -64,7 +67,8 @@ PAIRS: dict[str, tuple[str, str]] = {sym: (r.base, QUOTE_ASSET) for sym, r in RU
 M2_POLICY = GatePolicy(
     quote_max_age=timedelta(seconds=60),   # 시세 신선도 60초 (A-064)
     price_limit_ratio=Decimal("0.05"),     # M2에는 가격제한폭·시장가 매수가 없다(D-104). 시장가 매도는 G7 대상 아님 → 쓰이지 않는 자리 값
-    cost_rates=CostRates(commission_rate=FEE_RATE, sell_tax_rate=Decimal("0")),
+    # 비용 추정 = quoteAssetPrecision 자릿수 올림(D-118). 자릿수 8은 가상값(실제 USDT quoteAssetPrecision은 exchangeInfo 적재, T-M2-11)
+    cost_rates=CostRates(commission_rate=FEE_RATE, sell_tax_rate=Decimal("0"), cost_quantum=QUOTE_QUANTUM),
     market_time=M2_TIME,                   # L8·L5·달력 = UTC (D-108)
 )
 # 매수 완충 0.5%(A-064), 지연 매도 완충 0.5%(A-065 Q4), 시세 신선도 60초(A-064)
@@ -163,12 +167,14 @@ class M2Env:
     halts: HaltManager
     kill_file: Path
     market: SpotMarket
-    account: FakeAccount
+    account: FakeAccount | SpotAccountFacts
     rules: SpotRulesFake
 
 
 def build_m2_env(tmp_path: Path, broker_env: str = "fake", *, limits: AccountLimits | None = None,
-                 ioc: bool = False, spot_rules: bool = True) -> M2Env:
+                 ioc: bool = False, spot_rules: bool = True, spot_cash: bool = False) -> M2Env:
+    """spot_cash=True이면 게이트 계좌 사실 = SpotAccountFacts(M2 현금 정책·UTC 일일 리스크, T-M2-07).
+    기본 False는 고정값 FakeAccount(T-M2-01~03 시험)."""
     repo = Repository(tmp_path / "trading.db", Mode.BACKTEST)
     repo.register_account(Account(alias=ACCOUNT, mode=Mode.BACKTEST, broker_env=broker_env))
     clock = FixedClock(T0)
@@ -177,11 +183,22 @@ def build_m2_env(tmp_path: Path, broker_env: str = "fake", *, limits: AccountLim
     broker.ioc_limit = ioc
     market = SpotMarket(now=clock.now)
     rules = SpotRulesFake(market)
-    account = FakeAccount(
-        daily={ACCOUNT: DailyRisk(BASE_AMOUNT, Decimal("0"), Decimal("0"), Decimal("0"))},
-        cashes={ACCOUNT: CashView(BASE_AMOUNT, BASE_AMOUNT)},
-    )
-    limits = FakeLimits({ACCOUNT: limits or m2_limits()})
+    lim = limits or m2_limits()
+    account: FakeAccount | SpotAccountFacts
+    if spot_cash:
+        def price_of(instrument: str) -> Decimal | None:
+            q = market.quote(instrument)
+            return None if q is None or clock.now() - q.at > M2_POLICY.quote_max_age else q.price
+
+        account = SpotAccountFacts(repo, clock, quote_asset=QUOTE_ASSET, asset_pair=asset_pair, price_of=price_of,
+                                   cost_rates=M2_POLICY.cost_rates, reference_time=lim.daily_reference_time,
+                                   max_age=CASH_MAX_AGE, market_time=M2_TIME)
+    else:
+        account = FakeAccount(
+            daily={ACCOUNT: DailyRisk(BASE_AMOUNT, Decimal("0"), Decimal("0"), Decimal("0"))},
+            cashes={ACCOUNT: CashView(BASE_AMOUNT, BASE_AMOUNT)},
+        )
+    limits = FakeLimits({ACCOUNT: lim})
     inputs = GateInputs(limits, market, account, FakeStrategies(), FakeClockHealth(),
                         spot_rules=rules if spot_rules else None)
     gate = Gate(repo, clock, inputs, M2_POLICY)
