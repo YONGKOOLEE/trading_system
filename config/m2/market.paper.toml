@@ -1,0 +1,17 @@
+# M2 시장·게이트 동작 설정 (CP-024 §2.4·D-104·D-115·D-116·D-120, T-M2-08). 비밀정보 없음. 로더: config/m2_files.load_m2_market.
+# M1의 price_limit_ratio·sell_tax_rate는 없다(가격제한폭 없음, 매도세 0).
+
+[gate]
+quote_max_age_seconds = 60       # 시세 신선도 60초 [결정 A-064]
+buy_buffer = "0.005"             # IOC 지정가 매수 완충 0.5% [결정 A-064]
+sell_buffer = "0.005"            # 시세 지연 중 IOC 지정가 매도 완충 0.5% [결정 A-065 Q4, 재확인 A-066]
+server_time_warn_ms = 500        # 바이낸스 서버 시각 오차 경고 0.5초 [결정 A-064]
+
+[costs]
+# 비용 추정 수수료율 — **미확정 자리 값**. CP-024 §2.4 [제안] 0.1%(BN §9 S17 예시 요율)와 account/commission 응답 중
+# 큰 값. 사용자 확인 항목(비차단), 테스트넷 적용 여부 B-U10 미확인.
+commission_rate = "0.001"
+
+[alerts]
+reject_surge_count = 10          # M1 config/market.paper.toml과 같은 값 (M2 값 미결정 — 자리 값)
+reject_surge_minutes = 5

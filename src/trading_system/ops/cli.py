@@ -8,6 +8,10 @@
 - confirm-unknown: 결과 불명 의도의 사람 확정(CONFIRM_UNKNOWN, 로컬 전용)을 명령 테이블에 기록한다 (CP-031 V-233).
   `--list`는 결과 불명 의도 목록(읽기 전용). 판정·반영은 본 프로세스가 한다.
 로컬 인증은 Windows 로그인 사용자 = 운영자 (단일 사용자 가정, 03 §6.6).
+[CP-024 D-097, T-M2-08] 시장 분리: `--market M1|M2`(기본 M1 — M1 운영 명령 형식 그대로). 출력 첫 줄에 시장·디렉터리를
+표시한다(인자 거부 직후의 거부 문구는 예외). 저장소를 열 때 DB 메타의 market·broker가 설정과 다르면 거부한다(다른 시장
+체크아웃의 DB). 메타 없는 기존 M1 DB는 M1이면 허용(쓰지 않음), migrate가 백업 뒤 1회 기록한다. LIVE는 시작 일치 표에 행이
+없어 메타 검사를 하지 않는다(kill·status만 가능, 실전 경로 없음).
 """
 
 from __future__ import annotations
@@ -22,11 +26,14 @@ from datetime import datetime, time
 from pathlib import Path
 
 from trading_system.config.errors import ConfigError
+from trading_system.config.market_scope import default_broker, parse_market
 from trading_system.config.modes import parse_trade_mode
 from trading_system.domain.clock import KST, Clock, SystemClock, to_iso
 from trading_system.domain.enums import HaltType, IntentState, Mode
 from trading_system.domain.heartbeat import watchdog_check
+from trading_system.domain.market_time import Market
 from trading_system.storage.jsonlog import Masker
+from trading_system.storage.market_meta import bind_market, check_db_file, stamp_market_meta
 from trading_system.storage.repository import (
     ModeMismatch, Repository, SchemaMismatch, StorageFailure, open_read_only)
 
@@ -46,19 +53,50 @@ def _parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--db", help="DB 경로 (기본: var/<mode>/trading.db)")
     p.add_argument("--kill-file", help="KILL 파일 경로 (기본: var/<mode>/KILL)")
     p.add_argument("--account", help="계좌 별칭 (없으면 전체)")
+    p.add_argument("--market", default="M1", help="M1|M2 (기본 M1). M2 체크아웃에서는 M2 (CP-024 D-097)")
     return p
+
+
+Scope = tuple[Market, str] | None   # (시장, 브로커). None = 메타 검사 없음 (LIVE: 허용 표에 행 없음)
+
+
+def _scope(ns: argparse.Namespace, mode: Mode) -> Scope:
+    """--market과 모드로 기대 (시장, 브로커). 시장 값이 틀리면 ConfigError."""
+    market = parse_market(ns.market)
+    if mode is Mode.LIVE:
+        return None
+    return market, default_broker(mode, market)
+
+
+def _header(ns: argparse.Namespace) -> None:
+    """출력 첫 줄: 시장·디렉터리 (D-097(5)). 잘못된 체크아웃에서 실행한 것을 사람이 바로 알아보게."""
+    print(f"시장: {ns.market} · 디렉터리: {Path(ns.root).resolve()}")
+
+
+def _open_repo(db: Path, mode: Mode, scope: Scope) -> Repository:
+    """저장소를 열고 시장 메타를 검사한다. 새 DB면 기록, 다르면 MarketMismatch(= ModeMismatch)."""
+    existed = db.exists()
+    repo = Repository(db, mode)
+    if scope is not None:
+        try:
+            bind_market(repo.connection, scope[0], scope[1], created=not existed)
+        except BaseException:
+            repo.close()
+            raise
+    return repo
 
 
 def _resolve(ns: argparse.Namespace) -> tuple[Mode, Path, Path]:
     mode = parse_trade_mode(ns.mode)
+    parse_market(ns.market)
     db, kill = default_paths(Path(ns.root), mode)
     db = Path(ns.db) if ns.db else db
     kill = Path(ns.kill_file) if ns.kill_file else kill
     return mode, db.resolve(), kill.resolve()
 
 
-def _record(db: Path, mode: Mode, command: str, args: dict) -> str:
-    repo = Repository(db, mode)
+def _record(db: Path, mode: Mode, command: str, args: dict, scope: Scope = None) -> str:
+    repo = _open_repo(db, mode, scope)
     try:
         cid = f"local-{uuid.uuid4().hex}"
         with repo.tx():
@@ -79,11 +117,12 @@ def kill_main(argv: Sequence[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"거부: {exc}")
         return 2
+    _header(ns)
     kill.parent.mkdir(parents=True, exist_ok=True)
     kill.write_text("KILL\n", encoding="utf-8")  # 저장소와 독립 (D-051)
     print(f"KILL 파일 생성: {kill}")
     try:
-        cid = _record(db, mode, "KILL", {"account": ns.account, "reason": ns.reason})
+        cid = _record(db, mode, "KILL", {"account": ns.account, "reason": ns.reason}, _scope(ns, mode))
     except (StorageFailure, ModeMismatch) as exc:
         print(f"명령 기록 실패(저장소): {exc}. KILL 파일로 위험 확대 전송은 막혀 있음")
         return 1
@@ -105,14 +144,16 @@ def resume_main(argv: Sequence[str] | None = None) -> int:
     if mode is Mode.LIVE:   # A-084 ⑤: 저장소를 열기 전에 거부
         print(LIVE_REFUSAL.format(tool="resume"))
         return 2
+    _header(ns)
+    scope = _scope(ns, mode)
     try:
-        cid = _record(db, mode, "RESUME", {"account": ns.account, "halt_type": halt_type.value})
+        cid = _record(db, mode, "RESUME", {"account": ns.account, "halt_type": halt_type.value}, scope)
     except (StorageFailure, ModeMismatch) as exc:
         print(f"명령 기록 실패(저장소): {exc}")
         return 1
     print(f"재개 요청 기록: {cid} (판정은 본 프로세스, 결과는 status로 확인)")
     if halt_type is HaltType.K1 and kill.exists():
-        if ns.clear_kill_file and _k1_released(db, mode):
+        if ns.clear_kill_file and _k1_released(db, mode, scope):
             kill.unlink()
             print(f"KILL 파일 삭제: {kill}")
         elif ns.clear_kill_file:
@@ -148,8 +189,9 @@ def reconcile_resolve_main(argv: Sequence[str] | None = None) -> int:
     else:
         print("거부: 항목 ID와 해소 방법, 또는 --run")
         return 2
+    _header(ns)
     try:
-        cid = _record(db, mode, command, args)
+        cid = _record(db, mode, command, args, _scope(ns, mode))
     except (StorageFailure, ModeMismatch) as exc:
         print(f"명령 기록 실패(저장소): {exc}")
         return 1
@@ -187,15 +229,17 @@ def confirm_unknown_main(argv: Sequence[str] | None = None) -> int:
     if not db.exists():   # Repository는 없는 DB를 만든다 — 확정·목록 모두 기존 DB만
         print(f"거부: DB 없음: {db}")
         return 2
+    scope = _scope(ns, mode)
     if ns.list:
-        return _list_unknown(db, mode, ns.account)
+        return _list_unknown(db, mode, ns.account, scope, lambda: _header(ns))
     order_no = (ns.order_no or "").strip() or None   # 검사와 기록에 같은 값 (재검토 L-1)
     refused = _confirm_args_refusal(ns, order_no)
     if refused:
         print(f"거부: {refused}")
         return 2
+    _header(ns)
     try:
-        repo = Repository(db, mode)
+        repo = _open_repo(db, mode, scope)
     except (ModeMismatch, SchemaMismatch, StorageFailure) as exc:
         print(f"거부: {exc}")
         return 2
@@ -212,7 +256,7 @@ def confirm_unknown_main(argv: Sequence[str] | None = None) -> int:
               "대조에서 불일치로 드러난다 — 브로커 화면 확인 뒤에만 확정")
     args = {"intent_id": ns.intent_id, "accepted": bool(ns.accepted), "order_no": order_no if ns.accepted else None}
     try:
-        cid = _record(db, mode, "CONFIRM_UNKNOWN", args)
+        cid = _record(db, mode, "CONFIRM_UNKNOWN", args, scope)
     except (StorageFailure, ModeMismatch) as exc:
         print(f"명령 기록 실패(저장소): {exc}")
         return 1
@@ -258,11 +302,22 @@ def _escalated(q: _Query, intent_id: str) -> bool:
     return bool(q("SELECT 1 FROM audit_event WHERE kind=? AND ref=? LIMIT 1", (ESCALATED, intent_id)))
 
 
-def _list_unknown(db: Path, mode: Mode, account: str | None) -> int:
-    """--list: 진짜 읽기 전용 연결로 목록만 (재검토 L-3). 쓰기 저장소(Repository)는 열지 않는다."""
+def _list_unknown(db: Path, mode: Mode, account: str | None, scope: Scope = None,
+                  header: Callable[[], None] | None = None) -> int:
+    """--list: 진짜 읽기 전용 연결로 목록만 (재검토 L-3). 쓰기 저장소(Repository)는 열지 않는다.
+    시장·디렉터리 줄(header)은 열기에 성공한 뒤 첫 줄로 — 열기 실패 거부 문구는 그대로 첫 줄(기존 출력 형식)."""
     try:
         conn = open_read_only(db, mode)
     except (ModeMismatch, SchemaMismatch, StorageFailure) as exc:
+        print(f"거부: {exc}")
+        return 2
+    if header is not None:
+        header()
+    try:
+        if scope is not None:
+            bind_market(conn, scope[0], scope[1], created=False)   # 읽기 전용: 검사만 (메타 없는 M1 DB는 허용)
+    except (ModeMismatch, sqlite3.Error) as exc:
+        conn.close()
         print(f"거부: {exc}")
         return 2
     try:
@@ -294,10 +349,10 @@ def _print_unknown_intents(q: _Query, account: str | None) -> None:
               f"{'사람 확인 요청됨' if _escalated(q, iid) else '조회 해소 중'}")
 
 
-def _k1_released(db: Path, mode: Mode) -> bool:
+def _k1_released(db: Path, mode: Mode, scope: Scope = None) -> bool:
     """가장 최근 K1이 해제되었고 해제되지 않은 K1이 없는지."""
     try:
-        repo = Repository(db, mode)
+        repo = _open_repo(db, mode, scope)
     except (ModeMismatch, StorageFailure):
         return False
     try:
@@ -316,13 +371,14 @@ def status_main(argv: Sequence[str] | None = None, *, clock: Clock | None = None
     except ConfigError as exc:
         print(f"거부: {exc}")
         return 2
+    _header(ns)
     print(f"모드: {mode.value}")
     print(f"KILL 파일: {'있음' if kill.exists() else '없음'} ({kill})")
     if not db.exists():
         print(f"DB 없음: {db}")
         return 0
     try:
-        repo = Repository(db, mode)
+        repo = _open_repo(db, mode, _scope(ns, mode))
     except ModeMismatch as exc:
         print(f"거부: {exc}")
         return 2
@@ -447,6 +503,7 @@ def backup_main(argv: Sequence[str] | None = None) -> int:
     ns = p.parse_args(argv)
     try:
         mode, db, _ = _resolve(ns)
+        _header(ns)
         target = backup(db, db.parent / "backup", ns.keep)
     except (ConfigError, MaintenanceError) as exc:
         print(f"실패: {exc}")
@@ -465,6 +522,7 @@ def restore_test_main(argv: Sequence[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"거부: {exc}")
         return 2
+    _header(ns)
     if ns.backup:
         target = Path(ns.backup)
     else:
@@ -489,6 +547,7 @@ def archive_logs_main(argv: Sequence[str] | None = None) -> int:
     ns = p.parse_args(argv)
     try:
         mode, db, _ = _resolve(ns)
+        _header(ns)
         done = archive_logs(db.parent / "logs", ns.days, datetime.now(UTC).date())
     except (ConfigError, RuntimeError, OSError) as exc:
         print(f"실패: {exc}")
@@ -498,14 +557,23 @@ def archive_logs_main(argv: Sequence[str] | None = None) -> int:
 
 
 def migrate_main(argv: Sequence[str] | None = None) -> int:
+    """스키마 전진 마이그레이션 + 시장 메타 1회 기록 (CP-024 D-097(4), V-161). 둘 다 쓰기 전에 백업한다.
+    다른 시장의 DB·메타 없는 DB에 M2 설정이면 마이그레이션 전에 거부한다(아무것도 쓰지 않음)."""
     from trading_system.storage.maintenance import MaintenanceError, migrate
     ns = _parser("migrate").parse_args(argv)
     try:
         mode, db, _ = _resolve(ns)
+        _header(ns)
+        scope = _scope(ns, mode)
+        if scope is not None:
+            check_db_file(db, mode, scope[0], scope[1])
         applied = migrate(db, db.parent / "backup")
-    except (ConfigError, MaintenanceError) as exc:
+        stamped = stamp_market_meta(db, db.parent / "backup", mode, scope[0], scope[1]) if scope else None
+    except (ConfigError, MaintenanceError, ModeMismatch, StorageFailure) as exc:
         print(f"실패: {exc}")
         return 1
     print(f"적용한 버전: {applied or '없음(최신)'}")
+    if scope is not None:
+        print(f"시장 메타: {stamped} ({scope[0].value}·{scope[1]})")
     return 0
 

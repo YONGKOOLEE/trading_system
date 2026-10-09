@@ -42,12 +42,15 @@ from trading_system.marketdata.quality import RawDaily
 from trading_system.marketdata.store import MarketDataStore
 from trading_system.marketdata.ticks import load_ticks
 from trading_system.ops.cli import REPO_ROOT
+from trading_system.config.market_scope import MarketScopeError, check_start_scope, parse_market
+from trading_system.domain.market_time import Market
+from trading_system.storage.market_meta import bind_market
 from trading_system.storage.oplog import log_exception
-from trading_system.storage.repository import Repository
+from trading_system.storage.repository import ModeMismatch, Repository
 
 from .engine import Engine
 from .instance_lock import InstanceLocked, acquire_instance_lock
-from .startup import LiveNotAvailable, check_startup
+from .startup import LiveNotAvailable, check_m2_startup, check_startup
 from .supervisor import QueuedHalts, Supervisor, write_fallback
 from .wiring import StrategyInput, build_engine, load_strategy
 
@@ -183,20 +186,48 @@ def _strategies(app: AppSettings) -> list[StrategyInput]:
 
 # --- run ------------------------------------------------------------------------------------------
 
-def run_main(root: Path, environ: dict[str, str] | None = None, max_seconds: float | None = None) -> int:
+def _m1_hosts(mode: Mode) -> frozenset[str]:
+    """M1 브로커가 연결할 호스트 (시작 일치 표 검사용, CP-024 D-097). BACKTEST(fake)는 연결 없음."""
+    if mode is not Mode.PAPER:
+        return frozenset()
+    from urllib.parse import urlsplit
+
+    from trading_system.broker.kiwoom.adapter import MOCK_REST, MOCK_WS
+    return frozenset(h for h in (urlsplit(MOCK_REST).hostname, urlsplit(MOCK_WS).hostname) if h)
+
+
+def run_main(root: Path, environ: dict[str, str] | None = None, max_seconds: float | None = None,
+             market: str = "M1") -> int:
+    """market: 실행할 시장 (CP-024 D-097). 기본 M1 = 기존 경로(config/*.<mode>.toml) 그대로.
+    M2는 config/m2/ 검사(설정·시작 일치 표·DB 메타)까지만 하고 거부한다 — M2 엔진 조립·바이낸스 연결은 아직 없다
+    (테스트넷 연결은 T-M2-14 별도 승인)."""
     env = os.environ if environ is None else environ
     try:
         mode = read_trade_mode(env, root / ".env")
+        mkt = parse_market(market)
     except ConfigError as exc:
         print(f"시작 거부(브로커 연결 없음): {exc}")
         return 2
     base = root / "var" / mode.value.lower()
+    if mkt is Market.M2:
+        try:
+            env_file = None if mode is Mode.BACKTEST else root / f".env.{mode.value.lower()}"
+            check_m2_startup(mode, root, base / "trading.db", env_file)
+            raise ConfigError("M2 시작 검사 통과 — M2 실행 경로(엔진 조립·바이낸스 연결)는 아직 없다. "
+                              "테스트넷 연결은 T-M2-14 별도 승인 뒤")
+        except (LiveNotAvailable, ConfigError) as exc:
+            print(f"시작 거부(브로커 연결 없음): {exc}")
+            return 2
     try:
         env_file = None if mode is Mode.BACKTEST else root / f".env.{mode.value.lower()}"
         startup = check_startup(mode, root, base / "trading.db", env_file)
         app = load_app_settings(root / "config" / f"app.{mode.value.lower()}.toml", mode, root)
         if app.account != startup.account:
             raise ConfigError("배포 설정의 계좌 별칭과 한도 파일의 계좌가 다르다")
+        if app.market != Market.M1.value:   # M1 설정 위치(config/)에 다른 시장 설정 (D-097)
+            raise MarketScopeError(f"config/app.{mode.value.lower()}.toml의 market이 M1이 아니다 ({app.market}) — "
+                                   "M2는 config/m2/와 --market M2")
+        check_start_scope(mode, Market.M1, app.broker, app.account, _m1_hosts(mode))
         gate_settings, alert_thresholds, calendar, ticks, caps = _load_common(root, mode)
         strategies = _strategies(app)
         if app.telegram_enabled:
@@ -239,7 +270,14 @@ def run_main(root: Path, environ: dict[str, str] | None = None, max_seconds: flo
 def _run(root: Path, mode: Mode, base: Path, startup, app: AppSettings, gate_settings, alert_thresholds,  # type: ignore[no-untyped-def]
          calendar, ticks, caps, strategies: list[StrategyInput], max_seconds: float | None) -> int:
     clock = SystemClock()
+    existed = startup.storage_path.exists()
     repo = Repository(startup.storage_path, mode)
+    try:   # DB 메타 market·broker (CP-024 D-097): 새 DB는 기록, 다른 시장 DB는 브로커 연결 전에 거부
+        bind_market(repo.connection, Market.M1, app.broker, created=not existed)
+    except ModeMismatch as exc:
+        repo.close()
+        print(f"시작 거부(브로커 연결 없음): {exc}")
+        return 2
     store = MarketDataStore(calendar, ticks)
     for info in app.instruments.values():
         store.register(info)
@@ -474,13 +512,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m trading_system.app")
     p.add_argument("command", choices=["run", "backtest"])
     p.add_argument("--root", default=str(REPO_ROOT))
+    p.add_argument("--market", default="M1", help="run의 시장 M1|M2 (기본 M1, CP-024 D-097)")
     ns, rest = p.parse_known_args(argv)
     root = Path(ns.root).resolve()
     if ns.command == "backtest":
+        if ns.market != "M1":
+            p.error("backtest는 M1만 (M2 백테스트는 T-M2-12)")
         return backtest_main(rest, root)
     if rest:
         p.error(f"알 수 없는 인자: {' '.join(rest)}")
-    return run_main(root)
+    return run_main(root, market=ns.market)
 
 
 __all__ = ["main", "run_main", "backtest_main", "load_daily_csv", "parse_trade_mode", "STOP_REQUEST",
