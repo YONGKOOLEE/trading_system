@@ -10,7 +10,8 @@
 - 조회: 429는 `Retry-After` 대기 후 최대 3회(D-113), 전송 오류·5XX·해석 불가는 1·2초 대기 후 최대 3회(03 §5.3 조회 재시도),
   인증·시각 오류는 재시도 없음. 실패하면 BinanceQueryError(kind) — 호출자가 K3·K5 판단. -2013·-2026은 결과(NOT_FOUND·ARCHIVED).
 - 418 수신: 즉시 예산을 차단 상태로 바꾸고 K5 경보. 이후 모든 호출은 보내지 않는다(사람 재개).
-- -1021 연속 3회: K6 판정 요청 경보(D-115). 바이낸스 서버 시각 오차 0.5초 이상: 시계 경고 [결정 A-064].
+- -1021: 연속 구간 시작에 시계 경고(CLOCK), 서명 요청(주문·조회) 응답 연속 3회면 K6 판정 요청 경보(D-115). 정지 연결은
+  halt/broker_alerts.BrokerAlertHalts(on_alert 자리). 바이낸스 서버 시각 오차 0.5초 이상: 시계 경고 [결정 A-064].
 - 로그·오류·경보 문구에 쿼리 문자열(서명 포함)·API 키·응답 원문을 넣지 않는다. 경로·HTTP 상태·코드만.
 - 엔드포인트 weight(BN §3~§8, 2026-10-04·05 확인): 주문 POST/DELETE 성공 0·실패 1(예산은 1로 잡음), 주문 조회 4,
   myTrades 20, allOrders 20, 서버 시각 1. [추정] 실패 주문의 weight 1은 문서 weight 표기값 기준.
@@ -240,6 +241,8 @@ class BinanceSpotClient:
             v = classify_query_reply(reply.status, body)
             self._after_reply(reply, Flag.BANNED if v.kind is QueryKind.BANNED else
                               Flag.RATE_LIMITED if v.kind is QueryKind.RATE_LIMITED else Flag.NONE)
+            if signed:   # -1021 연속 판정은 서명 요청 응답 전부(주문·조회)로 센다. 서버 시각 조회(서명 없음)는 제외 (D-115)
+                self._watch_clock(v.kind is QueryKind.CLOCK)
             if v.kind is QueryKind.OK or v.kind in results:
                 return v.kind, body
             last, last_kind = f"GET {path}: {v.reason}", v.kind
@@ -283,6 +286,8 @@ class BinanceSpotClient:
             self._clock = _ClockWatch()
             return
         self._clock.streak += 1
+        if self._clock.streak == 1:   # 시계 경고 (D-115) — 연속 구간마다 한 번 [제안: 매 수신이 아니라 구간 시작에만]
+            self._alert("CLOCK", "-1021 시각 검증 거부 — 시계 경고")
         if self._clock.streak >= CLOCK_STREAK_ALERT and not self._clock.alerted:
             self._clock.alerted = True
             self._alert("K6", f"-1021 연속 {self._clock.streak}회 — 시계 판정 요청")

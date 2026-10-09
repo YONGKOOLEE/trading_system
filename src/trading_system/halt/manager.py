@@ -56,7 +56,12 @@ RAISED_BY = "raised_by:"            # K4 행을 다른 주체가 다시 건 기�
 K5_LINK_REST = "link:rest"
 K5_LINK_REALTIME = "link:realtime"
 K5_LINK_THREAD = "link:thread"   # 입출력 스레드 종료 — 프로세스 재시작(engine.start)만 정상 보고 (재검토 F2)
-_K5_LINK_OF_ACTOR = {"realtime": K5_LINK_REALTIME, "thread": K5_LINK_THREAD}   # 발동 주체 → 끊긴 경로 (그 밖은 조회 경로)
+# M2 HTTP 418 IP 차단 (CP-024 D-113): 자동 재개 없음 — 사람 확인(halt/broker_alerts.py)만 이 경로를 정상으로 보고한다.
+# 경로를 가리지 않는 broker_connected 보고로는 풀리지 않는다. M1에는 이 경로가 생기지 않는다(발동 주체 K5_IP_BAN_ACTOR는 M2 연결만)
+K5_LINK_IP_BAN = "link:ip_ban"
+K5_IP_BAN_ACTOR = "ip_ban"
+_K5_LINK_OF_ACTOR = {"realtime": K5_LINK_REALTIME, "thread": K5_LINK_THREAD,
+                     K5_IP_BAN_ACTOR: K5_LINK_IP_BAN}   # 발동 주체 → 끊긴 경로 (그 밖은 조회 경로)
 
 
 class Channel:
@@ -224,9 +229,10 @@ class HaltManager:
                 if recon is not None:
                     conds[name]["recon"] = recon
                 if halt_type is HaltType.K5 and name == "broker_connected":
-                    # 경로를 가리지 않는 연결 보고 = 모든 경로에 대한 보고 (RV-02 이전 계약 유지).
+                    # 경로를 가리지 않는 연결 보고 = 모든 경로에 대한 보고 (RV-02 이전 계약 유지). 단 M2 IP 차단
+                    # 경로(K5_LINK_IP_BAN)는 사람 확인으로만 (D-113).
                     # 운영 코드는 경로별(K5_LINK_REST·K5_LINK_REALTIME)로 보고한다
-                    for k in [k for k in conds if k.startswith("link:")]:
+                    for k in [k for k in conds if k.startswith("link:") and k != K5_LINK_IP_BAN]:
                         conds[k] = {"ok": ok, "at": now.isoformat(), "evidence": evidence}
                 met = self._conditions_met(halt_type, row, conds)
                 state = row["state"]
