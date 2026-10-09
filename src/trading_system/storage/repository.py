@@ -141,6 +141,12 @@ CREATE TABLE IF NOT EXISTS fill_fee (
   recorded_at TEXT NOT NULL, confirmed_at TEXT);
 -- 고객 주문 ID (M2 newClientOrderId, CP-024 D-110, T-M2-05): 의도별 유일·재사용 금지(기본 키·유일 제약). 전송 시도 기록과
 -- 같은 저장 단위에서 전송 전에 쓴다. 추가 표라 스키마 버전 불변(위와 같음). M1(키움)은 쓰지 않는다
+-- M2 대조 결과의 자산별 값 (CP-024 D-103, 02 ENT-24 M2, T-M2-06): 대조 1회당 자산별 내부값·거래소 free·locked·합·대조 범위
+-- 여부. 추가 표라 스키마 버전 불변. M1 대조는 쓰지 않는다
+CREATE TABLE IF NOT EXISTS recon_asset (
+  recon_id TEXT NOT NULL REFERENCES reconciliation(recon_id), mode TEXT NOT NULL, account TEXT NOT NULL,
+  asset TEXT NOT NULL, internal TEXT, broker_free TEXT NOT NULL, broker_locked TEXT NOT NULL, broker_total TEXT NOT NULL,
+  in_scope INTEGER NOT NULL, PRIMARY KEY (recon_id, asset));
 CREATE TABLE IF NOT EXISTS client_order (
   client_order_id TEXT PRIMARY KEY, mode TEXT NOT NULL, intent_id TEXT NOT NULL UNIQUE,
   account TEXT NOT NULL, instrument TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -950,6 +956,15 @@ class Repository:
                 (item_id, self.mode.value, recon_id, account, kind, instrument, ref, internal_value, broker_value,
                  detail, "OPEN"))
         return item_id
+
+    def insert_recon_assets(self, recon_id: str, account: str,
+                            rows: list[tuple[str, str | None, Decimal, Decimal, bool]]) -> None:
+        """M2 대조의 자산별 값 (자산, 내부값, 거래소 free, locked, 대조 범위) — D-103."""
+        for asset, internal, free, locked, in_scope in rows:
+            self._x("INSERT INTO recon_asset(recon_id, mode, account, asset, internal, broker_free, broker_locked, "
+                    "broker_total, in_scope) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (recon_id, self.mode.value, account, asset, internal, str(free), str(locked), str(free + locked),
+                     1 if in_scope else 0))
 
     def open_recon_items(self, account: str | None = None) -> list[dict]:
         sql, params = "SELECT * FROM recon_item WHERE state='OPEN'", ()

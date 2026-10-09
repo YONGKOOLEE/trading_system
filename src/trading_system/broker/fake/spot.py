@@ -114,6 +114,16 @@ class FakeSpotBroker(FakeBroker):
                                   instrument=instrument))
         return out
 
+    def query_fills(self, account: str) -> list[FillRecord]:
+        """대조용 체결 조회(오늘 범위는 FakeBroker와 같음) + M2 수수료·수수료 자산·보고 금액·심볼 (D-101·D-118)."""
+        out: list[FillRecord] = []
+        for f in super().query_fills(account):
+            o = self._find(self._day, f.order_no).record
+            fee, asset = self._fees.get(f.fill_id, (None, None))
+            out.append(replace(f, at=self._fill_at.get(f.fill_id, f.at), commission=fee, commission_asset=asset,
+                               quote_qty=self._reported(f.quantity, f.price), instrument=o.instrument))
+        return out
+
     def _reported(self, qty: Decimal, px: Decimal) -> Decimal:
         return self.quote_report(qty, px) if self.quote_report is not None else qty * px
 
