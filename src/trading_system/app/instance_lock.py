@@ -69,12 +69,13 @@ def acquire_instance_lock(base: Path, name: str = LOCK_NAME) -> InstanceLock:
     return InstanceLock(path, f)
 
 
-def instance_running(base: Path) -> bool:
-    """다른 실행이 잠금을 쥐고 있으면 True. 잠금 파일이 없으면 False(실행된 적 없음)."""
-    if not (base / LOCK_NAME).exists():
+def instance_running(base: Path, name: str = LOCK_NAME) -> bool:
+    """다른 실행이 잠금을 쥐고 있으면 True. 잠금 파일이 없으면 False(실행된 적 없음).
+    name: 확인할 잠금 파일 (기본 run.lock = 엔진, AUTOPILOT_LOCK = 자동 운영 — CP-032 D-180 실측 도구가 둘 다 본다)."""
+    if not (base / name).exists():
         return False
     try:
-        acquire_instance_lock(base).release()
+        acquire_instance_lock(base, name).release()
     except InstanceLocked:
         return True
     return False
