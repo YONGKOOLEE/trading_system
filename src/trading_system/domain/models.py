@@ -193,6 +193,11 @@ class OrderEvent:
     new_order_no: str | None = None
     account: str | None = None      # 계좌 별칭 (어댑터가 계좌번호를 별칭으로 바꿔 넣음). 없으면 거래일로만 찾음
     trade_date: str | None = None   # KST 거래일 (YYYY-MM-DD). 없으면 반영 시점의 KST 날짜
+    # 체결 수수료와 수수료 자산 (M2 현물, D-101). 둘 다 없으면 수수료를 포지션에 반영하지 않는다(M1 동작 그대로)
+    commission: Decimal | None = None
+    commission_asset: str | None = None
+    # 종결 통보(CANCELLED·EXPIRED·REJECTED)의 사유 (예: M2 IOC 미체결분 소멸, D-104). 없으면 종류별 기본 문구(M1 그대로)
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
