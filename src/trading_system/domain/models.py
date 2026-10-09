@@ -28,6 +28,20 @@ def signal_id_of(strategy_id: str, version: int, evaluation_id: str, instrument:
     return "sig-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
 
 
+CLIENT_ORDER_ID_PREFIX = "M2-"
+
+
+def client_order_id_of(idem_key: str) -> str:
+    """고객 주문 ID (M2 newClientOrderId, CP-024 D-110): 멱등키에서 결정적으로 — `M2-` + SHA-256 앞 32자(16진) = 35자.
+
+    1~36자 `[A-Za-z0-9_-]`(FIX 정규식을 보수 규칙으로 채택, REST 문서에 규칙 없음 — B-U16 미확인, PV-M2-09).
+    같은 의도(멱등키)는 재시작 후에도 같은 ID, 다른 의도는 다른 ID. 재사용 금지는 저장소 유일 제약으로 막는다.
+    broker/binance/orders.client_order_id와 같은 규칙이다(타입 경계 D-119 때문에 공통 쪽에 따로 둔다)."""
+    if not isinstance(idem_key, str) or not idem_key:
+        raise ValueError("멱등키가 비어 있다")
+    return CLIENT_ORDER_ID_PREFIX + hashlib.sha256(idem_key.encode("utf-8")).hexdigest()[:32]
+
+
 @dataclass(frozen=True)
 class Account:
     alias: str
@@ -168,6 +182,7 @@ class OrderRequest:
     order_type: OrderType
     price: Decimal
     target_order_no: str | None = None
+    client_order_id: str | None = None   # M2 고객 주문 ID (D-110). M1은 None
 
 
 @dataclass(frozen=True)
@@ -175,6 +190,8 @@ class SubmitResult:
     outcome: SubmitOutcome
     order_no: str | None = None
     reason: str | None = None
+    # 브로커 오류 코드 (M2 바이낸스 -1013 등, D-112). 후처리(dust 확정 D-102 등)의 판정 근거. M1은 None
+    code: int | None = None
 
 
 @dataclass(frozen=True)
@@ -198,6 +215,12 @@ class OrderEvent:
     commission_asset: str | None = None
     # 종결 통보(CANCELLED·EXPIRED·REJECTED)의 사유 (예: M2 IOC 미체결분 소멸, D-104). 없으면 종류별 기본 문구(M1 그대로)
     reason: str | None = None
+    # M2 (CP-024 D-110·D-118): 심볼(주문번호는 심볼 안에서만 유일), 거래소 보고 체결 금액(executionReport Y·myTrades
+    # quoteQty). quote_confirmed=False면 FULL 응답 fills처럼 보고 금액이 없어 price × qty 임시값. 음수 = 데이터 없음.
+    # 모두 없으면(M1) 기존 동작 그대로
+    instrument: str | None = None
+    quote_qty: Decimal | None = None
+    quote_confirmed: bool = False
 
 
 @dataclass(frozen=True)
@@ -218,17 +241,24 @@ class BrokerOrderRecord:
     order_type: OrderType
     state: str
     original_order_no: str | None = None
+    client_order_id: str | None = None   # M2 조회(주문 조회·allOrders)의 고객 주문 ID (D-111). M1은 None
 
 
 @dataclass(frozen=True)
 class FillRecord:
-    """브로커 조회의 체결 한 건 (정규화). 체결번호가 있어야 중복 없이 반영할 수 있다."""
+    """브로커 조회의 체결 한 건 (정규화). 체결번호가 있어야 중복 없이 반영할 수 있다.
+
+    M2(myTrades): 수수료·수수료 자산·보고 금액(quoteQty)·심볼을 함께 준다(D-101·D-118). M1은 None."""
 
     order_no: str
     fill_id: str
     quantity: Decimal
     price: Decimal
     at: datetime
+    commission: Decimal | None = None
+    commission_asset: str | None = None
+    quote_qty: Decimal | None = None
+    instrument: str | None = None
 
 
 @dataclass(frozen=True)

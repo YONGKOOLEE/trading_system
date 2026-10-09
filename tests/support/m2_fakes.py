@@ -18,7 +18,8 @@ from decimal import Decimal
 from pathlib import Path
 
 from tests.support.gate_fakes import FakeAccount, FakeClockHealth, FakeLimits, FakeStrategies
-from trading_system.broker.fake.broker import FakeBroker, FakeSpotFees
+from trading_system.broker.fake.broker import FakeSpotFees
+from trading_system.broker.fake.spot import FakeSpotBroker
 from trading_system.domain.clock import FixedClock
 from trading_system.domain.enums import Mode
 from trading_system.domain.limits import AccountLimits
@@ -29,12 +30,14 @@ from trading_system.domain.market_time import M2_TIME, session_247
 from trading_system.domain.trading_rules import SpotOrderPolicy, SymbolRules
 from trading_system.domain.trading_rules import ioc_buy_price as _ioc_buy_price
 from trading_system.domain.models import Account
+from trading_system.execution.dust import DustHandler
 from trading_system.execution.executor import Executor
 from trading_system.gate.gate import Gate
 from trading_system.gate.ports import GateInputs, GatePolicy
 from trading_system.halt.manager import HaltManager
 from trading_system.monitoring.spot_cash import SpotAccountFacts
-from trading_system.storage.repository import Repository
+from trading_system.storage.alerts import AuditAlertSink
+from trading_system.storage.repository import OrderIdentity, Repository
 
 ACCOUNT = "BN-BT-01"
 QUOTE_ASSET = "USDT"
@@ -148,20 +151,22 @@ class SpotRulesFake:
 
     market: SpotMarket
     table: dict[str, SymbolRules] = field(default_factory=lambda: {s: symbol_rules(s) for s in RULES})
+    # 최근가 외 참조가(avgPrice·referencePrice 가상값, T-M2-04 dust 경계 시험)
+    extra_prices: dict[str, tuple[Decimal, ...]] = field(default_factory=dict)
 
     def rules(self, instrument: str) -> SymbolRules | None:
         return self.table.get(instrument)
 
     def market_prices(self, instrument: str) -> tuple[Decimal, ...]:
         q = self.market.quote(instrument)
-        return () if q is None else (q.price,)
+        return (() if q is None else (q.price,)) + self.extra_prices.get(instrument, ())
 
 
 @dataclass
 class M2Env:
     repo: Repository
     clock: FixedClock
-    broker: FakeBroker
+    broker: FakeSpotBroker
     gate: Gate
     executor: Executor
     halts: HaltManager
@@ -169,16 +174,19 @@ class M2Env:
     market: SpotMarket
     account: FakeAccount | SpotAccountFacts
     rules: SpotRulesFake
+    dust: DustHandler
 
 
 def build_m2_env(tmp_path: Path, broker_env: str = "fake", *, limits: AccountLimits | None = None,
                  ioc: bool = False, spot_rules: bool = True, spot_cash: bool = False) -> M2Env:
     """spot_cash=True이면 게이트 계좌 사실 = SpotAccountFacts(M2 현금 정책·UTC 일일 리스크, T-M2-07).
     기본 False는 고정값 FakeAccount(T-M2-01~03 시험)."""
-    repo = Repository(tmp_path / "trading.db", Mode.BACKTEST)
+    # M2 브로커 주문 식별 = (계좌, 심볼, orderId) (D-110, T-M2-05)
+    repo = Repository(tmp_path / "trading.db", Mode.BACKTEST, order_identity=OrderIdentity.SYMBOL)
     repo.register_account(Account(alias=ACCOUNT, mode=Mode.BACKTEST, broker_env=broker_env))
     clock = FixedClock(T0)
-    broker = FakeBroker()
+    broker = FakeSpotBroker(now=clock.now)   # M2 조회 계약(고객 주문 ID·allOrders·myTrades·자산 잔고) 포함 fake
+    broker.grant = {QUOTE_ASSET: BASE_AMOUNT}
     broker.spot_fees = FakeSpotFees(rate=FEE_RATE, pairs=PAIRS)
     broker.ioc_limit = ioc
     market = SpotMarket(now=clock.now)
@@ -203,9 +211,13 @@ def build_m2_env(tmp_path: Path, broker_env: str = "fake", *, limits: AccountLim
                         spot_rules=rules if spot_rules else None)
     gate = Gate(repo, clock, inputs, M2_POLICY)
     kill_file = tmp_path / "KILL"
-    executor = Executor(repo, broker, clock, kill_file, asset_pair=asset_pair)
+    executor = Executor(repo, broker, clock, kill_file, asset_pair=asset_pair, client_ids=True)
     halts = HaltManager(repo, gate, executor, clock,
                         reference_time_of=lambda a: (lim.daily_reference_time
                                                      if (lim := limits.by_account.get(a)) else None),
                         market_time=M2_TIME)
-    return M2Env(repo, clock, broker, gate, executor, halts, kill_file, market, account, rules)
+    # dust 처리 (D-102, T-M2-04): 청산 전 판정·-1013 거부 후 확정. 규칙·참조가·시세는 위 가상 공급자
+    dust = DustHandler(repo, clock, AuditAlertSink(repo, clock, actor="dust"), rules_of=rules.rules,
+                       market_prices_of=rules.market_prices, quote_of=market.quote, policy=M2_ORDER_POLICY)
+    executor.reject_listeners.append(dust.after_reject)
+    return M2Env(repo, clock, broker, gate, executor, halts, kill_file, market, account, rules, dust)

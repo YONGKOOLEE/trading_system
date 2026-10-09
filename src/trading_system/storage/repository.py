@@ -17,8 +17,9 @@ import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
+from enum import StrEnum
 from pathlib import Path
 
 from trading_system.domain.clock import KST, from_iso, to_iso
@@ -27,6 +28,7 @@ from trading_system.domain.enums import ACTIVE_INTENT_STATES, IntentState, Mode
 from trading_system.domain.models import Account
 
 DAILY_BASE_KIND = "DAILY_BASE"   # 거래일별 일일 기준 감사 기록 (monitoring.watchers.DAILY_BASE와 같은 값)
+DUST_RELEASE_REASON = "dust 확정"  # 소유권 해제 사유 (CP-024 D-102, 01 R-28·02 ENT-20 개정 방향)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -129,6 +131,25 @@ CREATE TABLE IF NOT EXISTS quote_poll_stat (
   watched INTEGER NOT NULL, instruments INTEGER NOT NULL, requests INTEGER NOT NULL, failures INTEGER NOT NULL,
   latency_ms_p50 INTEGER, latency_ms_max INTEGER, interval_avg_seconds TEXT, interval_max_seconds TEXT,
   response_fields TEXT, recorded_at TEXT NOT NULL);
+-- 체결 수수료·거래소 보고 금액 (M2, CP-024 D-101·D-118, T-M2-04): 체결 1건당 0~1행의 추가 표. 기존 표·열·의미를
+-- 바꾸지 않으므로 스키마 버전을 올리지 않는다(quote_snapshot과 같은 방식, A-072 ⑤) — 기존 M1 저장소도 열 때 생성되고
+-- M1 체결(수수료 자산·보고 금액 없음)은 이 표에 쓰지 않는다. quote_status: PROVISIONAL(fills만 — price × qty 임시값) /
+-- CONFIRMED(executionReport Y·myTrades quoteQty). 확정값으로만 USDT 대조 (D-103)
+CREATE TABLE IF NOT EXISTS fill_fee (
+  fill_key TEXT PRIMARY KEY REFERENCES fill(fill_key), mode TEXT NOT NULL,
+  commission TEXT, commission_asset TEXT, quote_qty TEXT NOT NULL, quote_status TEXT NOT NULL,
+  recorded_at TEXT NOT NULL, confirmed_at TEXT);
+-- 고객 주문 ID (M2 newClientOrderId, CP-024 D-110, T-M2-05): 의도별 유일·재사용 금지(기본 키·유일 제약). 전송 시도 기록과
+-- 같은 저장 단위에서 전송 전에 쓴다. 추가 표라 스키마 버전 불변(위와 같음). M1(키움)은 쓰지 않는다
+-- M2 대조 결과의 자산별 값 (CP-024 D-103, 02 ENT-24 M2, T-M2-06): 대조 1회당 자산별 내부값·거래소 free·locked·합·대조 범위
+-- 여부. 추가 표라 스키마 버전 불변. M1 대조는 쓰지 않는다
+CREATE TABLE IF NOT EXISTS recon_asset (
+  recon_id TEXT NOT NULL REFERENCES reconciliation(recon_id), mode TEXT NOT NULL, account TEXT NOT NULL,
+  asset TEXT NOT NULL, internal TEXT, broker_free TEXT NOT NULL, broker_locked TEXT NOT NULL, broker_total TEXT NOT NULL,
+  in_scope INTEGER NOT NULL, PRIMARY KEY (recon_id, asset));
+CREATE TABLE IF NOT EXISTS client_order (
+  client_order_id TEXT PRIMARY KEY, mode TEXT NOT NULL, intent_id TEXT NOT NULL UNIQUE,
+  account TEXT NOT NULL, instrument TEXT NOT NULL, created_at TEXT NOT NULL);
 -- 조회 인덱스: 데이터 의미 불변이라 스키마 버전을 올리지 않는다 — 기존 저장소도 열 때 생성 (review C절, DP-38)
 CREATE INDEX IF NOT EXISTS ix_intent_state ON intent(state);
 CREATE INDEX IF NOT EXISTS ix_ops_command_status ON ops_command(status);
@@ -158,6 +179,18 @@ class SchemaMismatch(RuntimeError):
 
 
 SCHEMA_VERSION = "2"  # 1: 기준선 (CP-018). 2: 신호 규칙 ID·소유 해제 시각 (거래 이력). maintenance.MIGRATIONS
+
+
+class OrderIdentity(StrEnum):
+    """브로커 주문 식별 범위 (시장별, CP-024 D-110).
+
+    - TRADE_DATE (M1, 기본): (계좌, 거래일(KST), 주문번호) — 03 D-046. 키 `계좌|KST 날짜|주문번호`. 기존 동작 그대로.
+    - SYMBOL (M2): (계좌, 심볼, orderId) — orderId는 심볼 안에서만 유일(B-U17), 거래일을 식별에 쓰지 않는다.
+      키 `계좌|전송 UTC 날짜|심볼|orderId`(날짜는 참고용 — 조회는 열로 하며 날짜를 보지 않는다). trade_date 열 = 전송
+      시각의 UTC 날짜(M2 거래일, D-108). 같은 (계좌, 심볼, orderId)는 두 번 만들지 않는다."""
+
+    TRADE_DATE = "TRADE_DATE"
+    SYMBOL = "SYMBOL"
 
 
 def open_read_only(path: Path, mode: Mode, busy_timeout: float = 5.0) -> sqlite3.Connection:
@@ -206,6 +239,7 @@ class IntentRow:
     owner: str | None
     target_order_key: str | None
     broker_order_key: str | None
+    idem_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -275,9 +309,11 @@ class _Result:
 
 
 class Repository:
-    def __init__(self, path: Path, mode: Mode, busy_timeout: float = 5.0) -> None:
+    def __init__(self, path: Path, mode: Mode, busy_timeout: float = 5.0, *,
+                 order_identity: OrderIdentity = OrderIdentity.TRADE_DATE) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.mode = mode
+        self.order_identity = order_identity   # 브로커 주문 식별 범위 (M1 기본 TRADE_DATE, M2 SYMBOL — D-110)
         self._lock = threading.RLock()
         self._depth = 0
         self._tx_thread: int | None = None
@@ -469,6 +505,7 @@ class Repository:
             r["intent_id"], r["decision_id"], IntentState(r["state"]), r["source"], r["request_type"],
             r["account"], r["instrument"], r["side"], Decimal(r["quantity"]), Decimal(r["filled_quantity"]),
             Decimal(r["price"]), r["order_type"], r["owner"], r["target_order_key"], r["broker_order_key"],
+            r["idem_key"],
         )
 
     def intent(self, intent_id: str) -> IntentRow:
@@ -567,14 +604,27 @@ class Repository:
         """(계좌, 거래일, 주문번호) — 03 D-046."""
         return f"{account}|{at.astimezone(KST).date().isoformat()}|{order_no}"
 
+    def broker_order_key(self, account: str, at: datetime, order_no: str, instrument: str) -> str:
+        """식별 범위(OrderIdentity)에 맞는 브로커 주문 키. TRADE_DATE는 order_key와 같다(M1 불변)."""
+        if self.order_identity is OrderIdentity.SYMBOL:
+            return f"{account}|{at.astimezone(UTC).date().isoformat()}|{instrument}|{order_no}"
+        return self.order_key(account, at, order_no)
+
     def insert_broker_order(self, *, account: str, order_no: str, at: datetime, intent_id: str | None,
                             instrument: str, side: str, quantity: Decimal, origin: str,
                             target_order_key: str | None = None) -> str:
-        key = self.order_key(account, at, order_no)
+        key = self.broker_order_key(account, at, order_no, instrument)
+        if self.order_identity is OrderIdentity.SYMBOL:
+            trade_date = at.astimezone(UTC).date().isoformat()
+            if self._x("SELECT 1 FROM broker_order WHERE account=? AND instrument=? AND order_no=?",
+                       (account, instrument, order_no)).fetchone() is not None:
+                raise ValueError(f"이미 있는 브로커 주문 (계좌, 심볼, orderId) — D-110: {instrument} {order_no}")
+        else:
+            trade_date = at.astimezone(KST).date().isoformat()
         self._x("""INSERT INTO broker_order(order_key, mode, account, trade_date, order_no, intent_id, instrument,
                    side, quantity, filled_quantity, state, origin, target_order_key, created_at)
                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (key, self.mode.value, account, at.astimezone(KST).date().isoformat(), order_no, intent_id,
+                (key, self.mode.value, account, trade_date, order_no, intent_id,
                  instrument, side, str(quantity), "0", "ACCEPTED", origin, target_order_key, to_iso(at)))
         return key
 
@@ -587,13 +637,48 @@ class Repository:
         r = self._x("SELECT * FROM broker_order WHERE order_key = ?", (order_key,)).fetchone()
         return self._order(r) if r else None
 
-    def broker_order_by_no(self, order_no: str, trade_date: str, account: str | None = None) -> BrokerOrderRow | None:
-        """주문번호는 거래일·계좌 안에서만 유일하다고 본다 (03 D-046). 계좌를 모르는데 여러 계좌에 있으면 None."""
-        sql, params = "SELECT * FROM broker_order WHERE order_no=? AND trade_date=?", (order_no, trade_date)
+    def broker_order_by_no(self, order_no: str, trade_date: str, account: str | None = None, *,
+                           instrument: str | None = None) -> BrokerOrderRow | None:
+        """주문번호는 거래일·계좌 안에서만 유일하다고 본다 (03 D-046). 계좌를 모르는데 여러 계좌에 있으면 None.
+
+        SYMBOL 범위(M2, D-110): 거래일을 보지 않고 (계좌, 심볼, orderId)로 찾는다. 심볼을 모르는데 여러 건이면 None.
+        TRADE_DATE 범위(M1)는 instrument를 쓰지 않는다 — 기존 질의 그대로."""
+        if self.order_identity is OrderIdentity.SYMBOL:
+            sql, params = "SELECT * FROM broker_order WHERE order_no=?", (order_no,)
+            if instrument is not None:
+                sql, params = sql + " AND instrument=?", params + (instrument,)
+        else:
+            sql, params = "SELECT * FROM broker_order WHERE order_no=? AND trade_date=?", (order_no, trade_date)
         if account is not None:
             sql, params = sql + " AND account=?", params + (account,)
         rows = list(self._x(sql, params))
         return self._order(rows[0]) if len(rows) == 1 else None
+
+    def order_nos_of(self, account: str, instrument: str) -> set[str]:
+        """이 (계좌, 심볼)의 알려진 브로커 주문번호 전체 (SYMBOL 범위 M2 — 날짜 무관, D-110·D-111)."""
+        return {r["order_no"] for r in self._x("SELECT order_no FROM broker_order WHERE account=? AND instrument=?",
+                                               (account, instrument))}
+
+    # --- 고객 주문 ID (M2, D-110) ---------------------------------------------------
+    def insert_client_order(self, client_order_id: str, intent_id: str, account: str, instrument: str,
+                            at: datetime) -> bool:
+        """고객 주문 ID를 의도에 묶는다. 같은 의도에 같은 ID면 True(재시작 후 재확인), 다른 의도가 이미 쓰면 False(재사용 금지)."""
+        r = self._x("SELECT intent_id FROM client_order WHERE client_order_id=?", (client_order_id,)).fetchone()
+        if r is not None:
+            return bool(r["intent_id"] == intent_id)
+        if self._x("SELECT 1 FROM client_order WHERE intent_id=?", (intent_id,)).fetchone() is not None:
+            return False   # 이 의도에 이미 다른 ID — 의도당 ID 하나
+        self._x("INSERT INTO client_order(client_order_id, mode, intent_id, account, instrument, created_at) "
+                "VALUES(?,?,?,?,?,?)", (client_order_id, self.mode.value, intent_id, account, instrument, to_iso(at)))
+        return True
+
+    def client_order_of(self, intent_id: str) -> str | None:
+        r = self._x("SELECT client_order_id FROM client_order WHERE intent_id=?", (intent_id,)).fetchone()
+        return r["client_order_id"] if r else None
+
+    def intent_of_client_order(self, client_order_id: str) -> str | None:
+        r = self._x("SELECT intent_id FROM client_order WHERE client_order_id=?", (client_order_id,)).fetchone()
+        return r["intent_id"] if r else None
 
     def open_orders(self, account: str, side: str | None = None) -> list[BrokerOrderRow]:
         sql = ("SELECT * FROM broker_order WHERE account=? AND state IN ('ACCEPTED','PARTIAL') "
@@ -613,6 +698,24 @@ class Repository:
                       "VALUES(?,?,?,?,?,?,?)",
                       (f"{order_key}|{fill_id}", self.mode.value, order_key, fill_id, str(quantity), str(price), to_iso(at)))
         return cur.rowcount == 1
+
+    def insert_fill_fee(self, fill_key: str, commission: Decimal | None, commission_asset: str | None,
+                        quote_qty: Decimal, confirmed: bool, at: datetime) -> None:
+        """체결 수수료·보고 금액 기록 (M2, D-101·D-118). 체결 행을 기록한 같은 저장 단위에서 부른다."""
+        self._x("INSERT INTO fill_fee(fill_key, mode, commission, commission_asset, quote_qty, quote_status, "
+                "recorded_at, confirmed_at) VALUES(?,?,?,?,?,?,?,?)",
+                (fill_key, self.mode.value, None if commission is None else str(commission), commission_asset,
+                 str(quote_qty), "CONFIRMED" if confirmed else "PROVISIONAL", to_iso(at),
+                 to_iso(at) if confirmed else None))
+
+    def fill_fee(self, fill_key: str) -> dict | None:
+        r = self._x("SELECT * FROM fill_fee WHERE fill_key=?", (fill_key,)).fetchone()
+        return dict(r) if r else None
+
+    def confirm_fill_quote(self, fill_key: str, quote_qty: Decimal, at: datetime) -> None:
+        """임시 금액(PROVISIONAL)을 거래소 보고 금액으로 확정한다 (D-118)."""
+        self._x("UPDATE fill_fee SET quote_qty=?, quote_status='CONFIRMED', confirmed_at=? "
+                "WHERE fill_key=? AND quote_status='PROVISIONAL'", (str(quote_qty), to_iso(at), fill_key))
 
     # --- 포지션 -------------------------------------------------------------
     def position(self, account: str, instrument: str) -> PositionRow:
@@ -651,6 +754,17 @@ class Repository:
         self._x("UPDATE ownership SET state=?, released_reason=COALESCE(?, released_reason), "
                 "released_at=COALESCE(?, released_at) WHERE ownership_id=?",
                 (state, reason, to_iso(at) if at is not None and state == "RELEASED" else None, ownership_id))
+
+    def dust_instruments(self, account: str) -> set[str]:
+        """dust 확정으로 소유권이 해제된 뒤 잔량만 남은 종목 (M2, D-102: 포지션 없음 취급·L6 제외).
+
+        종목별 마지막 소유권 행이 RELEASED + 사유 "dust 확정"이고 보유 수량 > 0인 것. 그 뒤 재진입하면 새 소유권이 생겨 빠진다."""
+        latest: dict[str, sqlite3.Row] = {}
+        for r in self._x("SELECT * FROM ownership WHERE account=? ORDER BY created_at, rowid", (account,)):
+            latest[r["instrument"]] = r
+        return {inst for inst, r in latest.items()
+                if r["state"] == "RELEASED" and r["released_reason"] == DUST_RELEASE_REASON
+                and self.position(account, inst).quantity > 0}
 
     def strategy_history(self, account: str, owner: str, instrument: str) -> dict:
         """전략·종목 거래 이력 원자료 (00 §2.2 거래 이력). 체결 0주로 끝난 진입은 진입으로 세지 않는다."""
@@ -842,6 +956,15 @@ class Repository:
                 (item_id, self.mode.value, recon_id, account, kind, instrument, ref, internal_value, broker_value,
                  detail, "OPEN"))
         return item_id
+
+    def insert_recon_assets(self, recon_id: str, account: str,
+                            rows: list[tuple[str, str | None, Decimal, Decimal, bool]]) -> None:
+        """M2 대조의 자산별 값 (자산, 내부값, 거래소 free, locked, 대조 범위) — D-103."""
+        for asset, internal, free, locked, in_scope in rows:
+            self._x("INSERT INTO recon_asset(recon_id, mode, account, asset, internal, broker_free, broker_locked, "
+                    "broker_total, in_scope) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (recon_id, self.mode.value, account, asset, internal, str(free), str(locked), str(free + locked),
+                     1 if in_scope else 0))
 
     def open_recon_items(self, account: str | None = None) -> list[dict]:
         sql, params = "SELECT * FROM recon_item WHERE state='OPEN'", ()

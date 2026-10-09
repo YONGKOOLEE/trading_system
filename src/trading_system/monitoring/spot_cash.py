@@ -20,9 +20,9 @@
 - 거래일별 기준을 감사 기록 DAILY_BASE(market = M2)로 남기고, 같은 거래일에 재시작하면 저장된 기준을 쓴다.
 
 [제안] 결정이 문서에 없어 보수 쪽으로 정한 것 (T-M2-07):
-- (1) 체결 수수료·수수료 자산은 체결 기록 스키마에 아직 없다(T-M2-04). 그 전까지 매수·매도 모두 "USDT로 낸 수수료"로
-  보고 추정 수수료(D-118 올림)를 기대 USDT에서 뺀다. 기초 자산 수수료 매수에서는 기대 USDT가 실제보다 작아진다(보수).
-  T-M2-04에서 수수료 기록·거래소 보고 금액(Y·quoteQty)으로 바꾼다. 체결 금액은 price × qty(D-118 임시값).
+- (1) [T-M2-04 반영] 체결 수수료 기록(fill_fee)이 있는 체결은 거래소 보고 금액(Y·quoteQty, 확정 전 임시값)과 USDT로 낸
+  수수료 기록값을 쓴다(기초 자산 수수료는 USDT에서 빼지 않음, D-101·D-103). 기록이 없는 체결만 종전대로 "USDT로 낸
+  수수료"로 보고 추정 수수료(D-118 올림)를 빼고 금액은 price × qty(보수).
 - (2) 기준선 시각과 같은 시각의 체결: 매수는 포함(차감), 매도는 제외(수령액 미반영) — 어느 쪽이든 기대 USDT가 작아짐.
 - (3) 기준선 설정 = set_baseline(사람 확정, D-103 최초 시작·리셋 확인). 감사 기록 SPOT_QUOTE_BASELINE으로 남기고
   재시작 때 마지막 값을 복원한다. 기준선 확정 절차·대조(K4)는 T-M2-06.
@@ -83,25 +83,40 @@ class _DayBase:
 
 
 def quote_flow(repo: Repository, account: str, since: datetime, rates: CostRates,
-               quote_of: Callable[[str], str | None], quote_asset: str) -> Decimal | None:
-    """`since` 이후 체결이 호가 자산(USDT)을 바꾼 양. 매도 +(금액 − 추정 수수료), 매수 −(금액 + 추정 수수료).
+               pair_of: Callable[[str], tuple[str, str] | None], quote_asset: str) -> Decimal | None:
+    """`since` 이후 체결이 호가 자산(USDT)을 바꾼 양. 매도 +(금액 − USDT 수수료), 매수 −(금액 + USDT 수수료) (D-103).
 
-    금액 = 체결 수량 × 체결 가격(D-118 임시값), 추정 수수료 = estimate_cost(D-118 올림) — [제안](1).
-    매수는 since와 같은 시각 포함, 매도는 제외 — [제안](2). 호가 자산이 다르거나 모르는 종목의 체결이 있으면 None.
+    [T-M2-04] 체결 수수료 기록(fill_fee)이 있으면: 금액 = 거래소 보고 금액(Y·quoteQty, 확정 전이면 price × qty 임시값,
+    D-118), 수수료 = 수수료 자산이 USDT일 때만 기록값(기초 자산 수수료는 포지션 쪽, D-101). 기록이 없는 체결은 종전대로
+    금액 = price × qty, 추정 수수료(estimate_cost, D-118 올림) — [제안](1)의 보수 추정.
+    매수는 since와 같은 시각 포함, 매도는 제외 — [제안](2). 호가 자산이 다르거나 모르는 종목·기초·호가 외 수수료 자산의
+    체결이 있으면 None(모름).
     """
     rows = repo.select(
-        "SELECT b.side, b.instrument, f.quantity, f.price, f.at FROM fill f "
-        "JOIN broker_order b ON f.order_key=b.order_key WHERE b.account=?", (account,))
+        "SELECT b.side, b.instrument, f.quantity, f.price, f.at, e.commission, e.commission_asset, e.quote_qty "
+        "FROM fill f JOIN broker_order b ON f.order_key=b.order_key "
+        "LEFT JOIN fill_fee e ON e.fill_key=f.fill_key WHERE b.account=?", (account,))
     total = _ZERO
     for r in rows:
         at = from_iso(r["at"])
         is_sell = r["side"] == "SELL"
         if at < since or (is_sell and at == since):
             continue
-        if quote_of(r["instrument"]) != quote_asset:
+        pair = pair_of(r["instrument"])
+        if pair is None or pair[1] != quote_asset:
             return None
-        amount = Decimal(r["quantity"]) * Decimal(r["price"])
-        cost = estimate_cost(amount, is_sell, rates)
+        if r["quote_qty"] is None:
+            amount = Decimal(r["quantity"]) * Decimal(r["price"])
+            cost = estimate_cost(amount, is_sell, rates)
+        else:
+            amount = Decimal(r["quote_qty"])
+            asset = r["commission_asset"]
+            if asset == quote_asset:
+                cost = Decimal(r["commission"])
+            elif asset == pair[0] or asset is None:
+                cost = _ZERO   # 기초 자산 수수료(순 수령, D-101) 또는 수수료 없음
+            else:
+                return None
         total += (amount - cost) if is_sell else -(amount + cost)
     return total
 
@@ -155,7 +170,7 @@ class SpotAccountFacts:
         b = self._load_baseline(account)
         if b is None:
             return None
-        flow = quote_flow(self._repo, account, b[1], self._rates, self._quote_of, self._quote)
+        flow = quote_flow(self._repo, account, b[1], self._rates, self._pair, self._quote)
         return None if flow is None else b[0] + flow
 
     def cash(self, account: str) -> CashView | None:
@@ -198,7 +213,7 @@ class SpotAccountFacts:
         if day is None or day.trade_date != self._today():
             return None  # 새 거래일 기준 미고정 → 모름
         value = self._positions_value(account)
-        flow = quote_flow(self._repo, account, day.at, self._rates, self._quote_of, self._quote)
+        flow = quote_flow(self._repo, account, day.at, self._rates, self._pair, self._quote)
         if value is None or flow is None:
             return DailyRisk(day.amount, _ZERO, _ZERO, _ZERO, evaluable=False)
         return DailyRisk(day.amount, _ZERO, day.cash + flow + value - day.amount, _ZERO)
@@ -206,10 +221,6 @@ class SpotAccountFacts:
     # --- 내부 -----------------------------------------------------------------
     def _today(self) -> str:
         return self._mt.trade_date(self._clock.now(), self._ref).isoformat()
-
-    def _quote_of(self, instrument: str) -> str | None:
-        pair = self._pair(instrument)
-        return None if pair is None else pair[1]
 
     def _fresh_balance(self, account: str) -> QuoteBalance | None:
         bal = self._balance.get(account)

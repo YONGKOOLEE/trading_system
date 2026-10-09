@@ -283,6 +283,9 @@ class Gate:
             if count + 1 > lim.l5_daily_new_orders:
                 raise _Reject(Check.G7, f"L5 일일 신규 주문 수 초과 ({count + 1} > {lim.l5_daily_new_orders})")
         if req.request_type is RequestType.ENTRY:
+            if self._in.spot_rules is not None:
+                # M2: dust 확정으로 소유권이 풀린 잔량 종목은 보유 종목 수에 세지 않는다 (D-102, V-131). M1은 이 경로 없음
+                held_symbols -= self._repo.dust_instruments(req.account)
             slots = held_symbols | entry_symbols
             if req.instrument not in slots and len(slots) + 1 > lim.l6_max_positions:
                 raise _Reject(Check.G7, f"L6 보유 종목 수 초과 ({len(slots) + 1} > {lim.l6_max_positions})")
