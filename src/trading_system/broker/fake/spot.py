@@ -13,17 +13,48 @@ FakeBroker(주문장·장애 주입·IOC·수수료 자산)에 M2 조회 계약(
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 
-from trading_system.broker.base import LookupKind, OrderLookup
+from trading_system.broker.base import BrokerQueryError, LookupKind, OrderLookup
+from trading_system.domain.enums import SubmitOutcome
 from trading_system.domain.models import BrokerOrderRecord, FillRecord, OrderRequest, SubmitResult
 
 from .broker import FakeBehavior, FakeBroker
 
 _OPEN = ("ACCEPTED", "PARTIAL")
 _ZERO = Decimal("0")
+
+
+@dataclass(frozen=True)
+class ReplySpec:
+    """합성 주문 응답 (T-M2-09 장애 주입). outcome·code는 D-112 4분류 — 어댑터 분류(broker/binance/classify)와 같은지
+    tests/scenario/test_tm2_09_faults가 대조한다. received = 거래소가 실제로 주문을 받았는지(fake의 사실)."""
+
+    status: int
+    body: dict | None
+    outcome: SubmitOutcome
+    code: int | None
+    received: bool = False
+    banned: bool = False   # 418: 이후 모든 호출 중단 (D-113, 사람 재개)
+
+
+REPLY_TABLE: dict[str, ReplySpec] = {
+    "-1013": ReplySpec(400, {"code": -1013, "msg": "Filter failure: NOTIONAL"}, SubmitOutcome.REJECTED, -1013),
+    "-1021": ReplySpec(400, {"code": -1021, "msg": "Timestamp for this request is outside of the recvWindow."},
+                       SubmitOutcome.REJECTED, -1021),
+    "-2010": ReplySpec(400, {"code": -2010, "msg": "Account has insufficient balance for requested action."},
+                       SubmitOutcome.REJECTED, -2010),
+    "-2010dup": ReplySpec(400, {"code": -2010, "msg": "Duplicate order sent."}, SubmitOutcome.UNKNOWN, -2010),
+    "429": ReplySpec(429, {"code": -1003, "msg": "Too many requests."}, SubmitOutcome.UNKNOWN, -1003),
+    "418": ReplySpec(418, {"code": -1003, "msg": "IP banned."}, SubmitOutcome.UNKNOWN, -1003, banned=True),
+    "5xx": ReplySpec(503, None, SubmitOutcome.UNKNOWN, None),
+    "5xx+": ReplySpec(503, None, SubmitOutcome.UNKNOWN, None, received=True),
+    "403": ReplySpec(403, None, SubmitOutcome.UNKNOWN, None),
+    "-1022": ReplySpec(401, {"code": -1022, "msg": "Signature for this request is not valid."},
+                       SubmitOutcome.UNKNOWN, -1022),
+}
 
 
 class FakeSpotBroker(FakeBroker):
@@ -43,14 +74,33 @@ class FakeSpotBroker(FakeBroker):
         self.grant: dict[str, Decimal] = {}          # 지급 잔고 (리셋 때 다시 지급)
         self._adjust: dict[str, Decimal] = {}        # 외부 입출금·수동 거래 (가상)
         self._effects_from = 0                       # 이 체결 순번부터 잔고 효과에 넣는다 (리셋 뒤 0부터)
+        self.replies: list[str] = []                 # 다음 신규 주문들의 합성 응답 (REPLY_TABLE 키, T-M2-09)
+        self.banned = False                          # 418 이후 호출 중단
 
     # --- 주문 ------------------------------------------------------------------------
     def place_order(self, request: OrderRequest) -> SubmitResult:
+        if self.banned:   # 418 뒤: 어댑터가 호출하지 않는다 → 전송 전 실패 (D-113)
+            return SubmitResult(SubmitOutcome.PRE_SEND_FAILURE, reason="fake: 418 차단 중 — 호출 중단")
+        spec = REPLY_TABLE[self.replies.pop(0)] if self.replies else None
+        if spec is not None and not spec.received:
+            self.sent.append(request)
+            self.banned = self.banned or spec.banned
+            return SubmitResult(spec.outcome, reason=f"fake 합성 HTTP {spec.status}"
+                                + (f", 코드 {spec.code}" if spec.code is not None else ""), code=spec.code)
         self._pending_cid = request.client_order_id
         try:
-            return super().place_order(request)
+            result = super().place_order(request)
         finally:
             self._pending_cid = None
+        if spec is not None and result.outcome is SubmitOutcome.ACCEPTED:   # 받았지만 응답은 5XX (실행 상태 불명)
+            return SubmitResult(spec.outcome, reason=f"fake 합성 HTTP {spec.status} (거래소 접수됨)", code=spec.code)
+        return result
+
+    def _query(self) -> None:
+        if self.banned:
+            self.queries += 1
+            raise BrokerQueryError("fake: 418 차단 중 — 조회 중단")
+        super()._query()
 
     def _new_order(self, account: str, kind: str, instrument: str, side: str, quantity: Decimal, price: Decimal,
                    order_type, original: str | None, state: str = "ACCEPTED") -> str:  # type: ignore[no-untyped-def]
@@ -59,6 +109,15 @@ class FakeSpotBroker(FakeBroker):
         if kind == "NEW" and self._pending_cid is not None:
             self._cid[no] = self._pending_cid
         return no
+
+    def add_external_order(self, account: str, instrument: str, side: str, quantity: Decimal,
+                           price: Decimal = Decimal("10000"), client_order_id: str | None = None) -> str:
+        """시스템 밖 주문 (거래소 앱 직접 거래). 실제 거래소는 고객 주문 ID를 자동으로 붙인다 — 시험이 줄 수 있다."""
+        self._pending_cid = client_order_id
+        try:
+            return super().add_external_order(account, instrument, side, quantity, price)
+        finally:
+            self._pending_cid = None
 
     def fill(self, order_no: str, quantity: Decimal | None = None, price: Decimal | None = None) -> None:
         super().fill(order_no, quantity, price)
@@ -113,6 +172,11 @@ class FakeSpotBroker(FakeBroker):
                                   commission_asset=asset, quote_qty=self._reported(f.quantity, f.price),
                                   instrument=instrument))
         return out
+
+    def query_orders(self, account: str) -> list[BrokerOrderRecord]:
+        """대조용 주문 조회(범위는 FakeBroker와 같음) + 고객 주문 ID (D-111 보류 짝짓기)."""
+        return [replace(r, client_order_id=self._cid.get(r.order_no)) if r.kind == "NEW" else r
+                for r in super().query_orders(account)]
 
     def query_fills(self, account: str) -> list[FillRecord]:
         """대조용 체결 조회(오늘 범위는 FakeBroker와 같음) + M2 수수료·수수료 자산·보고 금액·심볼 (D-101·D-118)."""
