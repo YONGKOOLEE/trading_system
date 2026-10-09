@@ -15,9 +15,10 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 
-from trading_system.domain.clock import Clock, from_iso, last_kst_time_at_or_before, to_iso
+from trading_system.domain.clock import Clock, from_iso, to_iso
 from trading_system.domain.daily_base import DailyBase, DailyBaseCorrupt
 from trading_system.domain.market import CashView, CostRates, DailyRisk, estimate_cost
+from trading_system.domain.market_time import M1_TIME, MarketTime
 from trading_system.domain.sinks import AlertSink
 from trading_system.storage.repository import DAILY_BASE_KIND, Repository
 
@@ -30,17 +31,21 @@ class AlertThresholds:
 
 
 class AlertWatcher:
+    """market_time: 거래일(경고 반복 억제·거부 집계 범위)을 나누는 시장 시각 기준 (CP-024 D-108, T-M2-09 V-116·V-117).
+    기본 M1(KST) — M1 호출부(app/wiring.py) 동작 그대로. M2는 M2_TIME(UTC, 일 경계 UTC 00:00)."""
+
     def __init__(self, repo: Repository, alerts: AlertSink, thresholds: AlertThresholds,
-                 reference_time: time) -> None:
+                 reference_time: time, *, market_time: MarketTime = M1_TIME) -> None:
         self._repo = repo
         self._alerts = alerts
         self._t = thresholds
         self._ref = reference_time
+        self._market_time = market_time
         self._warned: set[tuple[str, str, str]] = set()   # (거래일, 계좌, 한도)
         self._surge_until: datetime | None = None
 
     def scan(self, account: str, now: datetime) -> list[str]:
-        day = last_kst_time_at_or_before(now, self._ref)
+        day = self._market_time.last_at_or_before(now, self._ref)
         fired: list[str] = []
         rows = self._repo.decisions_since(account, day)
         for r in rows:

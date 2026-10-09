@@ -515,6 +515,9 @@ COVERAGE: dict[str, list[str]] = {
     "V-106": [f"{_TM}.test_tm2_09_v157::test_v106_audit_append_only_on_m2_db"],
     "V-108": [f"{_TM}.test_tm2_09_v157::test_v108_backup_restore_m2_db"],
     "V-109": ["tests.unit.test_secret_files_policy::test_no_secret_files_tracked"],
+    "V-116": [f"{_TM}.test_tm2_09_v157_rest::test_v116_m2_limit_usage_warning_once_per_utc_day"],
+    "V-117": [f"{_TM}.test_tm2_09_v157_rest::test_v117_m2_reject_surge_warning",
+              f"{_TM}.test_tm2_09_v157_rest::test_v117_m2_surge_window_counts_within_utc_day"],
     "V-119": [f"{_TM}.test_tm2_09_v157::test_v119_k1_remote_resume_kill_file_still_blocks_send"],
     "V-121": [f"{_TM}.test_tm2_09_v157::test_v121_stop_price_l1"],
     "V-122": [f"{_TM}.test_tm2_09_v157::test_v122_recheck_before_send"],
@@ -522,33 +525,60 @@ COVERAGE: dict[str, list[str]] = {
     "V-125": [f"{_TM}.test_tm2_06_reconcile::test_v155_unknown_order_deferred_across_utc_midnight"],
     "V-126": [f"{_TM}.test_tm2_09_v157::test_v126_m2_external_same_terms_order_is_k4_ours_adopted_by_client_id"],
 }
-# 이 작업 범위에서 M2 설정으로 실행하지 못한 V (미실행 — 통과 아님). 사유와 담당 작업
+# 이 작업 범위에서 M2 설정으로 실행하지 못한 V (미실행 — 통과 아님). 사유와 담당 작업·승인
 NOT_RUN: dict[str, str] = {
-    "V-02": "M2에 레버리지·인버스 상품 없음(L10 none, CP-024 §2.4) — 해당 없음으로 볼지 사용자 확인",
-    "V-57": "텔레그램 메시지 중복 — 운영 도구·텔레그램 M2 일반화 T-M2-13(다른 작업) 범위",
-    "V-61": "절전·루프 정지(엔진 루프·시계 점프) — M2 실행 루프(엔진) 미구현, T-M2-14 이후",
-    "V-72": "SNTP 시계 오차 K6 — 공통 감시 코드(M1 시험이 검증), M2 서버 시각 검사(V-146)는 T-M2-14",
-    "V-76": "실시간 시세 품질 검사 — M2 시세 공급자 T-M2-11(다른 작업) 범위. 백테스트 일봉 품질 거부만 T-M2-12에 있음",
-    "V-85": "전략 등록 검증 — M2 전략 등록·capabilities M2 열 미반영(T-M2-17, capabilities.md 수정 금지 구간)",
-    "V-86": "파라미터 검증 — M2 설정 로더 config/m2 T-M2-08(다른 작업) 범위",
-    "V-87": "설정 변경 규칙 — M2 설정 로더 T-M2-08(다른 작업) 범위 (UTC 완화 시점은 T-M2-02 시험 있음)",
-    "V-100": "TRADE_MODE 검사 — 시작 점검·설정 T-M2-08 범위",
-    "V-101": "모드·저장소·자격정보 불일치 — 시작 일치 표 T-M2-08 범위",
-    "V-102": "모드 값만 바꾸기 — 시작 점검 T-M2-08·T-M2-14 범위",
-    "V-104": "마스킹 — M2 로그 경로(어댑터 키·서명)는 T-M2-10 V-158 시험, 공통 Masker의 M2 재실행은 미작성",
-    "V-107": "운영 요청 인증 — 텔레그램 T-M2-13 범위",
-    "V-110": "일일 보고 — M2 일일 보고 미구현(일 경계 대조의 on_day_close 콜백만, T-M2-06). 보고 생성은 T-M2-14 이후",
-    "V-111": "프로세스 감시(watchdog) — M2 실행 프로그램 미구성",
-    "V-112": "전처리 동일성 — M2 실시간 시세 경로(T-M2-11) 연결 뒤",
-    "V-113": "검증 전 전략의 PAPER 거부 — M2 전략 등록·상태(T-M2-17)",
-    "V-114": "전략·버전별 집계 — 보고(reporting) M2 일반화 미작성",
-    "V-115": "견고성 묶음 — 묶음 항목별 M2 재작성 미작성",
-    "V-116": "한도 사용률 경고 — AlertWatcher 일 기준이 KST 고정(monitoring.watchers) — M2(UTC) 일반화 필요 [제안]",
-    "V-117": "거부 급증 경고 — V-116과 같은 감시 모듈, UTC 일반화 뒤",
-    "V-118": "위험 축소 거부 알림 — 운영 명령 경로(ops) M2 일반화 T-M2-13 범위",
-    "V-127": "WS 재접속 한도(키움 실시간) — M2 사용자 스트림 연결 관리 실연결 T-M2-14",
-    "V-128": "꺼져 있던 동안의 원격 명령 — 텔레그램 T-M2-13 범위",
+    "V-02": "M2 현물에는 레버리지·인버스 상품이 없다(L10 none, CP-024 §2.4). 배수 1 경로는 PARTIAL 시험이 통과하지만 "
+            "'V-02 = M2 해당 없음' 판정은 사용자 확인 전(04 §6 방식) — 확인되면 COVERAGE로",
+    "V-76": "부분: 형식·중복·순서·OHLC 모순 → K10·신호 없음은 PARTIAL 시험 통과. 결측(1d 봉 사이 빈 날)·이상치는 M2 기준이 "
+            "설계에 없음(가격제한 없음 — M1 ±30% 기준 적용 불가) → 설계 결정(CP) 뒤 구현 [제안]",
+    "V-112": "전처리 동일성 — M2 실시간 판정 경로(klines → 스냅샷)가 M2 엔진 조립 T-M2-14(테스트넷 연결 승인 별도)에 있고, "
+             "백테스트(app/backtest_m2 _check_config)와 실시간(facts.parse_klines)의 공통 전처리 함수가 아직 없다 "
+             "(03 D-088의 M2 적용 설계 결정 필요 [제안])",
+    "V-127": "WS 재접속 한도 — M2 사용자 스트림 연결·재접속 스레드(websockets 실연결)는 T-M2-14(테스트넷 연결 승인 별도). "
+             "오프라인 부품은 연결 수명 정책(stream.SessionPolicy)뿐이고 재접속 한도·K5 연결은 미조립",
 }
+# NOT_RUN 중 부분 실행한 시험 (통과로 세지 않는다 — 존재만 검사)
+PARTIAL: dict[str, list[str]] = {
+    "V-02": [f"{_TM}.test_tm2_09_v157_rest::test_v02_m2_spot_exposure_multiplier_is_one"],
+    "V-76": [f"{_TM}.test_tm2_09_v157_rest::test_v76_m2_kline_quality_failure_invalidates_signal_via_k10"],
+}
+_RT = f"{_TM}.test_tm2_09_v157_rest"
+COVERAGE.update({
+    "V-57": [f"{_RT}::test_v57_m2_duplicate_update_processed_once"],
+    "V-61": [f"{_RT}::test_v61_m2_loop_delay_and_clock_jump_trigger_k8_then_spot_recovery"],
+    "V-72": [f"{_RT}::test_v72_m2_clock_offset_raises_k6_and_recovers",
+             f"{_RT}::test_v72_m2_all_clock_servers_fail_is_k6"],
+    "V-85": [f"{_RT}::test_v85_m2_current_capability_table_refuses_m2_registration",
+             f"{_RT}::test_v85_m2_registration_rejects",
+             f"{_RT}::test_v85_m2_rejected_registration_recorded_no_state_and_markets_separate"],
+    "V-86": [f"{_RT}::test_v86_m2_parameter_validation",
+             f"{_RT}::test_v86_m2_params_file_decimal_quantity_and_float_refused",
+             f"{_TM}.test_tm2_08_market_split::test_m2_startup_mismatch_refused"],
+    "V-87": [f"{_TM}.test_tm2_02_time::test_settings_loosening_effective_next_utc_midnight",
+             f"{_RT}::test_v87_m2_remote_change_rejected_and_mixed_waits_for_utc_midnight"],
+    "V-100": [f"{_RT}::test_v100_m2_trade_mode_missing_or_invalid_exits_without_connection"],
+    "V-101": [f"{_RT}::test_v101_m2_mode_storage_credentials_mismatch_refused",
+              f"{_TM}.test_tm2_08_market_split::test_m2_startup_refuses_live_and_other_mode_paths"],
+    "V-102": [f"{_RT}::test_v102_m2_live_by_mode_value_only_refused"],
+    "V-104": [f"{_RT}::test_v104_m2_masking"],
+    "V-107": [f"{_RT}::test_v107_m2_unknown_chat_and_confirmation_code"],
+    "V-110": [f"{_RT}::test_v114_v110_m2_daily_report_by_strategy_on_utc_day",
+              f"{_RT}::test_v110_m2_report_failure_is_recorded_and_alerted"],
+    "V-111": [f"{_RT}::test_v111_m2_watchdog_heartbeat"],
+    "V-113": [f"{_RT}::test_v113_m2_paper_mode_rejects_draft_and_backtest_passed"],
+    "V-114": [f"{_RT}::test_v114_v110_m2_daily_report_by_strategy_on_utc_day"],
+    "V-115": [f"{_RT}::test_v115_b1_m2_reopen_db_with_other_mode_refused",
+              f"{_RT}::test_v115_b2_m2_malformed_or_unauthorized_requests_rejected",
+              f"{_RT}::test_v115_b2_m2_negative_quantity_sell_rejected",
+              f"{_RT}::test_v115_b3_m2_missing_price_rejects_instead_of_crashing",
+              f"{_RT}::test_v115_b4_m2_storage_failure_after_send_blocks_further_sends",
+              f"{_RT}::test_v115_b5_m2_anomalous_fill_not_applied",
+              f"{_RT}::test_v115_b6_m2_events_kept_when_storage_fails_midway",
+              f"{_RT}::test_v115_b7_m2_concurrent_double_submit_sends_once",
+              f"{_RT}::test_v115_b8_m2_reader_never_sees_uncommitted_rows"],
+    "V-118": [f"{_RT}::test_v118_m2_rejected_risk_reduction_alerts_over_telegram"],
+    "V-128": [f"{_RT}::test_v128_m2_stale_remote_commands_not_executed"],
+})
 
 
 def test_v157_list_is_fully_accounted() -> None:
@@ -558,6 +588,11 @@ def test_v157_list_is_fully_accounted() -> None:
     assert not set(COVERAGE) & set(NOT_RUN)
     for v, refs in COVERAGE.items():
         assert v in V157, v
+        for ref in refs:
+            mod, fn = ref.split("::")
+            assert callable(getattr(importlib.import_module(mod), fn, None)), ref
+    for v, refs in PARTIAL.items():
+        assert v in NOT_RUN, v              # 부분 실행은 미실행으로 남는다 (D-068)
         for ref in refs:
             mod, fn = ref.split("::")
             assert callable(getattr(importlib.import_module(mod), fn, None)), ref

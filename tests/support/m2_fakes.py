@@ -178,12 +178,13 @@ class M2Env:
 
 
 def build_m2_env(tmp_path: Path, broker_env: str = "fake", *, limits: AccountLimits | None = None,
-                 ioc: bool = False, spot_rules: bool = True, spot_cash: bool = False) -> M2Env:
+                 ioc: bool = False, spot_rules: bool = True, spot_cash: bool = False,
+                 mode: Mode = Mode.BACKTEST) -> M2Env:
     """spot_cash=True이면 게이트 계좌 사실 = SpotAccountFacts(M2 현금 정책·UTC 일일 리스크, T-M2-07).
-    기본 False는 고정값 FakeAccount(T-M2-01~03 시험)."""
+    기본 False는 고정값 FakeAccount(T-M2-01~03 시험). mode: 저장소 모드(전략 상태별 신호 허용 V-113 시험은 PAPER, 기본 BACKTEST)."""
     # M2 브로커 주문 식별 = (계좌, 심볼, orderId) (D-110, T-M2-05)
-    repo = Repository(tmp_path / "trading.db", Mode.BACKTEST, order_identity=OrderIdentity.SYMBOL)
-    repo.register_account(Account(alias=ACCOUNT, mode=Mode.BACKTEST, broker_env=broker_env))
+    repo = Repository(tmp_path / "trading.db", mode, order_identity=OrderIdentity.SYMBOL)
+    repo.register_account(Account(alias=ACCOUNT, mode=mode, broker_env=broker_env))
     clock = FixedClock(T0)
     broker = FakeSpotBroker(now=clock.now)   # M2 조회 계약(고객 주문 ID·allOrders·myTrades·자산 잔고) 포함 fake
     broker.grant = {QUOTE_ASSET: BASE_AMOUNT}
