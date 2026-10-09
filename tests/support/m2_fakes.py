@@ -18,7 +18,8 @@ from decimal import Decimal
 from pathlib import Path
 
 from tests.support.gate_fakes import FakeAccount, FakeClockHealth, FakeLimits, FakeStrategies
-from trading_system.broker.fake.broker import FakeBroker, FakeSpotFees
+from trading_system.broker.fake.broker import FakeSpotFees
+from trading_system.broker.fake.spot import FakeSpotBroker
 from trading_system.domain.clock import FixedClock
 from trading_system.domain.enums import Mode
 from trading_system.domain.limits import AccountLimits
@@ -36,7 +37,7 @@ from trading_system.gate.ports import GateInputs, GatePolicy
 from trading_system.halt.manager import HaltManager
 from trading_system.monitoring.spot_cash import SpotAccountFacts
 from trading_system.storage.alerts import AuditAlertSink
-from trading_system.storage.repository import Repository
+from trading_system.storage.repository import OrderIdentity, Repository
 
 ACCOUNT = "BN-BT-01"
 QUOTE_ASSET = "USDT"
@@ -165,7 +166,7 @@ class SpotRulesFake:
 class M2Env:
     repo: Repository
     clock: FixedClock
-    broker: FakeBroker
+    broker: FakeSpotBroker
     gate: Gate
     executor: Executor
     halts: HaltManager
@@ -180,10 +181,12 @@ def build_m2_env(tmp_path: Path, broker_env: str = "fake", *, limits: AccountLim
                  ioc: bool = False, spot_rules: bool = True, spot_cash: bool = False) -> M2Env:
     """spot_cash=True이면 게이트 계좌 사실 = SpotAccountFacts(M2 현금 정책·UTC 일일 리스크, T-M2-07).
     기본 False는 고정값 FakeAccount(T-M2-01~03 시험)."""
-    repo = Repository(tmp_path / "trading.db", Mode.BACKTEST)
+    # M2 브로커 주문 식별 = (계좌, 심볼, orderId) (D-110, T-M2-05)
+    repo = Repository(tmp_path / "trading.db", Mode.BACKTEST, order_identity=OrderIdentity.SYMBOL)
     repo.register_account(Account(alias=ACCOUNT, mode=Mode.BACKTEST, broker_env=broker_env))
     clock = FixedClock(T0)
-    broker = FakeBroker()
+    broker = FakeSpotBroker(now=clock.now)   # M2 조회 계약(고객 주문 ID·allOrders·myTrades·자산 잔고) 포함 fake
+    broker.grant = {QUOTE_ASSET: BASE_AMOUNT}
     broker.spot_fees = FakeSpotFees(rate=FEE_RATE, pairs=PAIRS)
     broker.ioc_limit = ioc
     market = SpotMarket(now=clock.now)
@@ -208,7 +211,7 @@ def build_m2_env(tmp_path: Path, broker_env: str = "fake", *, limits: AccountLim
                         spot_rules=rules if spot_rules else None)
     gate = Gate(repo, clock, inputs, M2_POLICY)
     kill_file = tmp_path / "KILL"
-    executor = Executor(repo, broker, clock, kill_file, asset_pair=asset_pair)
+    executor = Executor(repo, broker, clock, kill_file, asset_pair=asset_pair, client_ids=True)
     halts = HaltManager(repo, gate, executor, clock,
                         reference_time_of=lambda a: (lim.daily_reference_time
                                                      if (lim := limits.by_account.get(a)) else None),

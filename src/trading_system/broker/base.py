@@ -7,6 +7,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
+from enum import StrEnum
 from typing import Protocol
 
 from trading_system.domain.market import CashView
@@ -17,6 +21,38 @@ from trading_system.domain.models import (
 
 class BrokerQueryError(RuntimeError):
     """조회 실패 (연결·호출 제한·응답 해석 불가). 결과를 알 수 없다는 뜻이지 "없음"이 아니다."""
+
+
+class LookupKind(StrEnum):
+    """단건 주문 조회 결과 (M2, CP-024 D-111)."""
+
+    FOUND = "FOUND"
+    NOT_FOUND = "NOT_FOUND"   # -2013: 접수 직후 반영 지연일 수 있다(B-U3 미확인) — "미접수" 확정이 아님
+    ARCHIVED = "ARCHIVED"     # -2026: 보관됨. 전송 90일 이내 주문에 오면 이상 → K3
+
+
+@dataclass(frozen=True)
+class OrderLookup:
+    kind: LookupKind
+    record: BrokerOrderRecord | None = None
+
+
+class SpotOrderQueries(Protocol):
+    """M2 결과 불명 해소·대조용 조회 계약 (CP-024 D-111·D-103, 03 §5.1 확장). M1 어댑터는 구현하지 않는다.
+
+    모두 실패하면 BrokerQueryError. 시각 창은 24시간 이내(allOrders·myTrades 조회 창, BN §7)."""
+
+    def lookup_order(self, account: str, instrument: str, *, order_no: str | None,
+                     client_order_id: str | None) -> OrderLookup: ...
+
+    def orders_between(self, account: str, instrument: str, start: datetime,
+                       end: datetime) -> list[BrokerOrderRecord]: ...
+
+    def trades_between(self, account: str, instrument: str, start: datetime, end: datetime) -> list[FillRecord]: ...
+
+    def query_balances(self, account: str) -> dict[str, tuple[Decimal, Decimal]]:
+        """자산 → (free, locked) (D-103: 대조 값 = free + locked)."""
+        ...
 
 
 class BrokerAdapter(Protocol):

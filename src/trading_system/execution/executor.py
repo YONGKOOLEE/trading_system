@@ -23,9 +23,9 @@ from trading_system.domain.fees import position_delta
 from trading_system.domain.halts import HaltView, RequestView, halt_rejection
 from trading_system.domain.sinks import AlertSink, HaltSink
 from trading_system.domain.enums import IntentState, OrderType, RequestType, Side, SubmitOutcome
-from trading_system.domain.models import ApprovedIntent, OrderEvent, OrderRequest, SubmitResult
+from trading_system.domain.models import ApprovedIntent, OrderEvent, OrderRequest, SubmitResult, client_order_id_of
 from trading_system.storage.alerts import AuditAlertSink
-from trading_system.storage.repository import BrokerOrderRow, IntentRow, Repository, StorageFailure
+from trading_system.storage.repository import BrokerOrderRow, IntentRow, OrderIdentity, Repository, StorageFailure
 
 PARKED_LIMIT = 1000     # 보류 통보 최대 보관 수 (넘으면 오래된 것부터 버림, 감사 기록은 남음)
 REJECT_ALERT_STREAK = 3  # 같은 사유 연속 거부 → 경고 알림 (01 §2.7)
@@ -39,8 +39,11 @@ class ExecutionBlocked(RuntimeError):
 class Executor:
     def __init__(self, repo: Repository, broker: BrokerAdapter, clock: Clock, kill_file: Path, *,
                  alerts: AlertSink | None = None,
-                 asset_pair: Callable[[str], tuple[str, str] | None] | None = None) -> None:
+                 asset_pair: Callable[[str], tuple[str, str] | None] | None = None,
+                 client_ids: bool = False) -> None:
         self._repo = repo
+        # M2: 신규 주문에 고객 주문 ID(멱등키에서 결정적, D-110)를 붙이고 전송 전에 저장한다. M1(키움)은 False — 동작 그대로
+        self._client_ids = client_ids
         # 종목 → (기초 자산, 호가 자산). 수수료 자산이 있는 체결(M2 현물)의 순 수령 반영에만 쓴다 (D-101). M1은 None
         self._asset_pair = asset_pair
         self._alerts: AlertSink = alerts or AuditAlertSink(repo, clock, actor="executor")
@@ -122,6 +125,14 @@ class Executor:
             if blocked:
                 self._close(self._repo.intent(intent.intent_id), IntentState.NOT_SENT, blocked)
                 return IntentState.NOT_SENT
+            if self._client_ids and order.kind == "NEW":
+                # 고객 주문 ID: 전송 시도와 같은 저장 단위에서 전송 전에 기록 (D-110). 다른 의도가 쓴 ID면 보내지 않는다
+                cid = client_order_id_of(intent.idem_key or "")
+                if not self._repo.insert_client_order(cid, intent.intent_id, intent.account, intent.instrument, now):
+                    self._close(self._repo.intent(intent.intent_id), IntentState.NOT_SENT,
+                                "고객 주문 ID 재사용 금지 (D-110) — 전송하지 않음")
+                    return IntentState.NOT_SENT
+                order = replace(order, client_order_id=cid)
             attempt_id = self._repo.insert_attempt(intent.intent_id, now)
             self._set_state(intent.intent_id, IntentState.SENT)
             self._repo.audit(now, "ATTEMPT", "executor", attempt_id, {"intent_id": intent.intent_id, "kind": order.kind})
@@ -226,11 +237,20 @@ class Executor:
         self._repo.link_intent_order(intent.intent_id, key)
         self._repo.audit(at, "BROKER_ORDER", "executor", key, {"intent_id": intent.intent_id, "kind": kind})
         self._set_state(intent.intent_id, IntentState.ACCEPTED)
-        self._replay_parked(order_no, self._repo.trade_date_of(key_at), intent.account)
+        self._replay_parked(order_no, self._repo.trade_date_of(key_at), intent.account, intent.instrument)
         return key
 
-    def _replay_parked(self, order_no: str, trade_date: str, account: str) -> None:
-        """이 주문번호로 먼저 와서 보류된 통보를 다시 반영한다 (CP-018 R-2)."""
+    def _replay_parked(self, order_no: str, trade_date: str, account: str, instrument: str | None = None) -> None:
+        """이 주문번호로 먼저 와서 보류된 통보를 다시 반영한다 (CP-018 R-2).
+
+        SYMBOL 범위(M2, D-110)는 거래일을 보지 않고 (계좌, 심볼, 주문번호)로 짝짓는다."""
+        if self._repo.order_identity is OrderIdentity.SYMBOL:
+            mine = [e for e in self._parked if e.order_no == order_no and e.account in (None, account)
+                    and e.instrument in (None, instrument)]
+            self._parked = [e for e in self._parked if e not in mine]
+            for ev in mine:
+                self.apply_event(ev)
+            return
         mine = [e for e in self._parked if e.order_no == order_no
                 and (e.trade_date or trade_date) == trade_date and e.account in (None, account)]
         self._parked = [e for e in self._parked if e not in mine]
@@ -274,7 +294,7 @@ class Executor:
         """통보 1건 반영. 호출자의 트랜잭션 안에서 실행한다."""
         now = self._clock.now()
         trade_date = ev.trade_date or self._repo.trade_date_of(now)
-        order = self._repo.broker_order_by_no(ev.order_no, trade_date, ev.account)
+        order = self._repo.broker_order_by_no(ev.order_no, trade_date, ev.account, instrument=ev.instrument)
         if order is None or order.intent_id is None:
             # 접수 응답보다 먼저 온 통보일 수 있으므로 보류한다. 끝까지 짝이 없으면 대조 대상 (T-008)
             self._repo.audit(now, "UNMATCHED_EVENT", "tracker", ev.order_no, {"kind": ev.kind, "trade_date": trade_date})

@@ -17,8 +17,9 @@ import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
+from enum import StrEnum
 from pathlib import Path
 
 from trading_system.domain.clock import KST, from_iso, to_iso
@@ -138,6 +139,11 @@ CREATE TABLE IF NOT EXISTS fill_fee (
   fill_key TEXT PRIMARY KEY REFERENCES fill(fill_key), mode TEXT NOT NULL,
   commission TEXT, commission_asset TEXT, quote_qty TEXT NOT NULL, quote_status TEXT NOT NULL,
   recorded_at TEXT NOT NULL, confirmed_at TEXT);
+-- 고객 주문 ID (M2 newClientOrderId, CP-024 D-110, T-M2-05): 의도별 유일·재사용 금지(기본 키·유일 제약). 전송 시도 기록과
+-- 같은 저장 단위에서 전송 전에 쓴다. 추가 표라 스키마 버전 불변(위와 같음). M1(키움)은 쓰지 않는다
+CREATE TABLE IF NOT EXISTS client_order (
+  client_order_id TEXT PRIMARY KEY, mode TEXT NOT NULL, intent_id TEXT NOT NULL UNIQUE,
+  account TEXT NOT NULL, instrument TEXT NOT NULL, created_at TEXT NOT NULL);
 -- 조회 인덱스: 데이터 의미 불변이라 스키마 버전을 올리지 않는다 — 기존 저장소도 열 때 생성 (review C절, DP-38)
 CREATE INDEX IF NOT EXISTS ix_intent_state ON intent(state);
 CREATE INDEX IF NOT EXISTS ix_ops_command_status ON ops_command(status);
@@ -167,6 +173,18 @@ class SchemaMismatch(RuntimeError):
 
 
 SCHEMA_VERSION = "2"  # 1: 기준선 (CP-018). 2: 신호 규칙 ID·소유 해제 시각 (거래 이력). maintenance.MIGRATIONS
+
+
+class OrderIdentity(StrEnum):
+    """브로커 주문 식별 범위 (시장별, CP-024 D-110).
+
+    - TRADE_DATE (M1, 기본): (계좌, 거래일(KST), 주문번호) — 03 D-046. 키 `계좌|KST 날짜|주문번호`. 기존 동작 그대로.
+    - SYMBOL (M2): (계좌, 심볼, orderId) — orderId는 심볼 안에서만 유일(B-U17), 거래일을 식별에 쓰지 않는다.
+      키 `계좌|전송 UTC 날짜|심볼|orderId`(날짜는 참고용 — 조회는 열로 하며 날짜를 보지 않는다). trade_date 열 = 전송
+      시각의 UTC 날짜(M2 거래일, D-108). 같은 (계좌, 심볼, orderId)는 두 번 만들지 않는다."""
+
+    TRADE_DATE = "TRADE_DATE"
+    SYMBOL = "SYMBOL"
 
 
 def open_read_only(path: Path, mode: Mode, busy_timeout: float = 5.0) -> sqlite3.Connection:
@@ -215,6 +233,7 @@ class IntentRow:
     owner: str | None
     target_order_key: str | None
     broker_order_key: str | None
+    idem_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -284,9 +303,11 @@ class _Result:
 
 
 class Repository:
-    def __init__(self, path: Path, mode: Mode, busy_timeout: float = 5.0) -> None:
+    def __init__(self, path: Path, mode: Mode, busy_timeout: float = 5.0, *,
+                 order_identity: OrderIdentity = OrderIdentity.TRADE_DATE) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.mode = mode
+        self.order_identity = order_identity   # 브로커 주문 식별 범위 (M1 기본 TRADE_DATE, M2 SYMBOL — D-110)
         self._lock = threading.RLock()
         self._depth = 0
         self._tx_thread: int | None = None
@@ -478,6 +499,7 @@ class Repository:
             r["intent_id"], r["decision_id"], IntentState(r["state"]), r["source"], r["request_type"],
             r["account"], r["instrument"], r["side"], Decimal(r["quantity"]), Decimal(r["filled_quantity"]),
             Decimal(r["price"]), r["order_type"], r["owner"], r["target_order_key"], r["broker_order_key"],
+            r["idem_key"],
         )
 
     def intent(self, intent_id: str) -> IntentRow:
@@ -576,14 +598,27 @@ class Repository:
         """(계좌, 거래일, 주문번호) — 03 D-046."""
         return f"{account}|{at.astimezone(KST).date().isoformat()}|{order_no}"
 
+    def broker_order_key(self, account: str, at: datetime, order_no: str, instrument: str) -> str:
+        """식별 범위(OrderIdentity)에 맞는 브로커 주문 키. TRADE_DATE는 order_key와 같다(M1 불변)."""
+        if self.order_identity is OrderIdentity.SYMBOL:
+            return f"{account}|{at.astimezone(UTC).date().isoformat()}|{instrument}|{order_no}"
+        return self.order_key(account, at, order_no)
+
     def insert_broker_order(self, *, account: str, order_no: str, at: datetime, intent_id: str | None,
                             instrument: str, side: str, quantity: Decimal, origin: str,
                             target_order_key: str | None = None) -> str:
-        key = self.order_key(account, at, order_no)
+        key = self.broker_order_key(account, at, order_no, instrument)
+        if self.order_identity is OrderIdentity.SYMBOL:
+            trade_date = at.astimezone(UTC).date().isoformat()
+            if self._x("SELECT 1 FROM broker_order WHERE account=? AND instrument=? AND order_no=?",
+                       (account, instrument, order_no)).fetchone() is not None:
+                raise ValueError(f"이미 있는 브로커 주문 (계좌, 심볼, orderId) — D-110: {instrument} {order_no}")
+        else:
+            trade_date = at.astimezone(KST).date().isoformat()
         self._x("""INSERT INTO broker_order(order_key, mode, account, trade_date, order_no, intent_id, instrument,
                    side, quantity, filled_quantity, state, origin, target_order_key, created_at)
                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (key, self.mode.value, account, at.astimezone(KST).date().isoformat(), order_no, intent_id,
+                (key, self.mode.value, account, trade_date, order_no, intent_id,
                  instrument, side, str(quantity), "0", "ACCEPTED", origin, target_order_key, to_iso(at)))
         return key
 
@@ -596,13 +631,48 @@ class Repository:
         r = self._x("SELECT * FROM broker_order WHERE order_key = ?", (order_key,)).fetchone()
         return self._order(r) if r else None
 
-    def broker_order_by_no(self, order_no: str, trade_date: str, account: str | None = None) -> BrokerOrderRow | None:
-        """주문번호는 거래일·계좌 안에서만 유일하다고 본다 (03 D-046). 계좌를 모르는데 여러 계좌에 있으면 None."""
-        sql, params = "SELECT * FROM broker_order WHERE order_no=? AND trade_date=?", (order_no, trade_date)
+    def broker_order_by_no(self, order_no: str, trade_date: str, account: str | None = None, *,
+                           instrument: str | None = None) -> BrokerOrderRow | None:
+        """주문번호는 거래일·계좌 안에서만 유일하다고 본다 (03 D-046). 계좌를 모르는데 여러 계좌에 있으면 None.
+
+        SYMBOL 범위(M2, D-110): 거래일을 보지 않고 (계좌, 심볼, orderId)로 찾는다. 심볼을 모르는데 여러 건이면 None.
+        TRADE_DATE 범위(M1)는 instrument를 쓰지 않는다 — 기존 질의 그대로."""
+        if self.order_identity is OrderIdentity.SYMBOL:
+            sql, params = "SELECT * FROM broker_order WHERE order_no=?", (order_no,)
+            if instrument is not None:
+                sql, params = sql + " AND instrument=?", params + (instrument,)
+        else:
+            sql, params = "SELECT * FROM broker_order WHERE order_no=? AND trade_date=?", (order_no, trade_date)
         if account is not None:
             sql, params = sql + " AND account=?", params + (account,)
         rows = list(self._x(sql, params))
         return self._order(rows[0]) if len(rows) == 1 else None
+
+    def order_nos_of(self, account: str, instrument: str) -> set[str]:
+        """이 (계좌, 심볼)의 알려진 브로커 주문번호 전체 (SYMBOL 범위 M2 — 날짜 무관, D-110·D-111)."""
+        return {r["order_no"] for r in self._x("SELECT order_no FROM broker_order WHERE account=? AND instrument=?",
+                                               (account, instrument))}
+
+    # --- 고객 주문 ID (M2, D-110) ---------------------------------------------------
+    def insert_client_order(self, client_order_id: str, intent_id: str, account: str, instrument: str,
+                            at: datetime) -> bool:
+        """고객 주문 ID를 의도에 묶는다. 같은 의도에 같은 ID면 True(재시작 후 재확인), 다른 의도가 이미 쓰면 False(재사용 금지)."""
+        r = self._x("SELECT intent_id FROM client_order WHERE client_order_id=?", (client_order_id,)).fetchone()
+        if r is not None:
+            return bool(r["intent_id"] == intent_id)
+        if self._x("SELECT 1 FROM client_order WHERE intent_id=?", (intent_id,)).fetchone() is not None:
+            return False   # 이 의도에 이미 다른 ID — 의도당 ID 하나
+        self._x("INSERT INTO client_order(client_order_id, mode, intent_id, account, instrument, created_at) "
+                "VALUES(?,?,?,?,?,?)", (client_order_id, self.mode.value, intent_id, account, instrument, to_iso(at)))
+        return True
+
+    def client_order_of(self, intent_id: str) -> str | None:
+        r = self._x("SELECT client_order_id FROM client_order WHERE intent_id=?", (intent_id,)).fetchone()
+        return r["client_order_id"] if r else None
+
+    def intent_of_client_order(self, client_order_id: str) -> str | None:
+        r = self._x("SELECT intent_id FROM client_order WHERE client_order_id=?", (client_order_id,)).fetchone()
+        return r["intent_id"] if r else None
 
     def open_orders(self, account: str, side: str | None = None) -> list[BrokerOrderRow]:
         sql = ("SELECT * FROM broker_order WHERE account=? AND state IN ('ACCEPTED','PARTIAL') "
