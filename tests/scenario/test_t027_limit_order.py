@@ -295,11 +295,17 @@ def test_v238_ord03b_only_is_registered_by_table_status() -> None:
     assert validate_spec(_spec03("CAP-ORD-03b"), _caps(**FUTURE), scenario_limits(), Mode.BACKTEST) == []
     paper = validate_spec(_spec03("CAP-ORD-03b"), _caps(**FUTURE), scenario_limits(), Mode.PAPER)
     assert any("CAP-ORD-03b" in p and "검증 중" in p for p in paper), paper   # PAPER는 "지원"만 (DP-1)
-    # 기존 표(03b 행 없음)는 CAP-ORD-03 행 상태를 03b에 적용 — 지금 docs/capabilities.md M1은 미지원 → 거부
+    # 기존 표 호환(03b 행 없음 → CAP-ORD-03 행 상태 적용)
+    old = {k: v for k, v in load_capabilities(REPO / "docs" / "capabilities.md").items()
+           if k not in ("CAP-ORD-03a", "CAP-ORD-03b")}
+    problems = validate_spec(_spec03("CAP-ORD-03b"), old, scenario_limits(), Mode.BACKTEST)
+    assert problems == [f"CAP-ORD-03b: M1에서 {old['CAP-ORD-03']['M1']} — BACKTEST 등록 불가 (D-004, CP로 기능 추가)"]
+    # 실제 표 (CP-032 §3.1 반영 2026-10-09, A-085 — 시험 변경 사유): 03b M1 "검증 중" → BACKTEST 허용, PAPER 거부
     real = load_capabilities(REPO / "docs" / "capabilities.md")
-    assert "CAP-ORD-03b" not in real
-    problems = validate_spec(_spec03("CAP-ORD-03b"), real, scenario_limits(), Mode.BACKTEST)
-    assert problems == [f"CAP-ORD-03b: M1에서 {real['CAP-ORD-03']['M1']} — BACKTEST 등록 불가 (D-004, CP로 기능 추가)"]
+    assert real["CAP-ORD-03b"]["M1"] == "검증 중" and real["CAP-ORD-03a"]["M1"] == "미지원"
+    assert validate_spec(_spec03("CAP-ORD-03b"), real, scenario_limits(), Mode.BACKTEST) == []
+    assert validate_spec(_spec03("CAP-ORD-03b"), real, scenario_limits(), Mode.PAPER) != []
+    assert validate_spec(_spec03("CAP-ORD-03"), real, scenario_limits(), Mode.BACKTEST) != []
 
 
 def test_v238_ord03b_needs_unfilled_policy_and_unknown_cap_rejected() -> None:
