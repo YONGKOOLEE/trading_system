@@ -9,11 +9,16 @@
 - 알림: 감사 이벤트 ALERT를 읽어 보낸다(전송 상태는 notification 표, ENT-26). 같은 알림은 최대 3회 시도.
   연속 3건 실패하면 K11(위험 확대 차단), 이후 전송이 성공하면 K11 해제 조건을 보고하고 밀린 알림을 보낸다(V-30).
 - 토큰은 Secret으로만 다루고 URL·오류 메시지·로그에 남기지 않는다. HTTP 자동 재시도는 없다(03 D-044와 같은 원칙).
+- [CP-024 D-117, T-M2-13] 시장별 봇: 보내는 모든 메시지 앞에 시장 표시 `[M1]`/`[M2]`(전송 계층 TelegramApi 한 곳 —
+  알림·명령 회신·자동 운영 알림 모두. M1 표시는 A-065 Q5로 이 작업에서 추가). /exit·/reduce 수량은 시장의 수량 단위로
+  해석한다: M1 정수만(기존 그대로), M2 소수 허용(ASCII 숫자·소수점 한 개, 지수·부호·0 거부). M2 봇 토큰·채팅 ID는 M2
+  체크아웃의 비밀 설정 파일에만 둔다(같은 키 이름, 체크아웃마다 따로).
 """
 
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import time
 from collections.abc import Callable
@@ -47,6 +52,14 @@ POLL_SECONDS = 30
 UNAUTH_AUDIT_LIMIT = 3           # A-084 ③: 비인가 채팅은 시간당 처음 3건만 감사 기록 + WARNING, 나머지는 조용히 센다
 UNAUTH_WINDOW = timedelta(hours=1)
 LEVEL_KO = {"EMERGENCY": "긴급", "WARNING": "경고", "INFO": "정보"}
+MARKET_TAGS = {"M1": "[M1]", "M2": "[M2]"}   # 메시지 시장 표시 (D-117)
+_M2_QTY = re.compile(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", re.ASCII)
+
+
+def _market(market: str) -> str:
+    if market not in MARKET_TAGS:
+        raise ValueError(f"알 수 없는 시장: {market!r} (M1|M2)")
+    return market
 
 
 class TelegramError(RuntimeError):
@@ -61,8 +74,10 @@ class TelegramError(RuntimeError):
 
 
 class TelegramApi:
-    def __init__(self, token_reveal: Callable[[], str], base_url: str = "https://api.telegram.org") -> None:
+    def __init__(self, token_reveal: Callable[[], str], base_url: str = "https://api.telegram.org",
+                 market: str = "M1") -> None:
         self._token = token_reveal
+        self._tag = MARKET_TAGS[_market(market)]
         self._base = base_url.rstrip("/")
         self._session = requests.Session()
         self._session.mount("http://", HTTPAdapter(max_retries=0))
@@ -92,6 +107,8 @@ class TelegramApi:
         return body.get("result")
 
     def send_message(self, chat_id: str, text: str) -> None:
+        if not text.startswith(self._tag):   # 시장 표시 (D-117) — 이미 붙어 있으면 그대로
+            text = f"{self._tag} {text}"
         if len(text) > MAX_TEXT:   # 길이 초과로 거부되지 않게 자른다 (재검토 H-1)
             text = text[:MAX_TEXT - 20] + " …(이하 생략)"
         self._call("sendMessage", {"chat_id": chat_id, "text": text}, READ_TIMEOUT)
@@ -190,8 +207,9 @@ class CommandBot:
     """원격 명령 수신 (03 §6.6). 확인된 명령을 ops_command 표에 넣는다. 처리는 OpsProcessor."""
 
     def __init__(self, repo: Repository, api: TelegramApi, allowed_chat: str, account: str, clock: Clock,
-                 kill_file: Path, alert: Callable[[str, str], None]) -> None:
+                 kill_file: Path, alert: Callable[[str, str], None], market: str = "M1") -> None:
         self._repo = repo
+        self._market = _market(market)   # /exit·/reduce 수량 단위 (D-117): M1 정수, M2 소수
         self._api = api
         self._allowed = allowed_chat
         self._account = account
@@ -328,7 +346,10 @@ class CommandBot:
             if len(args) != 1:
                 raise ValueError("/cancel <주문키>")
             return "CANCEL", {"order_key": args[0]}
-        if len(args) != 2 or not args[1].isdigit():
+        if self._market == "M2":
+            if len(args) != 2 or not _M2_QTY.fullmatch(args[1]) or Decimal(args[1]) <= 0:
+                raise ValueError(f"{cmd} <종목> <수량(소수 가능, 예: 0.01 — 지수·부호 없이 0보다 큼)>")
+        elif len(args) != 2 or not args[1].isdigit():
             raise ValueError(f"{cmd} <종목> <수량(정수)>")
         return cmd[1:].upper(), {"account": self._account, "instrument": args[0], "quantity": args[1]}
 

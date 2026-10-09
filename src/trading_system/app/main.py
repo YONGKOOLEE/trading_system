@@ -311,7 +311,8 @@ def _run(root: Path, mode: Mode, base: Path, startup, app: AppSettings, gate_set
         io_threads = extra(engine, stop, closers) if extra is not None else []
         from .telegram_run import telegram_threads
         io_threads += telegram_threads(engine, repo, app.telegram_enabled, startup.secrets, clock, base / "KILL",
-                                       stop, log_dir=base / "logs")   # 03 D-052: 알림·원격 명령 (기본 꺼짐)
+                                       stop, log_dir=base / "logs",   # 03 D-052: 알림·원격 명령 (기본 꺼짐)
+                                       market=app.market)             # [M1] 표시·정수 수량 (CP-024 D-117)
         # 시작 일봉(extra 안, 이 스레드) 뒤로는 시세 스레드가 K10을 걸므로 큐 경유 (3차 검토 F-5, RV-22)
         store.halts = QueuedHalts(engine)
         watched, watched_k11, watched_alert_only = watched_threads(io_threads, getattr(extra, "rt", None))

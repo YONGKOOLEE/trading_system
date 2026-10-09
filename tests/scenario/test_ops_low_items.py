@@ -108,7 +108,7 @@ def test_paper_mode_refusal_notifies_when_telegram_enabled(tmp_path: Path, tg: F
     _app_toml(tmp_path, True)
     assert autopilot_main(["--mode", "PAPER", "--root", str(tmp_path)], environ={"TRADE_MODE": "LIVE"},
                           telegram_base_url=tg.url) == EXIT_REFUSED
-    assert len(tg.sent) == 1 and tg.sent[0]["text"].startswith("[경고] [자동 운영] 자동 운영 거부"), tg.sent
+    assert len(tg.sent) == 1 and tg.sent[0]["text"].startswith("[M1] [경고] [자동 운영] 자동 운영 거부"), tg.sent  # [M1] 표시: T-M2-13 D-117 A-065 Q5
     assert "TRADE_MODE" in tg.sent[0]["text"]
 
 

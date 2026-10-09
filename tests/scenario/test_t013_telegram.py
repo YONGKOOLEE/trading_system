@@ -202,7 +202,7 @@ def test_notifier_sends_alerts_and_v30_k11_with_backlog(env: Env, tg: FakeTelegr
     sink = AuditAlertSink(env.repo, env.clock)
     n = Notifier(env.repo, api(tg), CHAT, env.clock, env.halts)
     sink.alert("EMERGENCY", "결과 불명", None)
-    assert n.pump() == (1, 0) and tg.sent[-1]["text"].startswith("[긴급]")
+    assert n.pump() == (1, 0) and tg.sent[-1]["text"].startswith("[M1] [긴급]")  # [M1] 표시: T-M2-13 D-117 A-065 Q5
     tg.fail = True
     sink.alert("WARNING", "경고 1", None)
     for _ in range(3):

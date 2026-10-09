@@ -268,7 +268,7 @@ def test_a084_refusal_sends_one_telegram_warning_when_secrets_available(tmp_path
     _telegram_on(tmp_path)
     assert autopilot_main(["--mode", "PAPER", "--root", str(tmp_path)], environ={"TRADE_MODE": "LIVE"},
                           telegram_base_url=tg.url) == 2
-    assert len(tg.sent) == 1 and tg.sent[0]["text"].startswith("[경고] [자동 운영] 자동 운영 거부"), tg.sent
+    assert len(tg.sent) == 1 and tg.sent[0]["text"].startswith("[M1] [경고] [자동 운영] 자동 운영 거부"), tg.sent  # [M1] 표시: T-M2-13 D-117 A-065 Q5
     assert "PAPER가 아님" in tg.sent[0]["text"]
     text = _day_log(tmp_path)
     assert TOKEN not in text and "virtual-token" not in text
@@ -439,7 +439,7 @@ def test_a084_unhandled_exception_exits_3_with_traceback_in_day_log(tmp_path: Pa
     assert "Traceback" in text and "RuntimeError" in text and "주입 결함" in text and "boom" in text, text
     assert "자동 운영 예외 종료" in text
     _assert_no_secrets(text)
-    assert len(tg.sent) == 1 and tg.sent[0]["text"].startswith("[긴급] [자동 운영] 자동 운영 예외 종료"), tg.sent
+    assert len(tg.sent) == 1 and tg.sent[0]["text"].startswith("[M1] [긴급] [자동 운영] 자동 운영 예외 종료"), tg.sent  # [M1] 표시: T-M2-13 D-117 A-065 Q5
     _assert_no_secrets(tg.sent[0]["text"])
 
 
