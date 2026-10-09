@@ -119,7 +119,9 @@ def test_v151_buy_fill_reduces_usdt_immediately(env: M2Env) -> None:
     # 거래소 잔고를 아직 다시 조회하지 않았어도(free = 10000 그대로) 내부 기대 USDT가 체결 즉시 줄어든다
     after = f.cash(ACCOUNT)
     assert after is not None
-    assert after.deposit == Decimal("10000") - spent - fee(spent)  # 수수료 자산 미기록(T-M2-04 전) → 보수 추정 차감
+    # [T-M2-04 변경, D-101·D-103·D-118] 체결 수수료 기록 반영: 매수 수수료 자산 = 기초 자산(TSTA)이라 USDT에서 빼지 않는다.
+    # (T-M2-07 당시 기대값 "spent + 추정 수수료"는 수수료 미기록 동안의 보수 추정 — spot_cash [제안](1)이 예고한 변경)
+    assert after.deposit == Decimal("10000") - spent
     assert after.broker_orderable == Decimal("10000")
     assert f.expected_quote(ACCOUNT) == after.deposit
 
@@ -135,7 +137,7 @@ def test_v151_no_t2_double_deduction_after_exchange_refresh(env: M2Env) -> None:
     assert view is not None
     assert view.broker_orderable == Decimal("8995.0000")
     # M1 방식(조회값 − 당일 매수 체결 전액)이면 7,990 근처가 된다. M2는 다시 빼지 않는다
-    assert view.deposit == Decimal("10000") - spent - fee(spent)
+    assert view.deposit == Decimal("10000") - spent   # [T-M2-04 변경] 기초 자산 수수료는 USDT 차감 없음 (D-101)
     assert min(view.broker_orderable, view.deposit) > Decimal("8990")
 
 
@@ -223,9 +225,10 @@ def test_v151_sell_not_blocked_by_unknown_cash(env: M2Env) -> None:
     assert facts(env).cash(ACCOUNT) is None
     out = run(env, signal(env, RequestType.EXIT, quantity="0.0999", evaluation="eval-2"))
     assert out.result is GateResult.APPROVED, out.reason
-    # 매도 수령액(− 추정 수수료)이 내부 기대 USDT에 반영된다
+    # 매도 수령액(− USDT 수수료)이 내부 기대 USDT에 반영된다. [T-M2-04 변경] 수수료는 기록값: 매수 = 기초 자산(USDT 0),
+    # 매도 = USDT(가상 요율 0.1% — 추정값과 같은 값)
     sold = Decimal("0.0999") * RULES["TSTA-USDT"].last
-    expected = Decimal("10000") - Decimal("1005.0000") - fee(Decimal("1005.0000")) + sold - fee(sold)
+    expected = Decimal("10000") - Decimal("1005.0000") + sold - fee(sold)
     assert facts(env).expected_quote(ACCOUNT) == expected
 
 

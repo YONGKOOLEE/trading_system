@@ -51,6 +51,8 @@ class Executor:
         self._blocked: str | None = None
         self._pending: list[OrderEvent] = []
         self._parked: list[OrderEvent] = []  # 짝 없는 통보 (접수 응답보다 먼저 온 체결 등). 주문이 연결되면 다시 반영
+        # 명시 거부 후처리 (의도, 전송 결과). M2 dust 확정(-1013, D-102)이 쓴다. M1은 비어 있음 — 동작 그대로
+        self.reject_listeners: list[Callable[[IntentRow, SubmitResult], None]] = []
 
     @property
     def blocked_reason(self) -> str | None:
@@ -143,7 +145,18 @@ class Executor:
             self._blocked = "전송 후 결과 기록 실패 (재시작·대조 전까지 전송 금지)"
             self._record_storage_halt(intent.account)
             raise
+        if result.outcome is SubmitOutcome.REJECTED and self.reject_listeners:
+            self._notify_rejected(intent.intent_id, result)
         return self._repo.intent(intent.intent_id).state
+
+    def _notify_rejected(self, intent_id: str, result: SubmitResult) -> None:
+        """명시 거부 후처리 (M2 dust 확정 D-102 등). 저장 단위 밖에서 부른다. 후처리 실패는 전송 결과를 바꾸지 않는다."""
+        intent = self._repo.intent(intent_id)
+        for fn in list(self.reject_listeners):
+            try:
+                fn(intent, result)
+            except Exception as exc:  # noqa: BLE001 — 후처리 오류가 실행기 상태를 흔들지 않게 하고 알린다
+                self.alert("WARNING", f"거부 후처리 실패 ({type(exc).__name__})", intent_id)
 
     def _pre_send_block(self, req, now: datetime) -> str | None:  # type: ignore[no-untyped-def]
         if req.valid_until is not None and now > req.valid_until:
@@ -331,8 +344,13 @@ class Executor:
     def _apply_fill(self, order: BrokerOrderRow, intent: IntentRow, ev: OrderEvent, now: datetime) -> None:
         if not ev.fill_id:
             return self._anomaly(ev, "체결 식별자 없음", order.account)
-        if self._repo.select("SELECT 1 FROM fill WHERE fill_key=?", (f"{order.order_key}|{ev.fill_id}",)):
-            return None  # 이미 반영한 체결의 중복 통보 — 수량 초과 검사보다 먼저 거른다 (거짓 K4 방지, e2e 결함 1)
+        fill_key = f"{order.order_key}|{ev.fill_id}"
+        if self._repo.select("SELECT 1 FROM fill WHERE fill_key=?", (fill_key,)):
+            # 이미 반영한 체결의 중복 통보 — 수량 초과 검사보다 먼저 거른다 (거짓 K4 방지, e2e 결함 1).
+            # M2: 같은 체결의 보고 금액(Y·quoteQty)이 오면 임시 금액을 확정한다 (D-118). M1 통보는 해당 없음
+            if ev.commission_asset is not None or ev.quote_qty is not None:
+                self._recheck_fill_fee(order, fill_key, ev, now)
+            return None
         if ev.quantity <= 0 or ev.price <= 0:
             return self._anomaly(ev, "체결 수량·가격이 0 이하", order.account)
         filled = order.filled_quantity + ev.quantity
@@ -350,12 +368,18 @@ class Executor:
                                      "기초·호가 자산 외 수수료 자산 등 (D-101)", order.account)
         if not self._repo.insert_fill(order.order_key, ev.fill_id, ev.quantity, ev.price, ev.at or now):
             return None  # 중복 통보
+        if ev.commission_asset is not None or ev.quote_qty is not None:
+            # M2: 수수료·수수료 자산·거래소 보고 금액 (D-101·D-118). 보고 금액이 없거나 음수(데이터 없음)면 price × qty 임시값
+            reported = ev.quote_qty is not None and ev.quote_qty >= 0
+            quote = ev.quote_qty if reported and ev.quote_qty is not None else ev.quantity * ev.price
+            self._repo.insert_fill_fee(fill_key, ev.commission, ev.commission_asset, quote,
+                                       reported and ev.quote_confirmed, now)
         order_open = order.state in ("ACCEPTED", "PARTIAL")
         # 종결된 주문(취소·만료·정정됨)에 늦게 온 체결은 수량만 기록하고 주문을 다시 열지 않는다
         new_state = ("FILLED" if filled >= order.quantity else "PARTIAL") if order_open else order.state
         self._repo.update_broker_order(order.order_key, filled, new_state)
         fill_audit = {"quantity": str(ev.quantity), "price": str(ev.price)}
-        if ev.commission_asset is not None:  # M2: 수수료·수수료 자산 기록 (스키마 필드는 T-M2-04, 그 전까지 감사 기록)
+        if ev.commission_asset is not None:  # M2: 감사에도 수수료·수수료 자산 (원장 기록은 fill_fee 표, T-M2-04)
             fill_audit.update(commission=str(ev.commission), commission_asset=ev.commission_asset)
         self._repo.audit(now, "FILL", "tracker", order.order_key, fill_audit)
         if intent.state.is_terminal or not order_open:
@@ -391,6 +415,29 @@ class Executor:
             self._close(self._repo.intent(intent.intent_id), IntentState.FILLED, None)
         elif intent.state is not IntentState.PARTIAL:
             self._set_state(intent.intent_id, IntentState.PARTIAL)
+        return None
+
+    def _recheck_fill_fee(self, order: BrokerOrderRow, fill_key: str, ev: OrderEvent, now: datetime) -> None:
+        """이미 기록한 체결의 다른 경로 통보 (M2: FULL 응답 fills ↔ executionReport ↔ myTrades, D-118·V-150).
+
+        - 수수료·수수료 자산이 기록과 다르면 원장을 바꾸지 않고 K4 (같은 체결 ID의 다른 사실 — 사람 확인).
+        - 보고 금액(확정)이 오면 임시 금액을 확정한다. 이미 확정된 금액과 다르면 K4.
+        - 기록이 없는 체결(수수료 정보 없이 반영된 것)은 건드리지 않는다."""
+        row = self._repo.fill_fee(fill_key)
+        if row is None:
+            return None
+        stored = None if row["commission"] is None else Decimal(row["commission"])
+        same_fee = (stored, row["commission_asset"]) == (ev.commission, ev.commission_asset)  # 값 비교 (자릿수 표기 무관)
+        if ev.commission_asset is not None and not same_fee:
+            return self._anomaly(ev, f"같은 체결의 수수료가 다름 ({fill_key})", order.account)
+        if ev.quote_qty is None or ev.quote_qty < 0 or not ev.quote_confirmed:
+            return None
+        if row["quote_status"] == "PROVISIONAL":
+            self._repo.confirm_fill_quote(fill_key, ev.quote_qty, now)
+            self._repo.audit(now, "FILL_QUOTE_CONFIRMED", "tracker", order.order_key,
+                             {"fill_id": ev.fill_id, "provisional": row["quote_qty"], "reported": str(ev.quote_qty)})
+        elif Decimal(row["quote_qty"]) != ev.quote_qty:
+            return self._anomaly(ev, f"같은 체결의 보고 금액이 다름 ({fill_key})", order.account)
         return None
 
     # --- 공통 ---------------------------------------------------------------

@@ -175,6 +175,8 @@ class SubmitResult:
     outcome: SubmitOutcome
     order_no: str | None = None
     reason: str | None = None
+    # 브로커 오류 코드 (M2 바이낸스 -1013 등, D-112). 후처리(dust 확정 D-102 등)의 판정 근거. M1은 None
+    code: int | None = None
 
 
 @dataclass(frozen=True)
@@ -198,6 +200,12 @@ class OrderEvent:
     commission_asset: str | None = None
     # 종결 통보(CANCELLED·EXPIRED·REJECTED)의 사유 (예: M2 IOC 미체결분 소멸, D-104). 없으면 종류별 기본 문구(M1 그대로)
     reason: str | None = None
+    # M2 (CP-024 D-110·D-118): 심볼(주문번호는 심볼 안에서만 유일), 거래소 보고 체결 금액(executionReport Y·myTrades
+    # quoteQty). quote_confirmed=False면 FULL 응답 fills처럼 보고 금액이 없어 price × qty 임시값. 음수 = 데이터 없음.
+    # 모두 없으면(M1) 기존 동작 그대로
+    instrument: str | None = None
+    quote_qty: Decimal | None = None
+    quote_confirmed: bool = False
 
 
 @dataclass(frozen=True)

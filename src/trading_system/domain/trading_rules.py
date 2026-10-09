@@ -20,6 +20,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, fields, replace
 from datetime import datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+from enum import StrEnum
 
 from .enums import OrderType, Side
 from .market import Quote
@@ -180,6 +181,64 @@ def spot_order_terms(side: Side, quote: Quote | None, now: datetime, rules: Symb
     if quote_is_fresh(quote, now, policy.quote_max_age):
         return OrderType.MARKET, quote.price
     return OrderType.LIMIT, stale_sell_price(quote.price, rules, policy.sell_buffer)
+
+
+class DustVerdict(StrEnum):
+    """dust 판정 (D-102). SEND = 전송 대상(경계 포함), DUST_* = 전송 불가가 확실(포지션 없음 취급)."""
+
+    SEND = "SEND"
+    DUST_QUANTITY = "DUST_QUANTITY"   # (가) 청산 가능 수량 < minQty
+    DUST_NOTIONAL = "DUST_NOTIONAL"   # (나) 명목가가 확실히 minNotional 미만
+
+
+@dataclass(frozen=True)
+class DustCheck:
+    verdict: DustVerdict
+    quantity: Decimal          # 청산 가능 수량 (보유를 매도 경로의 stepSize로 내림)
+    notional_boundary: bool    # 금액 경계(가장 낮은 참조가로는 미만이거나 참조가 모름) — 전송 뒤 -1013이면 dust 확정
+
+
+def sellable_quantity(held: Decimal, rules: SymbolRules, *, stale: bool) -> Decimal:
+    """청산 가능 수량 = 보유를 실제로 보낼 매도 경로의 stepSize로 내림 (D-102 (가), D-118 수량 내림).
+
+    평상시 = 시장가 → MARKET_LOT_SIZE stepSize(0이면 의미 미확인 — 위험 축소라 깎지 않음), 시세 지연 = IOC 지정가 → LOT_SIZE."""
+    step = rules.lot_step if stale else rules.market_step
+    if held <= 0:
+        return _ZERO
+    if step == 0:
+        return held
+    return (held / step).to_integral_value(rounding=ROUND_FLOOR) * step
+
+
+def dust_verdict(held: Decimal, rules: SymbolRules, *, stale: bool, market_prices: Sequence[Decimal],
+                 stale_price: Decimal | None) -> DustCheck:
+    """dust 판정 (D-102, V-131·V-160). 거래소 규칙 그대로(완충 차감 없음), 실제로 보낼 매도 경로의 필터로.
+
+    - 평상시(시장가): MARKET_LOT_SIZE minQty, 명목가 = 참조가(최근가·avgPrice·referencePrice) — 거래소가 쓰는 기준가를
+      우리가 같게 얻는다는 근거가 없으므로 **가장 높은** 참조가로도 minNotional 미만일 때만 dust(확실). applyMinToMarket이
+      거짓이면 시장가 명목가 최소를 적용하지 않는다.
+    - 시세 지연(IOC 지정가, D-120): LOT_SIZE minQty, 명목가 = 주문가 × 수량(거래소와 같은 값). 주문가를 모르면 금액 판정 안 함.
+    - 그 밖(경계 포함)은 SEND — 위험 축소를 미리 막지 않는다(CLAUDE.md §8-3). notional_boundary는 가장 낮은 참조가로는
+      미만이거나 참조가를 모를 때 참 — 전송 뒤 -1013(필터 거부)을 받으면 dust로 확정하는 근거로 쓴다.
+    """
+    qty = sellable_quantity(held, rules, stale=stale)
+    min_qty = rules.lot_min_qty if stale else rules.market_min_qty
+    if qty <= 0 or qty < min_qty:
+        return DustCheck(DustVerdict.DUST_QUANTITY, qty, False)
+    if stale:
+        if stale_price is None or stale_price <= 0:
+            return DustCheck(DustVerdict.SEND, qty, True)
+        if stale_price * qty < rules.min_notional:
+            return DustCheck(DustVerdict.DUST_NOTIONAL, qty, False)
+        return DustCheck(DustVerdict.SEND, qty, False)
+    if not rules.apply_min_to_market:
+        return DustCheck(DustVerdict.SEND, qty, False)
+    prices = [p for p in market_prices if p > 0]
+    if not prices:
+        return DustCheck(DustVerdict.SEND, qty, True)
+    if max(prices) * qty < rules.min_notional:
+        return DustCheck(DustVerdict.DUST_NOTIONAL, qty, False)
+    return DustCheck(DustVerdict.SEND, qty, min(prices) * qty < rules.min_notional)
 
 
 def apply_spot_terms(req: GateRequest, quote: Quote | None, now: datetime, rules: SymbolRules | None,

@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import random
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -91,6 +91,12 @@ class FakeBroker:
         self.ioc_limit = False
         self.ioc_liquidity: dict[str, Decimal] = {}
         self._fees: dict[str, tuple[Decimal, str]] = {}  # 체결번호 → (수수료, 수수료 자산)
+        # M2 체결 금액 보고 (D-118, spot_fees가 있을 때만): quote_report = 거래소 보고 금액(Y) 계산(기본 qty × price),
+        # provisional_quotes = True면 FULL 응답 fills처럼 보고 금액 없이 임시값(qty × price)만 통보 → confirm_quotes()로 확정 통보
+        self.quote_report: Callable[[Decimal, Decimal], Decimal] | None = None
+        self.provisional_quotes = False
+        self._provisional: list[OrderEvent] = []
+        self.reject_code: int | None = None  # behavior REJECT의 오류 코드 (M2 -1013 등, D-112). None = M1 그대로
         self._seq = 0
         self._day = 0
         self._fill_seq = 0
@@ -108,7 +114,7 @@ class FakeBroker:
             return SubmitResult(SubmitOutcome.PRE_SEND_FAILURE, reason="fake: 연결 없음")
         self.sent.append(request)
         if self.behavior is FakeBehavior.REJECT:
-            return SubmitResult(SubmitOutcome.REJECTED, reason="fake: 거부")
+            return self._reject()
         if self.behavior is FakeBehavior.UNKNOWN:
             return SubmitResult(SubmitOutcome.UNKNOWN, reason="fake: 응답 없음")
         order_no = self._new_order(request.account, "NEW", request.instrument, request.side, request.quantity,
@@ -124,6 +130,12 @@ class FakeBroker:
             raise ConnectionResetError("fake: 전송 후 연결 끊김")
         return SubmitResult(SubmitOutcome.ACCEPTED, order_no=order_no)
 
+    def _reject(self) -> SubmitResult:
+        if self.reject_code is None:
+            return SubmitResult(SubmitOutcome.REJECTED, reason="fake: 거부")
+        return SubmitResult(SubmitOutcome.REJECTED, reason=f"fake: 거부 (코드 {self.reject_code})",
+                            code=self.reject_code)
+
     def cancel_order(self, request: OrderRequest) -> SubmitResult:
         return self._change(request, "CANCEL")
 
@@ -135,7 +147,7 @@ class FakeBroker:
             return SubmitResult(SubmitOutcome.PRE_SEND_FAILURE, reason="fake: 연결 없음")
         self.sent.append(request)
         if self.behavior is FakeBehavior.REJECT:
-            return SubmitResult(SubmitOutcome.REJECTED, reason="fake: 거부")
+            return self._reject()
         if self.behavior is FakeBehavior.UNKNOWN:
             return SubmitResult(SubmitOutcome.UNKNOWN, reason="fake: 응답 없음")
         target_no = request.target_order_no
@@ -192,12 +204,24 @@ class FakeBroker:
         self._set(order_no, filled_quantity=filled, state="FILLED" if filled == o.quantity else "PARTIAL")
         at = _EPOCH
         self._fills.append((self._book[order_no].account, self._day, FillRecord(order_no, fill_id, qty, px, at)))
-        fee: tuple[Decimal, str] | None = None
-        if self.spot_fees is not None:
-            fee = self.spot_fees.commission(o.instrument, o.side, qty, px)
-            self._fees[fill_id] = fee
-        self._events.append(OrderEvent(kind="FILL", order_no=order_no, fill_id=fill_id, quantity=qty, price=px,
-                                       commission=fee[0] if fee else None, commission_asset=fee[1] if fee else None))
+        if self.spot_fees is None:   # M1: 수수료·보고 금액 없는 통보 (기존 그대로)
+            self._events.append(OrderEvent(kind="FILL", order_no=order_no, fill_id=fill_id, quantity=qty, price=px))
+            return
+        fee = self.spot_fees.commission(o.instrument, o.side, qty, px)
+        self._fees[fill_id] = fee
+        reported = self.quote_report(qty, px) if self.quote_report is not None else qty * px
+        ev = OrderEvent(kind="FILL", order_no=order_no, fill_id=fill_id, quantity=qty, price=px,
+                        commission=fee[0], commission_asset=fee[1], instrument=o.instrument,
+                        quote_qty=reported, quote_confirmed=True)
+        if self.provisional_quotes:   # FULL 응답 fills만: 보고 금액 없음 → 임시값, 확정 통보는 confirm_quotes()
+            self._provisional.append(ev)
+            ev = replace(ev, quote_qty=qty * px, quote_confirmed=False)
+        self._events.append(ev)
+
+    def confirm_quotes(self) -> None:
+        """임시 금액으로 통보한 체결의 확정 통보(사용자 스트림 executionReport Y)를 낸다 — 같은 체결 ID (D-118)."""
+        self._events.extend(self._provisional)
+        self._provisional.clear()
 
     def _ioc(self, order_no: str, fill: bool) -> None:
         """IOC: 즉시 체결 가능한 수량만 체결(주문 가격), 남은 수량은 EXPIRED (BN §5 "IOC·MARKET 부분 체결 → EXPIRED")."""

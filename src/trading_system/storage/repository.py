@@ -27,6 +27,7 @@ from trading_system.domain.enums import ACTIVE_INTENT_STATES, IntentState, Mode
 from trading_system.domain.models import Account
 
 DAILY_BASE_KIND = "DAILY_BASE"   # 거래일별 일일 기준 감사 기록 (monitoring.watchers.DAILY_BASE와 같은 값)
+DUST_RELEASE_REASON = "dust 확정"  # 소유권 해제 사유 (CP-024 D-102, 01 R-28·02 ENT-20 개정 방향)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -129,6 +130,14 @@ CREATE TABLE IF NOT EXISTS quote_poll_stat (
   watched INTEGER NOT NULL, instruments INTEGER NOT NULL, requests INTEGER NOT NULL, failures INTEGER NOT NULL,
   latency_ms_p50 INTEGER, latency_ms_max INTEGER, interval_avg_seconds TEXT, interval_max_seconds TEXT,
   response_fields TEXT, recorded_at TEXT NOT NULL);
+-- 체결 수수료·거래소 보고 금액 (M2, CP-024 D-101·D-118, T-M2-04): 체결 1건당 0~1행의 추가 표. 기존 표·열·의미를
+-- 바꾸지 않으므로 스키마 버전을 올리지 않는다(quote_snapshot과 같은 방식, A-072 ⑤) — 기존 M1 저장소도 열 때 생성되고
+-- M1 체결(수수료 자산·보고 금액 없음)은 이 표에 쓰지 않는다. quote_status: PROVISIONAL(fills만 — price × qty 임시값) /
+-- CONFIRMED(executionReport Y·myTrades quoteQty). 확정값으로만 USDT 대조 (D-103)
+CREATE TABLE IF NOT EXISTS fill_fee (
+  fill_key TEXT PRIMARY KEY REFERENCES fill(fill_key), mode TEXT NOT NULL,
+  commission TEXT, commission_asset TEXT, quote_qty TEXT NOT NULL, quote_status TEXT NOT NULL,
+  recorded_at TEXT NOT NULL, confirmed_at TEXT);
 -- 조회 인덱스: 데이터 의미 불변이라 스키마 버전을 올리지 않는다 — 기존 저장소도 열 때 생성 (review C절, DP-38)
 CREATE INDEX IF NOT EXISTS ix_intent_state ON intent(state);
 CREATE INDEX IF NOT EXISTS ix_ops_command_status ON ops_command(status);
@@ -614,6 +623,24 @@ class Repository:
                       (f"{order_key}|{fill_id}", self.mode.value, order_key, fill_id, str(quantity), str(price), to_iso(at)))
         return cur.rowcount == 1
 
+    def insert_fill_fee(self, fill_key: str, commission: Decimal | None, commission_asset: str | None,
+                        quote_qty: Decimal, confirmed: bool, at: datetime) -> None:
+        """체결 수수료·보고 금액 기록 (M2, D-101·D-118). 체결 행을 기록한 같은 저장 단위에서 부른다."""
+        self._x("INSERT INTO fill_fee(fill_key, mode, commission, commission_asset, quote_qty, quote_status, "
+                "recorded_at, confirmed_at) VALUES(?,?,?,?,?,?,?,?)",
+                (fill_key, self.mode.value, None if commission is None else str(commission), commission_asset,
+                 str(quote_qty), "CONFIRMED" if confirmed else "PROVISIONAL", to_iso(at),
+                 to_iso(at) if confirmed else None))
+
+    def fill_fee(self, fill_key: str) -> dict | None:
+        r = self._x("SELECT * FROM fill_fee WHERE fill_key=?", (fill_key,)).fetchone()
+        return dict(r) if r else None
+
+    def confirm_fill_quote(self, fill_key: str, quote_qty: Decimal, at: datetime) -> None:
+        """임시 금액(PROVISIONAL)을 거래소 보고 금액으로 확정한다 (D-118)."""
+        self._x("UPDATE fill_fee SET quote_qty=?, quote_status='CONFIRMED', confirmed_at=? "
+                "WHERE fill_key=? AND quote_status='PROVISIONAL'", (str(quote_qty), to_iso(at), fill_key))
+
     # --- 포지션 -------------------------------------------------------------
     def position(self, account: str, instrument: str) -> PositionRow:
         r = self._x("SELECT * FROM position WHERE account=? AND instrument=?", (account, instrument)).fetchone()
@@ -651,6 +678,17 @@ class Repository:
         self._x("UPDATE ownership SET state=?, released_reason=COALESCE(?, released_reason), "
                 "released_at=COALESCE(?, released_at) WHERE ownership_id=?",
                 (state, reason, to_iso(at) if at is not None and state == "RELEASED" else None, ownership_id))
+
+    def dust_instruments(self, account: str) -> set[str]:
+        """dust 확정으로 소유권이 해제된 뒤 잔량만 남은 종목 (M2, D-102: 포지션 없음 취급·L6 제외).
+
+        종목별 마지막 소유권 행이 RELEASED + 사유 "dust 확정"이고 보유 수량 > 0인 것. 그 뒤 재진입하면 새 소유권이 생겨 빠진다."""
+        latest: dict[str, sqlite3.Row] = {}
+        for r in self._x("SELECT * FROM ownership WHERE account=? ORDER BY created_at, rowid", (account,)):
+            latest[r["instrument"]] = r
+        return {inst for inst, r in latest.items()
+                if r["state"] == "RELEASED" and r["released_reason"] == DUST_RELEASE_REASON
+                and self.position(account, inst).quantity > 0}
 
     def strategy_history(self, account: str, owner: str, instrument: str) -> dict:
         """전략·종목 거래 이력 원자료 (00 §2.2 거래 이력). 체결 0주로 끝난 진입은 진입으로 세지 않는다."""
