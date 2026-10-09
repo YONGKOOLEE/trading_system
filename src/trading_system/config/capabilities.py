@@ -14,6 +14,34 @@ MARKET_COLUMNS = ("M1", "M2", "M3")
 
 CapabilityTable = dict[str, dict[str, str]]  # CAP-ID → 시장 → 상태
 
+# [CP-032 D-175] 미체결 정정·취소 능력의 분리: "CAP-ORD-03" 선언 = 03a(정정)·03b(취소) 둘 다 요구.
+# 취소만 쓰는 전략은 "CAP-ORD-03b"로 선언한다.
+ORD03, ORD03A, ORD03B = "CAP-ORD-03", "CAP-ORD-03a", "CAP-ORD-03b"
+CAPABILITY_PARTS: dict[str, tuple[str, ...]] = {ORD03: (ORD03A, ORD03B)}
+# 표 상태와 무관하게 이 코드 버전에 구현이 없는 능력 (표가 먼저 바뀌어도 등록을 막는다)
+NOT_IMPLEMENTED: dict[str, str] = {ORD03A: "정정(03a) 미구현 — CP-032 단계 5(T-033) 전까지 등록 불가"}
+
+
+def required_parts(cap: str) -> tuple[str, ...]:
+    """선언한 능력이 실제로 요구하는 능력들 (묶음 선언은 부분으로 펼친다)."""
+    return CAPABILITY_PARTS.get(cap, (cap,))
+
+
+def capability_row(caps: CapabilityTable, cap: str) -> dict[str, str] | None:
+    """능력의 시장별 상태 행. 표에 없으면 None(정의되지 않은 능력).
+
+    기존 표 호환: 03a·03b 행이 없고 "CAP-ORD-03" 한 행만 있으면 그 행 상태를 03a·03b 각각에 적용한다
+    (docs/capabilities.md는 사용자 지시 시 03a·03b 행으로 나눈다 — CP-032 §3.1)."""
+    row = caps.get(cap)
+    if row is None and cap in CAPABILITY_PARTS[ORD03]:
+        row = caps.get(ORD03)
+    return row
+
+
+def uses_unfilled_cancel(capabilities: tuple[str, ...]) -> bool:
+    """실행 정책의 미체결 시간 초과 취소(03b)를 쓰는 선언인지 (03 2-M1.4, T-020 경로)."""
+    return any(ORD03B in required_parts(c) for c in capabilities)
+
 
 def parse_capabilities(text: str) -> CapabilityTable:
     table: CapabilityTable = {}

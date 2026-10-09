@@ -98,7 +98,8 @@ class MarketDataStore:
         return self.history.at_or_before(instrument, at)
 
     def tick_of(self, instrument: str, price: Decimal) -> Decimal | None:
-        """진단용(T-023): 그 가격의 호가 단위. 규칙 파일·종목 정보가 없으면 None."""
+        """그 가격의 호가 단위. 규칙 파일·종목 정보가 없으면 None.
+        진단(T-023)과 게이트 기준가 범위 맞춤(CP-032 D-174, gate.ports.MarketFacts)이 쓴다."""
         inst = self._data.get(instrument)
         if inst is None or self.ticks is None:
             return None

@@ -227,7 +227,8 @@ def test_exec_policy_cancels_stale_unfilled(tmp_path: Path) -> None:
     w = World(tmp_path, FakeBehavior.ACCEPT_ONLY)
     try:
         caps = w.engine.strategies[0].strategy.spec.capabilities
-        spec = cross_spec(version=2, capabilities=tuple(caps) + ("CAP-ORD-03",), unfilled_policy="미체결 10분 후 취소")
+        # [CP-032 D-175] 취소만 쓰는 전략은 "CAP-ORD-03b"로 선언("CAP-ORD-03" = 03a 정정 포함 → 등록 거부). 시험 동작 그대로
+        spec = cross_spec(version=2, capabilities=tuple(caps) + ("CAP-ORD-03b",), unfilled_policy="미체결 10분 후 취소")
 
         class S(CrossStrategy):
             pass

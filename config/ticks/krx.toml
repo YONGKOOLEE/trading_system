@@ -1,0 +1,28 @@
+# 호가 가격 단위 — KRX 유가증권·코스닥 (03 D-056, CP-032 D-173, A-085). 형식은 krx.example.toml과 같다.
+# 근거: docs/broker-specs/krx-market.md §2.1 (X-U1 확인 2026-10-08, 재확인 §2.2 2026-10-09 — 표 변경 없음).
+# 경계 가격은 상위 구간 ("N원 이상 ~ M원 미만", TickTable.tick_of의 price < below). 가격대 판정은 주문 가격 자체.
+# 값은 문자열(부동소수 금지). 마지막 구간 below = "none". ELW 행 없음(M1 범위 밖).
+# ETF·ETN 표는 미리 둔다 — CAP-INS-02·03이 미지원이라 등록 검증에서 ETF·ETN 전략은 계속 거부된다.
+# 키움 모의 서버가 이 격자를 같게 적용하는지(500원 배수 접수·250원 배수 거부)는 미확인 → PAPER 지정가 사용은 Q-3 실측 뒤.
+
+source = "KRX 규정 사이트 X6 https://regulation.krx.co.kr/contents/RGL/03/03010100/RGL03010100T3.jsp (유가증권 호가 탭) / X7 https://regulation.krx.co.kr/contents/RGL/03/03020100/RGL03020100.jsp (코스닥)"
+version = "2023-01-25 시행(주식), ETF·ETN 2천원 미만 1원 2023-12 시행(부분 확인), 2026-10-08 확인"
+
+[bands]
+STOCK = [
+  { below = "2000", tick = "1" },
+  { below = "5000", tick = "5" },
+  { below = "20000", tick = "10" },
+  { below = "50000", tick = "50" },
+  { below = "200000", tick = "100" },
+  { below = "500000", tick = "500" },
+  { below = "none", tick = "1000" },
+]
+ETF = [
+  { below = "2000", tick = "1" },
+  { below = "none", tick = "5" },
+]
+ETN = [
+  { below = "2000", tick = "1" },
+  { below = "none", tick = "5" },
+]

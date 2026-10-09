@@ -32,6 +32,10 @@ class MarketFacts(Protocol):
         """호가 단위에 맞는 가격인지. 규칙을 모르면 None (T-010 호가 단위 설정)."""
         ...
 
+    def tick_of(self, instrument: str, price: Decimal) -> Decimal | None:
+        """그 가격대의 호가 단위. 규칙을 모르면 None (CP-032 D-174 기준가 범위 맞춤)."""
+        ...
+
 
 class AccountFacts(Protocol):
     def daily_risk(self, account: str) -> DailyRisk | None: ...

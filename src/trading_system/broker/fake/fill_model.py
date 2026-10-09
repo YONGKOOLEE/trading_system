@@ -86,7 +86,7 @@ class BacktestBroker:
         return SubmitResult(SubmitOutcome.ACCEPTED, order_no=f"{self._seq:07d}")
 
     def modify_order(self, request: OrderRequest) -> SubmitResult:
-        return SubmitResult(SubmitOutcome.REJECTED, reason="백테스트 체결 모델은 정정을 지원하지 않음 (CAP-ORD-03 미지원)")
+        return SubmitResult(SubmitOutcome.REJECTED, reason="백테스트 체결 모델은 정정을 지원하지 않음 (CAP-ORD-03a 미지원)")
 
     # --- 체결 ---------------------------------------------------------------------------
     def match_bar(self, instrument: str, bar: BarFacts, at: datetime) -> None:

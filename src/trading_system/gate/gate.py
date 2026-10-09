@@ -22,7 +22,7 @@ from trading_system.domain.enums import (
 )
 from trading_system.domain.halts import HaltView, RequestView, halt_rejection
 from trading_system.domain.limits import AccountLimits
-from trading_system.domain.market import BLOCKS_RISK_REDUCTION, InstrumentInfo, Quote, estimate_cost
+from trading_system.domain.market import BLOCKS_RISK_REDUCTION, InstrumentInfo, Quote, estimate_cost, price_limits
 from trading_system.domain.models import ApprovedIntent, GateDecision, GateRequest
 from trading_system.storage.repository import BrokerOrderRow, Repository, new_id
 
@@ -382,10 +382,45 @@ class Gate:
             raise _Reject(Check.G10, "호가 단위 규칙 없음")
         if not tick:
             raise _Reject(Check.G10, f"호가 단위에 맞지 않는 가격: {req.price}")
+        self._g10_price_band(req)
+
+    def _g10_price_band(self, req: GateRequest) -> None:
+        """지정가 상·하한가 사전 검사 (01 G10, CP-032 D-174). 게이트는 가격을 고치지 않는다(맞춤은 의도를 만들 때).
+
+        - 아는 상·하한가 밖이면 거부 (확실한 위반은 요청 유형과 무관).
+        - 상·하한가 중 하나라도 모르면: 위험 확대(신규·증액·매수 정정)는 거부. 위험 축소는 기준가(전일 종가)가 있으면
+          기준가 × (1 ± 가격제한폭)을 호가 단위로 맞춘 범위(상한 내림·하한 올림)로 검사, 기준가도 모르면 허용
+          (§8-3 위험 축소를 미리 막지 않음 — 위반이면 브로커 거부로 명시 거부 종결).
+        """
         q = self._in.market.quote(req.instrument)
-        if q is not None and ((q.upper_limit is not None and req.price > q.upper_limit)
-                              or (q.lower_limit is not None and req.price < q.lower_limit)):
+        upper = q.upper_limit if q is not None else None
+        lower = q.lower_limit if q is not None else None
+        if (upper is not None and req.price > upper) or (lower is not None and req.price < lower):
             raise _Reject(Check.G10, f"가격제한폭 밖의 가격: {req.price}")
+        if upper is not None and lower is not None:
+            return
+        if req.is_risk_increasing:
+            raise _Reject(Check.G10, "상·하한가 모름 — 위험 확대 지정가 거부 (CP-032 D-174)")
+        base = q.base_price if q is not None else None
+        if base is None:
+            return
+        band = self._base_band(req.instrument, base)
+        if band is None:
+            return    # 기준가 범위의 호가 단위를 모름 = 기준가 범위 모름 → 기준가 모름과 같게 허용
+        hi, lo = band
+        if req.price > hi or req.price < lo:
+            raise _Reject(Check.G10, f"기준가 {base} ±{self._policy.price_limit_ratio} 범위({lo}~{hi}) 밖의 가격: "
+                                     f"{req.price} (상·하한가 모름)")
+
+    def _base_band(self, instrument: str, base: Decimal) -> tuple[Decimal, Decimal] | None:
+        ticks: dict[Decimal, Decimal | None] = {}
+
+        def tick_at(p: Decimal) -> Decimal:
+            ticks[p] = self._in.market.tick_of(instrument, p)
+            return ticks[p] or Decimal("1")
+
+        hi, lo = price_limits(base, self._policy.price_limit_ratio, tick_at)
+        return None if any(t is None for t in ticks.values()) else (hi, lo)
 
     def _g11_freshness(self, ctx: _Ctx) -> None:
         """시세 신선도 (01 G11, Q-C): 위험 확대는 지연 시 거부, 위험 축소는 시장가만 거부."""

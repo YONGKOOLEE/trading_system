@@ -15,7 +15,7 @@ from pathlib import Path
 
 from trading_system.broker.base import BrokerAdapter
 from trading_system.config.app_file import StrategyDeploy
-from trading_system.config.capabilities import CapabilityTable
+from trading_system.config.capabilities import CapabilityTable, uses_unfilled_cancel
 from trading_system.config.errors import ConfigError
 from trading_system.config.strategy_params import load_params_file, validate_params
 from trading_system.config.strategy_registry import StrategyRegistry
@@ -127,7 +127,8 @@ def build_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: BrokerAd
             raise ConfigError([f"전략 등록 거부 {si.strategy.spec.owner}: {p}" for p in reg.problems])
         parsed = validate_params(si.strategy.spec, si.params)   # 전략에는 검증·형 변환된 값만 준다 (R-19)
         unfilled = None
-        if "CAP-ORD-03" in si.strategy.spec.capabilities and "unfilled_max_minutes" in parsed:
+        # [CP-032 D-175] 03b(취소) 선언이면 미체결 시간 초과 취소. "CAP-ORD-03"(03a 포함)은 등록에서 이미 거부된다
+        if uses_unfilled_cancel(si.strategy.spec.capabilities) and "unfilled_max_minutes" in parsed:
             unfilled = int(str(parsed["unfilled_max_minutes"]))
         loaded.append(LoadedStrategy(si.strategy, parsed, si.eval_times, unfilled))
 

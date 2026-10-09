@@ -109,7 +109,7 @@ def make_root(tmp: Path, sntp_port: int) -> Path:
     root = tmp / "repo"
     for rel in ("config/limits.paper.toml", "config/market.paper.toml", "config/ticks/krx.toml",
                 "config/strategies/paper0-verify-v1.toml", "docs/capabilities.md"):
-        if not (REPO / rel).exists():   # 호가 표(krx.toml)는 실제 저장소에 없음(X-U1) → run도 ticks=None
+        if not (REPO / rel).exists():   # 없는 파일은 건너뜀 (krx.toml은 CP-032 D-173부터 있음 → run이 호가 표를 읽음)
             continue
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(REPO / rel, root / rel)

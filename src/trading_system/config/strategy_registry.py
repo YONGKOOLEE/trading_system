@@ -27,7 +27,7 @@ from trading_system.domain.strategy import (
 )
 from trading_system.storage.repository import Repository
 
-from .capabilities import CapabilityTable
+from .capabilities import NOT_IMPLEMENTED, CapabilityTable, capability_row, required_parts, uses_unfilled_cancel
 from .strategy_params import PARAM_TYPES, params_hash, validate_params
 from .errors import ConfigError
 
@@ -105,15 +105,20 @@ def validate_spec(spec: StrategySpec, caps: CapabilityTable, account_limits: Acc
     allowed = {"지원", "검증 중"} if target_mode is Mode.BACKTEST or (paper0 and target_mode is Mode.PAPER) \
         else {"지원"}
     for cap in spec.capabilities:
-        if cap not in caps:
-            p.append(f"{cap}: 정의되지 않은 능력")
-            continue
-        for m in spec.markets:
-            status = caps[cap].get(m)
-            if status not in allowed:
-                p.append(f"{cap}: {m}에서 {status} — {target_mode.value} 등록 불가 (D-004, CP로 기능 추가)")
-    if "CAP-ORD-03" in spec.capabilities and spec.unfilled_policy.strip() in ("", "시스템 기본"):
-        p.append("unfilled_policy: CAP-ORD-03을 선언하면 미체결 정책 필수")
+        for part in required_parts(cap):          # [CP-032 D-175] "CAP-ORD-03" = 03a·03b 모두 요구
+            if part in NOT_IMPLEMENTED:
+                p.append(f"{part}: {NOT_IMPLEMENTED[part]}" + (f" ({cap} 선언)" if part != cap else ""))
+                continue
+            row = capability_row(caps, part)
+            if row is None:
+                p.append(f"{part}: 정의되지 않은 능력")
+                continue
+            for m in spec.markets:
+                status = row.get(m)
+                if status not in allowed:
+                    p.append(f"{part}: {m}에서 {status} — {target_mode.value} 등록 불가 (D-004, CP로 기능 추가)")
+    if uses_unfilled_cancel(spec.capabilities) and spec.unfilled_policy.strip() in ("", "시스템 기본"):
+        p.append("unfilled_policy: CAP-ORD-03·03b를 선언하면 미체결 정책 필수")
 
     if not spec.rules:
         p.append("rules: 규칙 표 누락")
