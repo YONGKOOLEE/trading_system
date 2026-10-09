@@ -1,7 +1,8 @@
 # 세션 인계 (짧게 유지 — 작업이 끝날 때마다 덮어쓴다)
 
 - 갱신: 2026-10-08 저녁. **PAPER-0 3일차(10-08) "보는 자동 운영" 성공** — 06:44 K8 자동 재개(7초), 07:53 K5 → 07:58 자동 해제(CP-028 P4), 09:30 매수 267,500 / 14:30 매도 266,250, 마감 대조 MATCH, 15:45 자동 종료·paper-review·백업·요약 정상. 결함 2건(요약 기준 금액 표시, 15:09 하트비트 거짓 경보) 수정 013f2bd 병합. 실제 비용 수수료 1,860 + 세금 532, 손익 −3,642(시스템 −3,652, 10원 올림 차). 마지막 승인 기록 **A-084**. 운영 카드: https://claude.ai/artifact/XXZrAhidXPAFo1hUDRgVdw
-- **체크아웃 `main`** HEAD **4e76347**(2026-10-09 새벽 2차 병합 `integ/final`: 백테스트 결과 파일·검증 실행기, 결과 불명 확정 도구 confirm-unknown, 운영 낮음 항목, test_r4 간헐 실패 보강, 문서 — 사용 설명서 v0.2·CP-032 draft·키움 확장 사양 조사·호가 단위 재확인·07 v0.4). 통합 브랜치 전체 **1449 passed**(942.80s). 1차 병합(9a494f1, 1335 passed): 운영 묶음 ops-hardening·code-health·unknown-k3(CP-031). push 없음. 10-09 한글날 휴장. **다음 거래일 10-12(월)부터 무인 자동 운영 예정** — 사용자 준비(아래)가 끝나야 한다. **PC는 10-09 새벽 사용자 지시로 종료됨** — 귀가 후 켜고 로그인해야 한다.
+- **최신 (2026-10-09 낮)**: 사용자가 집 PC에서 **10-12 무인 전환 준비 완료** — ① Windows 시간 서버 time.kriss.re.kr 변경 ② 루트 `.env`(TRADE_MODE 한 줄, `Set-Content -Encoding ascii`) 생성·확인 ③ `schedule-register.ps1 -DryRun` → 등록 ④ 실행 계정 확인 — 사용자 보고 "전부 정상". 등록 중 결함 2건 발견·수정(2e2f713): PS 5.1 `-File`에서 param 기본값의 `$PSScriptRoot` 빈 값, 루트 `.env` 부재(사용자가 `.env.paper`로 확인했었음 — 자동 운영은 루트 `.env`로 모드 판단). 사용자 계획: PC를 끄고 **10-11(일) 저녁 켜고 로그인·화면 잠금 상태로 둔다**(예약 작업은 로그인 상태에서만 실행).
+- **체크아웃 `main`** HEAD **2418489**(정지 요청 파일 삭제 재시도 e1fbb2b 병합 — 2e2f713 전체 회귀에서 test_v208 간헐 실패(1/12 재현) 원인 수정, 브랜치 전체 **1452 passed**) ← 2e2f713(2026-10-09 낮 예약 등록 수정 병합. 이전: 4e76347 2차 병합 `integ/final` 1449 passed — 백테스트 결과 파일·검증 실행기, confirm-unknown, 운영 낮음 항목, 문서; 9a494f1 1차 병합 1335 passed — ops-hardening·code-health·unknown-k3(CP-031)). push 없음. 10-09~11 휴장·주말. **10-12(월) 06:40 시계 맞춤 → 06:45 첫 무인 자동 운영.**
 - 실전 주문 코드·LIVE 승인 없음. 게이트 변경 없음(00~05·업무정의서 draft 묶음 승인 전, 검토 요약 docs/changes/draft-bundle-review-2026-10-07.md).
 
 ## 브랜치·worktree (2026-10-09 새벽)
@@ -13,20 +14,33 @@
 
 **병합 완료 (2026-10-09)**
 - 1차(지시 "운영 묶음과 문서 main 병합"): ops-hardening(7e71480·d71ebc1·242476e), code-health(6bac802·f6d5090), unknown-k3(0f6aef6·2109f81), docs/cp-030-validation-criteria, docs/user-manual → 9a494f1, main 1335 passed.
+- 3차(사용자 등록 오류 보고, 2026-10-09 낮): fix/schedule-register-root 308f43d → 2e2f713 — schedule-register.ps1 Root 본문 계산·루트 `.env` 모드 줄 사전 검사·`-DryRun`, config/modes UTF-16 모드 파일 → 거부(예외 아님), 설명서 §2.2·§2.3·pv-procedure §3.5. 관련 시험 128 passed. (병합 커밋 메시지에 비밀 파일 이름이 있으면 권한 거부됨 — 메시지에서 이름 빼고 재시도.)
 - 2차(지시 "남은 개발 전부 시행"): integ/final = fc2790f(test_r4 대기 보강) + integ/backtest(T-009 295e74d·T-026 03132f7, 충돌 0) + fix/confirm-unknown-cli(15b5ceb·f836f12, 재검토 반영) + docs/manual-v02-cp032 + docs/paper-review-v04(kiwoom-kr.md 충돌 1건 — §7e 다음에 확장 사양 조사 절, 둘 다 보존) + fix/ops-low-items(c7e16da·b2b535e, 재검토 반영) → 4e76347.
 - 정리 대상 worktree(병합 끝남, 사용자가 `git worktree remove ..\<이름>` 실행 — 에이전트 권한 거부): cp028·autopilot·t018-multi·day3-fixes·ops-hardening·code-health·unknown-k3·integ·docs-cp030·docs-manual·bt-export·t026·confirm-cli·ops-low·docs2·docs3·final·m2-t07(M2 병합 뒤)·m2-binance·m2-adapter·m2-next(M2 병합 뒤). integ2는 M2 병합 때까지 유지.
 
 ## 다음 세션 첫 행동
-1. `git status`(main 4e76347)·이 파일·`docs/approvals.md` 끝 3행(A-082~A-084)·`docs/worklog.md` 마지막 항목(41) 확인.
-2. 사용자에게 **10-12 무인 전환 준비**를 안내 — 사용 설명서 **docs/user-manual.md v0.2 §2**(시간 서버 time.kriss.re.kr 화면·명령, `.env` TRADE_MODE 확인, 예약 등록, 실행 계정 확인, 업데이트 사용 시간·절전). 복사해 붙일 전체 명령으로.
-3. 10-12부터 자동 운영일 관찰(K8 자동 재개, 07:53 K5, 15:45 종료 절차, 종료 코드, V-212)을 07-paper-review §12B 형식으로 날마다 기록. 무인 운영일에는 엔진 "일일 보고"(16:00)가 생성되지 않는다(run 15:45 종료) — 텔레그램 요약은 정상. 설계 공백으로 기록(낮음).
-4. 10-12 성공 뒤: M2 병합(위 절차), CP-032 승인 질문(Q-1~Q-5), PAPER-0 종료 판정 준비.
-5. 사용자는 터미널 명령에 익숙하지 않다 — 실행 안내는 **복사해 붙일 전체 명령**, 용어는 풀어서. "실전"은 LIVE에만 쓴다(모의 서버 실행은 "모의 서버 실행"). 평일 07:15 출발·장중 부재·텔레그램만 가능.
+1. `git status`(main 2418489, 깨끗해야 함)·이 파일·`docs/approvals.md` 끝 3행(A-082~A-084)·`docs/worklog.md` 마지막 항목(42) 확인.
+2. **10-12(월) 첫 무인 자동 운영 결과 확인**(PAPER-0 4일차, V-212 실측). 사용자에게서 텔레그램 결과를 받거나 "로그 봐 줘" 지시가 오면 읽기 전용으로: `var\paper\logs\autopilot-20261012.log`·`run-console-20261012.log`·`ops-20261012.jsonl`, `var\paper\review\`, 작업 스케줄러 "마지막 실행 결과"(종료 코드 0/1/2/3). 볼 것: 06:40 ClockSync·06:45 시작 여부, 시작 점검 시계 오차(시간 서버 변경 효과, 3일차 최대 0.981초), K8 자동 재개, 07:53 K5 자동 해제, 09:30 매수·14:30 매도, CLOSE MATCH, 15:45 종료·집계·백업·요약, "확인 필요" 줄. 이번 2e2f713·4e76347·9a494f1 보강의 **첫 실제 실행**이다.
+   - 06:50까지 "run 시작"이 없었다면: PC 로그인 상태 여부(예약 작업 Interactive), 루트 `.env` 모드 줄, `autopilot-fatal.log`, `alerts-fallback-autopilot.log` 순서로 확인.
+3. 결과를 07-paper-review §12B 형식(4일차)으로 기록. 무인 운영일에는 엔진 "일일 보고"(16:00)가 생성되지 않는다(run 15:45 종료) — 텔레그램 요약은 정상. 설계 공백(낮음).
+4. 10-12 성공 뒤: M2 병합(위 절차), PAPER-0 종료 판정 준비(권장 3~5거래일, 무인일 포함).
+5. **사용자 대기 결정 2건을 먼저 묻는다**(사용자가 새 세션에서 "전부 시작"하겠다고 함, 2026-10-09):
+   - **CP-032 Q-1(지정가 단계 승인)·Q-2(모의 서버 조회·구독 실측 승인, 주문 없음·장외)** — 에이전트 권장: 둘 다 지금 승인. Q-1 승인 시 T-027 지정가 오프라인 구현(호가 표 config/ticks/krx.toml, G10 사전 검사, 미체결 마감 소멸, 백테스트 지정가, ±0.5틱 정상 처리) 착수. Q-2 승인 시 읽기 전용 실측 스크립트(ka10080·ka10079 조회, WS 0B·0D 등록·해지) 작성 → 사용자가 장외에 실행 → K-U30·K-U32·K-U34·K-U35 해소 → 단계 2·3 착수. Q-3(모의 지정가·정정 주문 실측)·Q-4(단타 한도)·Q-5(다종목 CP)는 뒤.
+   - **전략실(strategy-lab) 생성** — 에이전트 권장: 만든다. 아래 "전략실 설계" 참조. 사용자 "전략실 만들어" 지시 뒤 생성.
+   - 사용자 오해 주의: 사용자는 어제 키움 조사로 분봉 등이 구현됐다고 생각했다 → **조사·CP-032 draft까지만, 구현은 승인 전이라 안 함**을 이미 설명함. 현재 지원 = 일봉·정해진 시각 판정·시장가·고정 종목 목록.
+6. 사용자는 터미널 명령에 익숙하지 않다 — 실행 안내는 **복사해 붙일 전체 명령**, 용어는 풀어서. "실전"은 LIVE에만 쓴다(모의 서버 실행은 "모의 서버 실행"). 평일 07:15 출발·장중 부재·텔레그램만 가능.
+
+## 전략실 설계 (2026-10-09 대화, 사용자 승인 전 — 생성 지시 대기)
+- 목적: 사용자가 실전용 전략을 만들 단계(PAPER-0 무인 검증 뒤 PAPER-1 필요). 연구(많이 만들고 버림)와 운영(승인된 것만)을 분리.
+- 위치·구조(제안): 별도 git 저장소 `C:\AI\strategy-lab\` — `CLAUDE.md`(가벼운 규칙: 브로커 연결·주문·비밀정보·운영 저장소 쓰기 금지), `ideas\`(아이디어·다른 AI와 만든 초안), `research\`(노트북·pandas 자유), `data\`(일봉 CSV 사본, git 제외 — 원본 trading_system `var\backtest\data\kiwoom-ka10081-adj-20261007`), `candidates\<전략ID>\`(strategy.md 양식, `<id>.py` Strategy 규격, params.toml), `results\`.
+- 미리 돌려 보기(운영 엔진 재사용, 확인된 사실): `scripts\validate-strategy.py`는 `--strategy 모듈:클래스`(PYTHONPATH로 전략실 경로 추가), `--params`(저장소 기준 경로지만 절대 경로도 pathlib상 가능), `--data` 임의 폴더, `--out-root` 지정 가능. 예: `$env:PYTHONPATH='C:\AI\trading_system\trading_system\src;C:\AI\strategy-lab'` 후 운영 .venv python으로 실행, 결과는 전략실 `results\`. **생성 때 실제로 1회 돌려 확인하고 전략실 스크립트로 고정**할 것(미검증: 절대 경로 params, --out-root 절대 경로, 장부 경로). 2026 이후 데이터는 자동 거부. 장중 실행은 피한다(같은 PC 자원).
+- 공식 판정·적용(운영 저장소): 후보 3파일을 `src\trading_system\strategy\`·`config\strategies\`·`docs\strategies\<ID>\`로 복사(브랜치) → 구조 시험(전략은 표준 라이브러리만, 네트워크·파일 금지) → validate-strategy 공식 판정표(CP-030 C-1~C-8) → `strategy.py register` → BACKTEST_PASSED(A-ID) → 사용자 승인 PAPER → `config\app.paper.toml` `[[strategies]]` 추가 → PAPER-1.
+- 제약: 계좌 한도(L1~L7: 보유 3·일 5건·1회 100만 원)는 전략 공유. 지원 능력 밖이면 CP-032 해당 단계가 먼저. 검증용 paper0-verify는 PAPER-0 종료 뒤 교체.
 
 ## 결정 필요 (급하지 않음, 사용자)
 1. 문서 승인 묶음(CP-025 먼저 — 코드는 main에 있음; 00~05·업무정의서 draft, draft-bundle-review 요약). DP-31·DP-40 재검토(decisions-pending "재검토 대기").
 2. M2 다음 작업(T-M2-08~)과 테스트넷 연결(T-M2-14) 승인. **CP-032(기능 확장, draft)** Q-1 지정가 단계 승인 / Q-2 모의 서버 조회·구독 실측(주문 없음) / Q-3 모의 지정가·정정 실측(PAPER 주문, 호가 격자 500·250원 확인 포함) / Q-4 단타 프로필 값 / Q-5 다종목·동적 유니버스 CP 시점.
-3. 전략은 뒤로(사용자 2026-10-08: 시스템 검증·사용법 우선). 보존: trend-sma 초안·30종목 백테스트(docs/strategies/trend-sma/backtest-v1-multi.md), 스크리닝 아이디어(전 종목 → 거래 가능 필터 → 추세 → 상대강도, 보유 20). 재개 때 T-026 공통 기준(CP-030)으로 판정.
+3. 전략: 사용자 2026-10-09 "자동 테스트만 하면 실전에 쓸 전략을 만들어야" — 전략실에서 시작 예정(위). 보존: trend-sma 초안·30종목 백테스트(docs/strategies/trend-sma/backtest-v1-multi.md), 스크리닝 아이디어(전 종목 → 거래 가능 필터 → 추세 → 상대강도, 보유 20). 재개 때 T-026 공통 기준(CP-030)으로 판정.
 4. 시스템 과제 후보: 동적 유니버스, 다종목 동시 운영, 정정(CAP-ORD-03), 지정가·호가 단위(X-U1 공식 확인 착수 A-084), 게이트 L1(상한가 기준)과 전략 위험 계산 정합, M2 [제안] 12건, CP-027 호가 단위 문서·코드 차이, V-180.
 5. 사용 설명서 v0.2 [확인 필요] 항목: w32tm 한글 출력 문구, 저녁에 기록한 명령이 다음 날 아침 처리되는지, 작업 스케줄러 11시간 상한 때 run 동작.
 6. 호가 격자: KRX 표(200k~500k = 500원) 확인, 모의 체결가 250원 격자는 KRX 중간가주문(2025-03-04)으로 설명[부분 확인] — 지정가 PAPER 사용 전 모의 실측(CP-032 Q-3).
