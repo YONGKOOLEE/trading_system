@@ -3,12 +3,16 @@
 - 갱신: 2026-10-08 저녁. **PAPER-0 3일차(10-08) "보는 자동 운영" 성공** — 06:44 K8 자동 재개(7초), 07:53 K5 → 07:58 자동 해제(CP-028 P4), 09:30 매수 267,500 / 14:30 매도 266,250, 마감 대조 MATCH, 15:45 자동 종료·paper-review·백업·요약 정상. 결함 2건(요약 기준 금액 표시, 15:09 하트비트 거짓 경보) 수정 013f2bd 병합. 실제 비용 수수료 1,860 + 세금 532, 손익 −3,642(시스템 −3,652, 10원 올림 차). 마지막 승인 기록 **A-084**. 운영 카드: https://claude.ai/artifact/XXZrAhidXPAFo1hUDRgVdw
 - **최신 (2026-10-09 낮)**: 사용자가 집 PC에서 **10-12 무인 전환 준비 완료** — ① Windows 시간 서버 time.kriss.re.kr 변경 ② 루트 `.env`(TRADE_MODE 한 줄, `Set-Content -Encoding ascii`) 생성·확인 ③ `schedule-register.ps1 -DryRun` → 등록 ④ 실행 계정 확인 — 사용자 보고 "전부 정상". 등록 중 결함 2건 발견·수정(2e2f713): PS 5.1 `-File`에서 param 기본값의 `$PSScriptRoot` 빈 값, 루트 `.env` 부재(사용자가 `.env.paper`로 확인했었음 — 자동 운영은 루트 `.env`로 모드 판단). 사용자 계획: PC를 끄고 **10-11(일) 저녁 켜고 로그인·화면 잠금 상태로 둔다**(예약 작업은 로그인 상태에서만 실행).
 - **체크아웃 `main`** HEAD **2418489**(정지 요청 파일 삭제 재시도 e1fbb2b 병합 — 2e2f713 전체 회귀에서 test_v208 간헐 실패(1/12 재현) 원인 수정, 브랜치 전체 **1452 passed**) ← 2e2f713(2026-10-09 낮 예약 등록 수정 병합. 이전: 4e76347 2차 병합 `integ/final` 1449 passed — 백테스트 결과 파일·검증 실행기, confirm-unknown, 운영 낮음 항목, 문서; 9a494f1 1차 병합 1335 passed — ops-hardening·code-health·unknown-k3(CP-031)). push 없음. 10-09~11 휴장·주말. **10-12(월) 06:40 시계 맞춤 → 06:45 첫 무인 자동 운영.**
+- **최신 (2026-10-09 오후, 세션 43)**: 사용자 "CP-032 Q-1, Q-2 승인하고 전략실 만들어" → **A-085**(Q-1 단계 1 지정가 세부 (a)(b)(c) 권장값, Q-2 조회·구독 실측, 전략실 생성. 단계 2~5·Q-3 미승인 → 지정가 PAPER 사용 금지). T-027 지정가 오프라인 구현(c397a26)·실측 도구(2ee2242) 완료, 둘 다 **미병합**. 전략실 `C:\AI\strategy-lab` 생성·견본 1회 검증 성공(아래).
 - 실전 주문 코드·LIVE 승인 없음. 게이트 변경 없음(00~05·업무정의서 draft 묶음 승인 전, 검토 요약 docs/changes/draft-bundle-review-2026-10-07.md).
 
-## 브랜치·worktree (2026-10-09 새벽)
-**미병합 — M2만 남음 (에이전트 판단: 10-12 첫 무인 운영 성공 뒤 병합)**
+## 브랜치·worktree (2026-10-09)
+**미병합 (에이전트 판단: 10-12 첫 무인 운영 성공 뒤 병합, main 병합은 사용자 지시)**
 | 브랜치 (worktree) | HEAD | 전체 시험 | 상태 |
 |---|---|---|---|
+| docs/a-085-cp032-q1q2 (메인 체크아웃) | fc0b5e2 + 이 인계 커밋 | 문서 | A-085 기록, CP-032 상태 "부분 승인", worklog (43), .status |
+| feat/T-027-limit-order (`.claude\worktrees\agent-a2eb9cfc280345e99`) | c397a26 | **1514 passed**(리드 실행) | krx.toml, G10 D-174, CAP-ORD-03/03b(D-175), 백테스트 P-5 표시, 리드 추가: 운영 요청 지정가 거부(Q-3 전). **병합하면 PAPER run이 krx.toml을 읽음**(시세 호가 칸·슬리피지 틱 칸 채워짐, 시장가 동작 불변 V-240) → 병합은 run 꺼진 저녁. capabilities.md M1 CAP-ORD-02·03b "검증 중" 반영은 별도 지시(§3.1). 지금 표로는 03b도 "미지원"이라 등록 거부 |
+| feat/cp032-probe (`.claude\worktrees\agent-aa5940286badb5435`) | 2ee2242 | **1504 passed**(에이전트 실행), 리드 관련 286 passed | `scripts\kiwoom-probe.py` 읽기 전용 실측(D-180). 거래일 06:30~17:00·run/autopilot 실행 중 거부, REST 허용 au10001·au10002·ka10080·ka10079, WS LOGIN·REG·REMOVE(0B·0D)만. **실행 안 함**. 가격 값 미기록 → D-180 "KRX 시가·종가 교차"는 이 도구로 불가(시각 분포로만 K-U31 판단) |
 | integ/backtest-m2 (integ2) | cb698ed | **1758 passed** | main d59095f + 백테스트 + M2(T-M2-01·02·03·07·10) 통합. cb698ed = M1 daily_base가 market≠M1 행을 건너뜀(시장 충돌 수정, 시험 3건). 충돌 0건 |
 - M2 병합 때: main(4e76347) 위에 새 통합 브랜치 → `integ/backtest-m2`의 M2 병합분(feat/T-M2-02-03 → feat/T-M2-07-cash-risk → feat/T-M2-10-adapter + cb698ed) 다시 합치기 → 전체 회귀 → main. 남은 위험: paper_review DAILY_BASE 목록이 시장 구분 없음(보고용), spot_cash._saved_day가 같은 별칭의 깨진 M1 행에 예외(별칭 분리로 현실성 낮음), 바이낸스 어댑터는 합성 응답 시험만(B-U4·B-U10).
 
@@ -19,18 +23,21 @@
 - 정리 대상 worktree(병합 끝남, 사용자가 `git worktree remove ..\<이름>` 실행 — 에이전트 권한 거부): sched-fix·stop-fix·cp028·autopilot·t018-multi·day3-fixes·ops-hardening·code-health·unknown-k3·integ·docs-cp030·docs-manual·bt-export·t026·confirm-cli·ops-low·docs2·docs3·final·m2-t07(M2 병합 뒤)·m2-binance·m2-adapter·m2-next(M2 병합 뒤). integ2는 M2 병합 때까지 유지.
 
 ## 다음 세션 첫 행동
-1. `git status`(main 2418489, 깨끗해야 함)·이 파일·`docs/approvals.md` 끝 3행(A-082~A-084)·`docs/worklog.md` 마지막 항목(42) 확인.
+1. `git status`(체크아웃 docs/a-085-cp032-q1q2, `.claude/` 미추적은 worktree 폴더)·이 파일·`docs/approvals.md` 끝 3행(A-083~A-085)·`docs/worklog.md` 마지막 항목(43) 확인.
 2. **10-12(월) 첫 무인 자동 운영 결과 확인**(PAPER-0 4일차, V-212 실측). 사용자에게서 텔레그램 결과를 받거나 "로그 봐 줘" 지시가 오면 읽기 전용으로: `var\paper\logs\autopilot-20261012.log`·`run-console-20261012.log`·`ops-20261012.jsonl`, `var\paper\review\`, 작업 스케줄러 "마지막 실행 결과"(종료 코드 0/1/2/3). 볼 것: 06:40 ClockSync·06:45 시작 여부, 시작 점검 시계 오차(시간 서버 변경 효과, 3일차 최대 0.981초), K8 자동 재개, 07:53 K5 자동 해제, 09:30 매수·14:30 매도, CLOSE MATCH, 15:45 종료·집계·백업·요약, "확인 필요" 줄. 이번 2e2f713·4e76347·9a494f1 보강의 **첫 실제 실행**이다.
    - 06:50까지 "run 시작"이 없었다면: PC 로그인 상태 여부(예약 작업 Interactive), 루트 `.env` 모드 줄, `autopilot-fatal.log`, `alerts-fallback-autopilot.log` 순서로 확인.
 3. 결과를 07-paper-review §12B 형식(4일차)으로 기록. 무인 운영일에는 엔진 "일일 보고"(16:00)가 생성되지 않는다(run 15:45 종료) — 텔레그램 요약은 정상. 설계 공백(낮음).
 4. 10-12 성공 뒤: M2 병합(위 절차), PAPER-0 종료 판정 준비(권장 3~5거래일, 무인일 포함).
-5. **사용자 대기 결정 2건을 먼저 묻는다**(사용자가 새 세션에서 "전부 시작"하겠다고 함, 2026-10-09):
-   - **CP-032 Q-1(지정가 단계 승인)·Q-2(모의 서버 조회·구독 실측 승인, 주문 없음·장외)** — 에이전트 권장: 둘 다 지금 승인. Q-1 승인 시 T-027 지정가 오프라인 구현(호가 표 config/ticks/krx.toml, G10 사전 검사, 미체결 마감 소멸, 백테스트 지정가, ±0.5틱 정상 처리) 착수. Q-2 승인 시 읽기 전용 실측 스크립트(ka10080·ka10079 조회, WS 0B·0D 등록·해지) 작성 → 사용자가 장외에 실행 → K-U30·K-U32·K-U34·K-U35 해소 → 단계 2·3 착수. Q-3(모의 지정가·정정 주문 실측)·Q-4(단타 한도)·Q-5(다종목 CP)는 뒤.
-   - **전략실(strategy-lab) 생성** — 에이전트 권장: 만든다. 아래 "전략실 설계" 참조. 사용자 "전략실 만들어" 지시 뒤 생성.
-   - 사용자 오해 주의: 사용자는 어제 키움 조사로 분봉 등이 구현됐다고 생각했다 → **조사·CP-032 draft까지만, 구현은 승인 전이라 안 함**을 이미 설명함. 현재 지원 = 일봉·정해진 시각 판정·시장가·고정 종목 목록.
+5. **CP-032 후속 (A-085)**:
+   - 실측 도구 실행(사용자, 저녁·주말, PAPER run 꺼진 뒤): 실측 브랜치가 main에 없으므로 **병합 지시 뒤**에 안내하거나, 사용자가 원하면 worktree에서 실행하도록 안내. 명령(병합 뒤): `cd C:\AI\trading_system\trading_system` → `$env:TRADE_MODE='PAPER'` → `.venv\Scripts\python scripts\kiwoom-probe.py --mode PAPER --codes 005930,000660,069500`(약 1~2분, 결과 `var\paper\probe\<시각>-probe.md`). 종목 000660·069500은 에이전트 제안. 결과는 kiwoom-kr에 "② 모의 실측"으로 기록 → K-U30·K-U31·K-U32·K-U34 판정 → **단계 2 승인 질문**(별도).
+   - Q-3(모의 지정가 ①② 실측)·Q-4·Q-5는 미결. 지정가 PAPER 사용은 Q-3 뒤.
+   - 사용자 오해 주의: 현재 PAPER 지원 = 일봉·정해진 시각 판정·시장가·고정 종목 목록. T-027은 오프라인 구현이라 지정가 전략을 PAPER에 쓸 수 없다.
 6. 사용자는 터미널 명령에 익숙하지 않다 — 실행 안내는 **복사해 붙일 전체 명령**, 용어는 풀어서. "실전"은 LIVE에만 쓴다(모의 서버 실행은 "모의 서버 실행"). 평일 07:15 출발·장중 부재·텔레그램만 가능.
 
-## 전략실 설계 (2026-10-09 대화, 사용자 승인 전 — 생성 지시 대기)
+## 전략실 (2026-10-09 생성, A-085) — `C:\AI\strategy-lab`, 별도 git 저장소(커밋 없음 — 사용자 지시 시)
+- 만든 것: `CLAUDE.md`(금지: 브로커 연결·주문·비밀정보·운영 저장소 쓰기·평일 06:40~16:00 무거운 실행), `README.md`(복사용 명령), `tools\sync-data.ps1`(운영 일봉 30종목 복사, **2026-01-01 이후 행 잘라 냄**, 휴장일 JSON 복사), `tools\validate.ps1`(운영 .venv + PYTHONPATH로 운영 `scripts\validate-strategy.py` 실행, 결과는 전략실 `results\`, 평일 낮 거부·휴장일 `-Holiday`), 견본 `candidates\example_sma\`(strategy.py·params-v1.toml·strategy.md·notes.md). .ps1은 UTF-8 BOM(PS 5.1 한글).
+- **확인된 사실(2026-10-09 실제 실행)**: 절대 경로 params·out-root·전략실 모듈 import 동작, 운영 저장소 변경 0. 견본 91회 실행 약 86분(시험과 동시), 판정 미충족(견본이라 무의미).
+- 아래는 생성 전 설계 기록(참고).
 - 목적: 사용자가 실전용 전략을 만들 단계(PAPER-0 무인 검증 뒤 PAPER-1 필요). 연구(많이 만들고 버림)와 운영(승인된 것만)을 분리.
 - 위치·구조(제안): 별도 git 저장소 `C:\AI\strategy-lab\` — `CLAUDE.md`(가벼운 규칙: 브로커 연결·주문·비밀정보·운영 저장소 쓰기 금지), `ideas\`(아이디어·다른 AI와 만든 초안), `research\`(노트북·pandas 자유), `data\`(일봉 CSV 사본, git 제외 — 원본 trading_system `var\backtest\data\kiwoom-ka10081-adj-20261007`), `candidates\<전략ID>\`(strategy.md 양식, `<id>.py` Strategy 규격, params.toml), `results\`.
 - 미리 돌려 보기(운영 엔진 재사용, 확인된 사실): `scripts\validate-strategy.py`는 `--strategy 모듈:클래스`(PYTHONPATH로 전략실 경로 추가), `--params`(저장소 기준 경로지만 절대 경로도 pathlib상 가능), `--data` 임의 폴더, `--out-root` 지정 가능. 예: `$env:PYTHONPATH='C:\AI\trading_system\trading_system\src;C:\AI\strategy-lab'` 후 운영 .venv python으로 실행, 결과는 전략실 `results\`. **생성 때 실제로 1회 돌려 확인하고 전략실 스크립트로 고정**할 것(미검증: 절대 경로 params, --out-root 절대 경로, 장부 경로). 2026 이후 데이터는 자동 거부. 장중 실행은 피한다(같은 PC 자원).
@@ -60,7 +67,7 @@
 |---|---|---|
 | 1 | 10-12 무인 자동 운영 시작 → PAPER-0 계속(3~5거래일 권장 중 3일 경과) | 사용자 등록 4단계 |
 | 2 | M2 병합(integ/backtest-m2 기반 재통합) | 10-12 성공 뒤, 전체 회귀 |
-| 2a | CP-032 단계 1 지정가(오프라인) → 모의 실측 → PAPER 사용 | CP-032 Q-1·Q-3 승인 |
+| 2a | CP-032 단계 1 지정가: 오프라인 구현 완료(feat/T-027-limit-order, 미병합) → 병합(저녁) → capabilities 반영 지시 → Q-3 모의 실측 → PAPER 사용 | Q-1 승인 A-085, Q-3 미승인 |
 | 3 | 문서 승인 묶음(CP-025 → 00~05 draft) · DP-31·40 재검토 | 사용자 |
 | 4 | PAPER-0 종료 판정(PV 항목별) → T-018 실제 전략 결정(T-026 판정) → T-019 PAPER-1 | 사용자 |
 | 5 | M2 T-M2-08~ 구현 → 테스트넷 연결(별도 승인) → M2 PAPER-0 | 사용자 |
