@@ -673,3 +673,29 @@ def test_day3_summary_base_is_cash_plus_value(tmp_path: Path) -> None:
                        {"trade_date": DAY.isoformat(), "cash": "1000", "value": "500", "at": r.clock.now().isoformat()})
     assert _base_value(run.repo, ACCOUNT, DAY) == Decimal("1500")  # 같은 날 마지막 기록
     run.finish(0)
+
+
+def test_take_stop_request_retries_unlink_while_writer_holds_file(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """2026-10-09 전체 회귀 간헐 실패(1/12 재현): 쓰는 쪽이 파일을 연 순간 지우면 Windows가 거부 → 요청은 따르지만
+    파일이 남았다. 짧게 재시도해 지운다(하트비트 쓰기 RV-06과 같은 방식). 계속 실패하면 종전처럼 요청만 따른다."""
+    from trading_system.app import main as app_main
+
+    stop = tmp_path / STOP_REQUEST
+    stop.write_text("STOP\n", encoding="utf-8")
+    real = Path.unlink
+    fails = {"n": 2}
+
+    def flaky(self: Path, *a, **k):  # type: ignore[no-untyped-def]
+        if self == stop and fails["n"] > 0:
+            fails["n"] -= 1
+            raise PermissionError("다른 프로세스가 사용 중")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", flaky)
+    assert app_main.take_stop_request(tmp_path, sleep=lambda s: None) is True
+    assert not stop.exists()
+
+    stop.write_text("STOP\n", encoding="utf-8")
+    fails["n"] = 99
+    assert app_main.take_stop_request(tmp_path, sleep=lambda s: None) is True   # 계속 실패해도 정지는 따른다
+    assert stop.exists()

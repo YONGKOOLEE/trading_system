@@ -24,7 +24,7 @@ import signal
 import threading
 import time
 import traceback
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import date, time as dtime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -63,17 +63,23 @@ REQUERY_WAIT_SECONDS = 2.0   # 대조 불일치 재조회 전 대기 — 체결 
 STOP_REQUEST = "STOP"        # var/<mode>/STOP — 정상 종료 요청 파일 (CP-029 D-155, 무인 실행에는 Ctrl+C를 보낼 창이 없음)
 
 
-def take_stop_request(base: Path) -> bool:
+def take_stop_request(base: Path, *, retries: int = 3, sleep: Callable[[float], None] = time.sleep) -> bool:
     """정지 요청 파일이 있으면 지우고 True. 판정·실행 스레드가 tick 사이에 본다 — Ctrl+C(SIGINT → stop 이벤트)와 같은
     종료 경로(루프 종료 → 스레드 join → 닫기 → 저장소 닫기 → 잠금 해제)를 탄다. 진행 중 tick(주문 전송 포함)은 끝까지 한다.
-    지우기에 실패해도(다른 프로세스가 열고 있음 등) 요청은 따른다."""
+    쓰는 쪽이 파일을 연 순간이면 Windows가 지우기를 거부하므로 짧게 재시도한다(2026-10-09 간헐 실패). 그래도 실패하면
+    요청은 따르고 파일은 남는다 — 다음 시작이 남은 요청 파일을 지운다."""
     path = base / STOP_REQUEST
     if not path.exists():
         return False
-    try:
-        path.unlink()
-    except OSError:
-        pass
+    for i in range(retries):
+        try:
+            path.unlink()
+            break
+        except FileNotFoundError:
+            break
+        except OSError:
+            if i < retries - 1:
+                sleep(0.05)
     return True
 
 
