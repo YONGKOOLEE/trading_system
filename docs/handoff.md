@@ -16,7 +16,7 @@
 - 1차(지시 "운영 묶음과 문서 main 병합"): ops-hardening(7e71480·d71ebc1·242476e), code-health(6bac802·f6d5090), unknown-k3(0f6aef6·2109f81), docs/cp-030-validation-criteria, docs/user-manual → 9a494f1, main 1335 passed.
 - 3차(사용자 등록 오류 보고, 2026-10-09 낮): fix/schedule-register-root 308f43d → 2e2f713 — schedule-register.ps1 Root 본문 계산·루트 `.env` 모드 줄 사전 검사·`-DryRun`, config/modes UTF-16 모드 파일 → 거부(예외 아님), 설명서 §2.2·§2.3·pv-procedure §3.5. 관련 시험 128 passed. (병합 커밋 메시지에 비밀 파일 이름이 있으면 권한 거부됨 — 메시지에서 이름 빼고 재시도.)
 - 2차(지시 "남은 개발 전부 시행"): integ/final = fc2790f(test_r4 대기 보강) + integ/backtest(T-009 295e74d·T-026 03132f7, 충돌 0) + fix/confirm-unknown-cli(15b5ceb·f836f12, 재검토 반영) + docs/manual-v02-cp032 + docs/paper-review-v04(kiwoom-kr.md 충돌 1건 — §7e 다음에 확장 사양 조사 절, 둘 다 보존) + fix/ops-low-items(c7e16da·b2b535e, 재검토 반영) → 4e76347.
-- 정리 대상 worktree(병합 끝남, 사용자가 `git worktree remove ..\<이름>` 실행 — 에이전트 권한 거부): cp028·autopilot·t018-multi·day3-fixes·ops-hardening·code-health·unknown-k3·integ·docs-cp030·docs-manual·bt-export·t026·confirm-cli·ops-low·docs2·docs3·final·m2-t07(M2 병합 뒤)·m2-binance·m2-adapter·m2-next(M2 병합 뒤). integ2는 M2 병합 때까지 유지.
+- 정리 대상 worktree(병합 끝남, 사용자가 `git worktree remove ..\<이름>` 실행 — 에이전트 권한 거부): sched-fix·stop-fix·cp028·autopilot·t018-multi·day3-fixes·ops-hardening·code-health·unknown-k3·integ·docs-cp030·docs-manual·bt-export·t026·confirm-cli·ops-low·docs2·docs3·final·m2-t07(M2 병합 뒤)·m2-binance·m2-adapter·m2-next(M2 병합 뒤). integ2는 M2 병합 때까지 유지.
 
 ## 다음 세션 첫 행동
 1. `git status`(main 2418489, 깨끗해야 함)·이 파일·`docs/approvals.md` 끝 3행(A-082~A-084)·`docs/worklog.md` 마지막 항목(42) 확인.
