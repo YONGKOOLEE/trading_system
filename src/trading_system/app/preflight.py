@@ -76,10 +76,14 @@ def _server_message(body: dict | None) -> str:
 
 
 class GuardedHttp:
-    """KiwoomHttp를 감싸 주문 API를 전송 전에 막고, 호출마다 결과 분류만 기록한다."""
+    """KiwoomHttp를 감싸 주문 API를 전송 전에 막고, 호출마다 결과 분류만 기록한다.
 
-    def __init__(self, inner: KiwoomHttp) -> None:
+    allowed_apis를 주면 그 목록 밖의 api-id도 전송 전에 막는다(허용 목록 — CP-032 D-180 실측 도구). 기본 None은
+    지금까지와 같다(주문 API만 차단)."""
+
+    def __init__(self, inner: KiwoomHttp, allowed_apis: frozenset[str] | None = None) -> None:
         self._inner = inner
+        self._allowed = allowed_apis
         self.records: list[CallRecord] = []
         self.blocked: list[str] = []
 
@@ -92,6 +96,9 @@ class GuardedHttp:
         if path == ORDER_PATH or api_id in ORDER_API_IDS:
             self.blocked.append(api_id)
             raise PreSendError(f"{api_id}: 시작 점검 경로에서는 주문 API를 보내지 않는다")
+        if self._allowed is not None and api_id not in self._allowed:
+            self.blocked.append(api_id)
+            raise PreSendError(f"{api_id}: 허용 목록 밖 API — 보내지 않는다")
         try:
             r = self._inner.post(path, api_id, body, token, cont_yn, next_key)
         except (PreSendError, AfterSendError):
@@ -269,9 +276,10 @@ class PaperConnection:
 
 
 def connect_paper(root: Path, environ: Mapping[str, str] | None, clock: Clock, *, rest_url: str = MOCK_REST,
-                  ws_url: str = MOCK_WS, per_tr_interval: float = 1.1) -> PaperConnection | str:
+                  ws_url: str = MOCK_WS, per_tr_interval: float = 1.1,
+                  allowed_apis: frozenset[str] | None = None) -> PaperConnection | str:
     """PAPER 모드·자격정보·설정·사용자 접속 스위치를 확인한다. 하나라도 어긋나면 거부 사유(문자열)를 돌려주고
-    네트워크 객체를 만들지 않는다."""
+    네트워크 객체를 만들지 않는다. allowed_apis: GuardedHttp 허용 목록(없으면 주문 API만 차단)."""
     env = os.environ if environ is None else environ
     try:
         mode = read_trade_mode(env, root / ".env")
@@ -301,7 +309,7 @@ def connect_paper(root: Path, environ: Mapping[str, str] | None, clock: Clock, *
     except ValueError as exc:
         return str(exc)
     base.mkdir(parents=True, exist_ok=True)
-    guard = GuardedHttp(KiwoomHttp(endpoint))
+    guard = GuardedHttp(KiwoomHttp(endpoint), allowed_apis)
     cfg = KiwoomConfig(app.account, s.get("KIWOOM_PAPER_ACCOUNT_NO").reveal, s.get("KIWOOM_PAPER_APP_KEY").reveal,
                        s.get("KIWOOM_PAPER_SECRET_KEY").reveal, rest_url=rest_url, ws_url=ws_url,
                        per_tr_interval=per_tr_interval)
