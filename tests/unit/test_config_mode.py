@@ -59,3 +59,19 @@ def test_env_file_value_must_be_valid(tmp_path: Path) -> None:
     env.write_text("TRADE_MODE=live\n", encoding="utf-8")
     with pytest.raises(ConfigError):
         read_trade_mode({}, env)
+
+
+def test_utf16_mode_file_is_treated_as_missing(tmp_path: Path) -> None:
+    """2026-10-09: PowerShell 5.1의 `>`·Out-File 기본 인코딩(UTF-16)으로 만든 모드 파일은 읽기 예외가 아니라
+    '모드 없음'(ConfigError, 시작 거부)으로 처리한다."""
+    env = tmp_path / "mode-file"
+    env.write_text("TRADE_MODE=PAPER\n", encoding="utf-16")
+    with pytest.raises(ConfigError):
+        read_trade_mode({}, env)
+
+
+def test_ascii_mode_file_from_powershell_set_content(tmp_path: Path) -> None:
+    """사용 설명서 명령 `Set-Content -Encoding ascii`로 만든 파일(줄 끝 CRLF)은 정상으로 읽힌다."""
+    env = tmp_path / "mode-file"
+    env.write_bytes(b"TRADE_MODE=PAPER\r\n")
+    assert read_trade_mode({}, env) is Mode.PAPER

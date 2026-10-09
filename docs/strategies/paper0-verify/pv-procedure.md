@@ -152,7 +152,7 @@ cd C:\AI\trading_system\trading_system
 
 **10-12 무인 전환 전 준비 (사용자, 1회)**
 1. Windows 시간 서버를 `time.kriss.re.kr`로 바꾼다: 설정 → 시간 및 언어 → 날짜 및 시간 → "추가 시계" 또는 제어판 "인터넷 시간" 탭 → 서버 `time.kriss.re.kr` 입력 → "지금 업데이트". 06:40 ClockSync 작업(`w32tm /resync`)이 이 서버로 맞춘다.
-2. 저장소 폴더의 `.env` 파일에 `TRADE_MODE=PAPER` 한 줄이 있는지 확인(PowerShell, 저장소 폴더에서): `Select-String -Path .env -Pattern '^TRADE_MODE='` → 기대 결과 `.env:N:TRADE_MODE=PAPER`. 없거나 다르면 메모장으로 그 줄만 고친다(다른 줄은 보지 않는다).
+2. 저장소 폴더의 `.env` 파일에 `TRADE_MODE=PAPER` 한 줄이 있는지 확인(PowerShell, 저장소 폴더에서): `Select-String -Path .env -Pattern '^TRADE_MODE='` → 기대 결과 `.env:N:TRADE_MODE=PAPER`. 없거나 다르면 메모장으로 그 줄만 고친다(다른 줄은 보지 않는다). **`.env.paper`가 아니라 루트 `.env`다**(2026-10-09 사용자 확인 때 루트 `.env`가 없었음). 파일이 없으면 `Set-Content -Path .\.env -Value 'TRADE_MODE=PAPER' -Encoding ascii`(인코딩 ascii 필수 — `>`·Out-File은 UTF-16). 등록 전 `schedule-register.ps1 -DryRun`으로 확인하면 스크립트가 이 줄도 검사한다(사용 설명서 §2.2·§2.3).
 3. 아래 "1회 등록"을 관리자 PowerShell에서 실행한다.
 4. 등록된 작업의 실행 계정이 현재 로그인 사용자인지 확인(관리자 아니어도 됨): `Get-ScheduledTask -TaskName 'TradingSystem-PAPER-*' | Select-Object TaskName, State, @{n='User';e={$_.Principal.UserId}}` → 기대 결과 두 줄 모두 `State Ready`, `User`가 내 Windows 사용자 이름. `SYSTEM`이면 등록을 해제하고 에이전트에게 알린다.
 5. 10-12 아침 06:50까지 텔레그램 "시작 점검 통과, run 시작"이 오는지 본다(아래 "매일 볼 것").

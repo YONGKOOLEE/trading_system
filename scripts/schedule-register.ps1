@@ -23,10 +23,18 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Root = (Split-Path -Parent $PSScriptRoot)
+    [string]$Root = '',
+    [switch]$DryRun     # 경로·모드 줄·계정만 확인하고 등록하지 않는다
 )
 
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell 5.1에서 -File로 실행하면 param() 기본값 계산 시점에 $PSScriptRoot가 비어 있다(2026-10-09 실측).
+# 그래서 기본값이 아니라 본문에서 계산한다.
+if (-not $Root) {
+    $here = $PSScriptRoot
+    if (-not $here) { $here = Split-Path -Parent $MyInvocation.MyCommand.Path }
+    $Root = Split-Path -Parent $here
+}
 $Prefix = 'TradingSystem-PAPER-'
 $ClockTask = $Prefix + 'ClockSync'
 $AutoTask = $Prefix + 'Autopilot'
@@ -41,12 +49,31 @@ foreach ($path in @($Pythonw, $Script, $W32tm)) {
         throw "파일 없음: $path"
     }
 }
+# 예약 실행에는 환경 변수가 없어 자동 운영이 루트 .env의 TRADE_MODE 한 줄로 모드를 확인한다(autopilot.py mode_refusal).
+# .env.paper의 TRADE_MODE 줄은 따로 있는 교차 확인용이다. 값은 출력하지 않고 TRADE_MODE 줄만 본다.
+$ModeFile = Join-Path $Root '.env'
+$modeLine = $null
+if (Test-Path -LiteralPath $ModeFile) {
+    $modeLine = Get-Content -LiteralPath $ModeFile | Where-Object { $_ -match '^\s*TRADE_MODE\s*=' } | Select-Object -First 1
+}
+if (-not $modeLine -or ($modeLine -replace '\s', '') -ne 'TRADE_MODE=PAPER') {
+    throw "루트 .env에 'TRADE_MODE=PAPER' 한 줄이 없습니다 ($ModeFile). 예약 실행은 이 줄로 모드를 확인하므로 없으면 매일 시작을 거부합니다. 사용 설명서 §2의 .env 만들기 명령을 먼저 실행하세요."
+}
 foreach ($name in @($ClockTask, $AutoTask)) {
     if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
         throw "이미 등록된 작업: $name — 바꾸려면 먼저 scripts\schedule-unregister.ps1 실행"
     }
 }
 $User = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+if ($DryRun) {
+    Write-Host '확인만 (등록 안 함)'
+    Write-Host ('  저장소: {0}' -f $Root)
+    Write-Host ('  실행 파일: {0}' -f $Pythonw)
+    Write-Host ('  자동 운영: {0}' -f $Script)
+    Write-Host '  모드 줄: TRADE_MODE=PAPER 확인'
+    Write-Host ('  등록될 계정: {0}  (평소 로그인 계정과 같아야 함)' -f $User)
+    exit 0
+}
 
 # 1) 시계 동기화 (관리자 권한 필요 — 이 작업만 최고 권한). 실패해도 시작 점검이 시계 오차 1초 초과면 시작을 거부한다.
 $clockAction = New-ScheduledTaskAction -Execute $W32tm -Argument '/resync'

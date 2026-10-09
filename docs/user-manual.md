@@ -68,17 +68,36 @@ w32tm /query /source
 - 둘째 줄에서 "서비스가 시작되지 않았습니다"가 나오면 `net start w32time`을 실행한 뒤 둘째·셋째 줄을 다시.
 - 뜻: 첫째 줄은 "시간 서버를 time.kriss.re.kr로 지정"(`,0x8`은 일반 클라이언트 방식으로 묻는다는 표시), 둘째 줄은 "지금 맞추기", 셋째 줄은 "지금 어느 서버를 쓰는지 보기".
 
-### 2.2 2단계 — 루트 설정 파일의 모드 줄 확인 (일반 PowerShell)
-왜: 예약 작업에는 창에서 넣던 `$env:TRADE_MODE='PAPER'`가 없다. 자동 운영은 `.env` 파일의 한 줄로 모드를 확인하고, 없거나 PAPER가 아니면 시작을 거부한다(그날 매매 없음, 위험 아님).
+### 2.2 2단계 — 루트 `.env` 파일의 모드 줄 (일반 PowerShell)
+왜: 예약 작업에는 창에서 넣던 `$env:TRADE_MODE='PAPER'`가 없다. 자동 운영은 **저장소 맨 위 폴더의 `.env` 파일**(이름이 정확히 `.env`)의 `TRADE_MODE` 한 줄로 모드를 확인하고, 없거나 PAPER가 아니면 시작을 거부한다(그날 매매 없음, 위험 아님).
+- `.env.paper`와는 **다른 파일**이다. `.env.paper`에도 `TRADE_MODE=PAPER` 줄이 있지만, 그것은 키움·텔레그램 키와 함께 있는 교차 확인용이다. 자동 운영이 모드를 정할 때 보는 것은 `.env`다.
+- `.env`에는 이 한 줄만 둔다(키·계좌번호를 넣지 않는다).
+
+먼저 있는지 확인:
 ```
 cd C:\AI\trading_system\trading_system
+Test-Path .\.env
+```
+- `False`가 나오면(파일 없음) 아래 한 줄로 만든다. **인코딩을 꼭 `ascii`로** 한다(`>`나 `Out-File`로 만들면 UTF-16이 되어 프로그램이 읽지 못한다):
+```
+Set-Content -Path .\.env -Value 'TRADE_MODE=PAPER' -Encoding ascii
+```
+- `True`가 나오면 모드 줄만 확인:
+```
 Select-String -Path .\.env -Pattern '^TRADE_MODE='
 ```
-기대 결과: `.env:숫자:TRADE_MODE=PAPER` 한 줄. 아무것도 안 나오거나 PAPER가 아니면 메모장으로 `.env`를 열어 그 줄만 `TRADE_MODE=PAPER`로 고치거나 맨 아래에 추가한다(다른 줄은 건드리지 않는다. 내용을 대화·텔레그램에 붙이지 않는다).
+기대 결과: `.env:1:TRADE_MODE=PAPER`처럼 한 줄. PAPER가 아니면 메모장으로 `.env`를 열어 그 줄만 `TRADE_MODE=PAPER`로 고친다. 내용을 대화·텔레그램에 붙이지 않는다.
 
 ### 2.3 3단계 — 예약 작업 등록 (관리자 권한 PowerShell)
+먼저 확인만(등록 안 함):
 ```
 cd C:\AI\trading_system\trading_system
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\schedule-register.ps1 -DryRun
+```
+기대 결과: `확인만 (등록 안 함)`, 저장소·실행 파일·자동 운영 경로, `모드 줄: TRADE_MODE=PAPER 확인`, `등록될 계정: PC이름\사용자`. "루트 .env에 'TRADE_MODE=PAPER' 한 줄이 없습니다"가 나오면 §2.2로 돌아간다.
+
+이상 없으면 등록:
+```
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\schedule-register.ps1
 ```
 기대 결과:
