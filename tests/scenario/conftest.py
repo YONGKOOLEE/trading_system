@@ -3,6 +3,7 @@
 가상 계좌 KR-BT-01 (기준 금액 10,000,000원), 가상 종목 TST-A~TST-E 각 10,000원,
 가상 한도 L1 20%, L2 20%, L3 50% (나머지는 tests/support/gate_fakes.scenario_limits).
 T-001 시나리오의 금액 경계를 유지하려고 가상 상한가를 현재가와 같게 둔다(시장가 예약 가격 = 상한가, 03 §6.2).
+가상 하한가는 현재가 × 0.7 (CP-032 D-174: 상·하한가를 모르면 위험 확대 지정가 거부 — 지정가 시험의 전제 조건).
 """
 
 from __future__ import annotations
@@ -51,7 +52,8 @@ def build_env(tmp_path: Path) -> Env:
     broker = FakeBroker()
     facts = make_facts(ACCOUNT, clock.now)
     for inst, price in PRICES.items():
-        facts.market.add(inst, str(price), upper=str(price))
+        # 하한가 = 현재가 × 0.7 (가상). [CP-032 D-174] 상·하한가를 모르면 위험 확대 지정가를 거부하므로 둘 다 둔다
+        facts.market.add(inst, str(price), upper=str(price), lower=str(price * Decimal("0.7")))
     gate = Gate(repo, clock, facts.inputs(), TEST_POLICY)
     kill_file = tmp_path / "KILL"
     executor = Executor(repo, broker, clock, kill_file)

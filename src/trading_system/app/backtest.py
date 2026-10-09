@@ -31,10 +31,9 @@ import json
 from collections import Counter
 from dataclasses import dataclass, field
 import tempfile
-from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
-from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+from decimal import Decimal
 from pathlib import Path
 
 from trading_system.app import backtest_export as bx
@@ -44,7 +43,9 @@ from trading_system.config.strategy_registry import StrategyRegistry
 from trading_system.domain.clock import KST, FixedClock
 from trading_system.domain.enums import GateResult, HaltType, IntentState, Mode, Side
 from trading_system.domain.limits import AccountLimits
-from trading_system.domain.market import CashView, DailyRisk, GateSettings, InstrumentInfo, Quote, estimate_cost
+from trading_system.domain.market import (  # price_limits: CP-032 D-174로 게이트와 공유, 이 모듈 이름도 유지
+    CashView, DailyRisk, GateSettings, InstrumentInfo, Quote, estimate_cost, price_limits,
+)
 from trading_system.domain.models import Account, GateRequest
 from trading_system.domain.strategy import PositionView, evaluation_id_of
 from trading_system.evaluation.runner import run_evaluation
@@ -151,18 +152,6 @@ def eval_times_of(cfg: BacktestConfig) -> tuple[time, ...]:
         if not (SESSION_FIRST <= t < SESSION_END):
             raise BacktestError(f"판정 시각 {t:%H:%M}은 09:00 이상 15:20 미만이어야 함 (일봉 체결 가정 범위)")
     return times
-
-
-def price_limits(ref: Decimal, ratio: Decimal, tick: Callable[[Decimal], Decimal]) -> tuple[Decimal, Decimal]:
-    """상한가 = 기준가×(1+비율)을 호가 단위로 내림, 하한가 = 기준가×(1−비율)을 올림 (계산값 그대로 비교하지 않음).
-
-    호가 단위는 계산값이 속한 가격대 기준(tick(계산값)). 가격대 경계에서 내림 결과가 아래 가격대로 넘어가는 경우의
-    세부 규칙은 공식 근거 미확인(X-U1)."""
-    raw_u, raw_l = ref * (1 + ratio), ref * (1 - ratio)
-    tu, tl = tick(raw_u), tick(raw_l)
-    upper = (raw_u / tu).to_integral_value(rounding=ROUND_FLOOR) * tu
-    lower = (raw_l / tl).to_integral_value(rounding=ROUND_CEILING) * tl
-    return upper, lower
 
 
 def _run_days(cfg: BacktestConfig) -> list[date]:
@@ -353,8 +342,12 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
                 if bar is None:
                     continue
                 # 판정 시세 = 당일 시가 (이후 판정도 같음: 일봉에는 장중 가격이 없고 종가는 미래)
+                # 상·하한가·기준가(전일 종가)를 함께 준다: 게이트가 지정가를 상·하한가로 검사한다 (CP-032 D-174).
+                # 시장가 예약은 상한가만 쓰므로 시장가 결과는 그대로다 (V-240)
                 store.update_quote(Quote(inst, bar.open, clock.now(),
-                                         upper_limit=lims[inst][0] if inst in lims else None))
+                                         upper_limit=lims[inst][0] if inst in lims else None,
+                                         lower_limit=lims[inst][1] if inst in lims else None,
+                                         base_price=prev_close.get(inst)))
             equity_open = cash + sum((p.quantity * bars[kk][day].open if day in bars.get(kk, {}) else
                                       p.quantity * prev_close.get(kk, p.avg_price)) for kk, p in positions.items())
             acct.daily = DailyRisk(base, Decimal("0"), equity_open - base, Decimal("0"))
@@ -714,8 +707,9 @@ def render_report(cfg: BacktestConfig, result: BacktestResult, *, settings_hash:
         "체결 시각은 판정 시각으로 기록(시가 가격과 시각이 다름).",
         *([] if len(times) == 1 else [
             "- 이후 판정 주문을 그날 종가로 체결(제안 가정): 판정 시각~종가 사이 가격 경로 무시, 판정 시세는 그날 시가"
-            "(장중 가격 없음) — 실제 장중 판정과 신호 가격·체결가가 다를 수 있음. 첫 판정 지정가는 하루 고가·저가로 관통 "
-            "판정(판정 전 가격 포함 가능, 기존 가정 유지). 거래량 상한은 하루 합산."]),
+            "(장중 가격 없음) — 실제 장중 판정과 신호 가격·체결가가 다를 수 있음. 거래량 상한은 하루 합산."]),
+        "- 일봉 지정가 한계(CP-032 P-5): 첫 판정 지정가는 하루 고가·저가로 관통 판정 — 판정 시각 전 가격이 포함될 수 "
+        "있어 장중 지정가 체결이 낙관적일 수 있음. 분봉 데이터(CAP-DAT-02) 전까지 유지. 접촉만은 미체결, 체결가 = 지정가.",
         *([f"- 호가 표 없음(X-U1): 슬리피지 1틱과 상·하한가 호가 내림·올림에 `--slippage-tick` {cfg.slippage_tick}원을 "
            "모든 가격대에 일괄 사용 — 실제 가격대별 호가 단위와 다를 수 있음."] if cfg.ticks is None else []),
         "- 룩어헤드 교란 검사(V-91) 범위: 무보유 상태 스냅샷 + 실제 실행 상태(보유·미체결·이력) 재실행 비교. "

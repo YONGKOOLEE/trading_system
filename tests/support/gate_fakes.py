@@ -65,12 +65,14 @@ class FakeMarket:
     infos: dict[str, InstrumentInfo] = field(default_factory=dict)
     statuses: dict[str, frozenset[TradingStatus] | None] = field(default_factory=dict)
     sessions: dict[date, SessionInfo | None] = field(default_factory=dict)
+    base: dict[str, Decimal | None] = field(default_factory=dict)   # 기준가(전일 종가). 없으면 모름 [CP-032 D-174]
     tick: int | None = 5  # 지정가 호가 단위 (가상). None이면 규칙 없음
 
     def add(self, instrument: str, price: str, leverage: str = "1", kind: InstrumentKind = InstrumentKind.STOCK,
-            upper: str | None = None) -> None:
+            upper: str | None = None, lower: str | None = None) -> None:
         self.prices[instrument] = Decimal(price)
         self.upper[instrument] = Decimal(upper) if upper else None
+        self.lower[instrument] = Decimal(lower) if lower else None
         self.infos[instrument] = InstrumentInfo(instrument, kind, Decimal(leverage), Decimal("1"))
         self.statuses[instrument] = frozenset()
 
@@ -78,7 +80,8 @@ class FakeMarket:
         if instrument not in self.prices:
             return None
         at = self.now() - self.quote_age.get(instrument, timedelta(0))
-        return Quote(instrument, self.prices[instrument], at, self.upper.get(instrument), self.lower.get(instrument))
+        return Quote(instrument, self.prices[instrument], at, self.upper.get(instrument), self.lower.get(instrument),
+                     base_price=self.base.get(instrument))
 
     def instrument(self, instrument: str) -> InstrumentInfo | None:
         return self.infos.get(instrument)
@@ -93,6 +96,9 @@ class FakeMarket:
 
     def tick_valid(self, instrument: str, price: Decimal) -> bool | None:
         return None if self.tick is None else price % self.tick == 0
+
+    def tick_of(self, instrument: str, price: Decimal) -> Decimal | None:
+        return None if self.tick is None else Decimal(self.tick)
 
 
 @dataclass

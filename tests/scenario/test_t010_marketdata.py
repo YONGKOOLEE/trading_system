@@ -165,8 +165,10 @@ def test_ticks_reject_bad_tables(bad: dict) -> None:
         parse_ticks(bad)
 
 
-def test_no_tick_file_means_limit_orders_rejected(env: Env) -> None:
-    assert load_ticks(ROOT / "config" / "ticks" / "krx.toml") is None  # X-U1 확인 전 실제 파일 없음
+def test_no_tick_file_means_limit_orders_rejected(env: Env, tmp_path: Path) -> None:
+    # [CP-032 D-173, A-085] 실제 저장소에는 이제 krx.toml이 있다(X-U1 확인). 규칙 파일이 없는 경우의 동작은 그대로 시험한다
+    assert load_ticks(ROOT / "config" / "ticks" / "krx.toml") is not None
+    assert load_ticks(tmp_path / "krx.toml") is None                    # 파일 없음 → 규칙 없음
     s = store(env, ticks=False)
     wire(env, s)
     sig = make_signal(RequestType.ENTRY)

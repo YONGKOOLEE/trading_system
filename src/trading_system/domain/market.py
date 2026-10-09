@@ -6,9 +6,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import ROUND_CEILING, Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from enum import StrEnum
 
 from .clock import require_aware
@@ -58,18 +59,21 @@ class InstrumentInfo:
 
 @dataclass(frozen=True)
 class Quote:
-    """최근 시세. 상·하한가는 모르면 None."""
+    """최근 시세. 상·하한가·기준가(가격제한폭 기준 = 전일 종가)는 모르면 None.
+
+    base_price는 상·하한가를 모를 때 위험 축소 지정가의 범위 검사에만 쓴다 (CP-032 D-174)."""
 
     instrument: str
     price: Decimal
     at: datetime
     upper_limit: Decimal | None = None
     lower_limit: Decimal | None = None
+    base_price: Decimal | None = None
 
     def __post_init__(self) -> None:
         _dec("price", self.price)
         require_aware(self.at)
-        for n in ("upper_limit", "lower_limit"):
+        for n in ("upper_limit", "lower_limit", "base_price"):
             v = getattr(self, n)
             if v is not None:
                 _dec(n, v)
@@ -132,6 +136,18 @@ def estimate_cost(amount: Decimal, is_sell: bool, rates: CostRates) -> Decimal:
     _dec("amount", amount)
     rate = rates.commission_rate + (rates.sell_tax_rate if is_sell else Decimal("0"))
     return (amount * rate).to_integral_value(rounding=ROUND_CEILING)
+
+
+def price_limits(ref: Decimal, ratio: Decimal, tick: Callable[[Decimal], Decimal]) -> tuple[Decimal, Decimal]:
+    """상한가 = 기준가×(1+비율)을 호가 단위로 내림, 하한가 = 기준가×(1−비율)을 올림 (계산값 그대로 비교하지 않음).
+
+    호가 단위는 계산값이 속한 가격대 기준(tick(계산값)). 가격대 경계에서 내림 결과가 아래 가격대로 넘어가는 경우의
+    세부 규칙은 공식 근거 미확인(X-U1). 백테스트 상·하한가(04 §2.2)와 게이트의 기준가 범위 검사(CP-032 D-174)가 같이 쓴다."""
+    raw_u, raw_l = ref * (1 + ratio), ref * (1 - ratio)
+    tu, tl = tick(raw_u), tick(raw_l)
+    upper = (raw_u / tu).to_integral_value(rounding=ROUND_FLOOR) * tu
+    lower = (raw_l / tl).to_integral_value(rounding=ROUND_CEILING) * tl
+    return upper, lower
 
 
 @dataclass(frozen=True)

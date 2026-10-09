@@ -8,7 +8,7 @@
 4. 일일 기준 시각: 기준 금액 고정·일일 보고, 일일 손실 L4 → K2
 5. 대조 (장중 주기·장 마감 후 1회·요청 시 — RV-25)
 6. 예정 판정 (달력상 거래일, 예정 시각 + 유예 안, K8 등 전역 정지 중이면 건너뜀) → 게이트 → 실행기
-7. 실행 정책: CAP-ORD-03을 선언한 전략의 미체결 주문이 정해진 시간을 넘으면 취소 요청(게이트 경유)
+7. 실행 정책: CAP-ORD-03b(취소, CP-032 D-175)를 선언한 전략의 미체결 주문이 정해진 시간을 넘으면 취소 요청(게이트 경유)
 입출력·감시 스레드(실시간 수신·텔레그램·시세 조회·감시)는 큐·저장소에만 쓰고 주문하지 않는다.
 단계·훅 오류는 루프 밖으로 내보내지 않는다(기록 실패 시 로컬 파일, RV-06). last_progress = 감시 스레드의 멈춤 판정 근거.
 
@@ -64,7 +64,7 @@ class LoadedStrategy:
     strategy: Strategy
     params: dict[str, object]
     eval_times: tuple[time, ...]
-    unfilled_minutes: int | None = None   # CAP-ORD-03 선언 + 파라미터 unfilled_max_minutes 일 때만
+    unfilled_minutes: int | None = None   # CAP-ORD-03b 선언 + 파라미터 unfilled_max_minutes 일 때만 (D-175)
 
     @property
     def owner(self) -> str:
@@ -539,7 +539,7 @@ class Engine:
     def _known_instruments(self) -> list[str]:
         return [i for i in self.store._data]  # noqa: SLF001 — 등록된 종목 = 배포 설정의 종목
 
-    # 실행 정책 (CAP-ORD-03) --------------------------------------------------------------
+    # 실행 정책 (CAP-ORD-03b) -------------------------------------------------------------
     def _exec_policy(self, now: datetime) -> None:
         if self._exec_tried:   # 미체결이 끝난 주문의 재판정 기록 정리 (8차 F-3)
             live = {o.order_key for o in self.repo.open_orders(self.account)}

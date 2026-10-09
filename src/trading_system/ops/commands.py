@@ -255,8 +255,10 @@ class OpsProcessor:
             return GateRequest.cancel(RequestSource.OPERATOR, order.account, order.instrument, Side(order.side),
                                       order.order_key, idem_key=idem, owner=None)
         order_type = OrderType(args.get("order_type", OrderType.MARKET.value))
-        if order_type is OrderType.LIMIT and "price" not in args:
-            raise CommandError("지정가 운영 요청에는 가격이 필요")
+        if order_type is OrderType.LIMIT:
+            # T-027 전에는 호가 표가 없어 G10이 지정가를 모두 거부했다. 표(krx.toml)가 생긴 뒤에도 운영 요청 지정가는
+            # 모의 지정가 실측(CP-032 Q-3) 승인 전까지 받지 않는다 — 입력 경로(CLI·텔레그램)도 없다 (A-085)
+            raise CommandError("지정가 운영 요청은 받지 않음 (CP-032 Q-3 승인 전) — 시장가로 요청")
         price = Decimal(str(args.get("price", "1")))  # 시장가는 참조 가격만 (매도라 예약에 쓰지 않음)
         return GateRequest(
             source=RequestSource.OPERATOR, request_type=RequestType(name), account=args["account"],
