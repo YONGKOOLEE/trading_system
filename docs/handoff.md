@@ -15,7 +15,7 @@
 |---|---|---|---|
 | integ/m2-2026-10-09 (`.claude\worktrees\agent-adf1305a61821e485`) | 9df2fd2 | **2293 passed**(에이전트 실행, 커밋 본문 기록; 2f0b277까지 리드 2222 passed) | main 3ee9f97 + M2 T-M2-01·02·03·07·10(재통합) + **T-M2-04·05·06·12·09**(feat/T-M2-04-06 83cf082) + **T-M2-08·11·13**(feat/T-M2-08-11-13 9fe6b1d). 충돌 0. 병합은 `git checkout main` → `git merge --no-ff integ/m2-2026-10-09`(run 꺼진 저녁) |
 - **M2 병합 시 M1에 생기는 변화**(사용자에게 미리 알릴 것): ① 텔레그램 보내는 모든 메시지 앞에 `[M1] `(T-M2-13 D-117, 명령 해석·/confirm 불변) ② 시작 일치 표(모드·시장·브로커·도메인·계좌 별칭 접두어 `KR-`) 불일치면 시작 거부 — 현 설정 통과 ③ 새 DB에 market·broker 메타 2행, 기존 M1 DB는 쓰지 않음(기록은 migrate가 백업 뒤 — PAPER-1 중에는 migrate 금지) ④ 운영 도구 출력 첫 줄 `시장: … · 디렉터리: …` ⑤ 새 표 fill_fee·client_order·recon_asset을 DB 열 때 추가(SCHEMA_VERSION "2" 유지, 기존 M1 DB 그대로 열림 시험) ⑥ 시험 지원 불변 조건 검사기 INV-04·06 Decimal 합·남은 수량 기준(02 INV-06·G9 정의).
-- **M2 사용자 결정 필요**(에이전트가 임시 값으로 진행): T-M2-12 슬리피지 값(시험은 0.001 임시, 05 §2-M2.4 착수 차단 항목), T-M2-09 기대값(V-41 5회 무응답 K3, V-48 정정 G10 거부·취소 종결 확인, V-125/126 결과 불명 24시간 보류·같은 조건 외부 주문 K4), 스키마를 번호 붙은 전진 마이그레이션(05-plan) 대신 추가 전용 표로 한 것(A-072 ⑤ 방식, 무인 운영 시작 실패 방지), [제안] 다수(B줄기 9건·A줄기 7건 — worklog (43) 참조).
+- **M2 결정 — A-086(2026-10-11) 승인**: 슬리피지 0.1%·결과 불명 기대값(V-41·48·125·126)·추가 전용 표 확정, **main 병합은 10-12 성공 조건부**. 나머지 [제안]은 미승인. (원래 기록) T-M2-12 슬리피지 값(시험은 0.001 임시, 05 §2-M2.4 착수 차단 항목), T-M2-09 기대값(V-41 5회 무응답 K3, V-48 정정 G10 거부·취소 종결 확인, V-125/126 결과 불명 24시간 보류·같은 조건 외부 주문 K4), 스키마를 번호 붙은 전진 마이그레이션(05-plan) 대신 추가 전용 표로 한 것(A-072 ⑤ 방식, 무인 운영 시작 실패 방지), [제안] 다수(B줄기 9건·A줄기 7건 — worklog (43) 참조).
 - **M2 남은 것** (2026-10-10 마무리 96cfdf4·9df2fd2): 418 즉시 K5(사람 재개, IP 차단 해제 확인 뒤 대조 일치로만 해제)·-1021 연속 3회 K6 구현(D-113·D-115, 합성 응답). V-157 미실행 24개 중 20개 M2판 시험 추가(감시기·일일 보고 시장별 일 경계 — M1 KST 기본 불변, M2 UTC). **남은 미실행 4개**(V-02·V-76 부분 시험만, V-112·V-127) — 사유는 test_tm2_09_v157.py 대응표(T-M2-14 등). T-M2-14 테스트넷 연결·M2 엔진 조립은 **별도 승인**. M2 유니버스 심볼(D-105) 사용자 결정. 미확인 B-U3·B-U4·B-U13·B-U16·B-U21, referencePrice 형식.
 - 남은 위험(기존): paper_review DAILY_BASE 목록 시장 구분 없음(보고용), spot_cash._saved_day 깨진 M1 행 예외, 바이낸스 어댑터 합성 응답 시험만.
 
@@ -27,11 +27,11 @@
 - 정리 대상 worktree(병합 끝남, 사용자가 `git worktree remove ..\<이름>` 실행 — 에이전트 권한 거부): sched-fix·stop-fix·cp028·autopilot·t018-multi·day3-fixes·ops-hardening·code-health·unknown-k3·integ·docs-cp030·docs-manual·bt-export·t026·confirm-cli·ops-low·docs2·docs3·final·m2-t07·m2-binance·m2-adapter·m2-next·integ2(M2 병합 뒤). `.claude\worktrees\` 아래 agent-* 7개(T-027·probe·문서 2·M2 A·B — 병합 끝남, integ/m2는 agent-adf1305a61821e485로 M2 병합 때까지 유지).
 
 ## 다음 세션 첫 행동
-1. `git status`(체크아웃 main, `.claude/` 미추적은 worktree 폴더)·이 파일·`docs/approvals.md` 끝 3행(A-083~A-085)·`docs/worklog.md` 마지막 항목(43) 확인.
+1. `git status`(체크아웃 main, `.claude/` 미추적은 worktree 폴더)·이 파일·`docs/approvals.md` 끝 3행(A-084~A-086)·`docs/worklog.md` 마지막 항목(43) 확인.
 2. **10-12(월) 첫 무인 자동 운영 결과 확인**(PAPER-0 4일차, V-212 실측). 사용자에게서 텔레그램 결과를 받거나 "로그 봐 줘" 지시가 오면 읽기 전용으로: `var\paper\logs\autopilot-20261012.log`·`run-console-20261012.log`·`ops-20261012.jsonl`, `var\paper\review\`, 작업 스케줄러 "마지막 실행 결과"(종료 코드 0/1/2/3). 볼 것: 06:40 ClockSync·06:45 시작 여부, 시작 점검 시계 오차(시간 서버 변경 효과, 3일차 최대 0.981초), K8 자동 재개, 07:53 K5 자동 해제, 09:30 매수·14:30 매도, CLOSE MATCH, 15:45 종료·집계·백업·요약, "확인 필요" 줄. 이번 2e2f713·4e76347·9a494f1 보강의 **첫 실제 실행**이다.
    - 06:50까지 "run 시작"이 없었다면: PC 로그인 상태 여부(예약 작업 Interactive), 루트 `.env` 모드 줄, `autopilot-fatal.log`, `alerts-fallback-autopilot.log` 순서로 확인.
 3. 결과를 07-paper-review §12B 형식(4일차)으로 기록. 무인 운영일에는 엔진 "일일 보고"(16:00)가 생성되지 않는다(run 15:45 종료) — 텔레그램 요약은 정상. 설계 공백(낮음).
-4. 10-12 성공 뒤: M2 병합(위 표, M1 변화 6가지를 사용자에게 먼저 알림), PAPER-0 종료 판정 준비(권장 3~5거래일, 무인일 포함). M2 결정 필요 항목 질문.
+4. 10-12 성공 뒤: **M2 병합(A-086 조건부 승인 — 성공 확인되면 저녁에 병합, 사용자 재지시 불필요)**(위 표, M1 변화 6가지를 사용자에게 먼저 알림), PAPER-0 종료 판정 준비(권장 3~5거래일, 무인일 포함). M2 결정 필요 항목 질문.
 5. **CP-032 후속 (A-085)**:
    - 실측 도구 실행(**사용자** — 에이전트 실행은 권한 거부됨, 저녁·주말, PAPER run 꺼진 뒤, main에 있음): `cd C:\AI\trading_system\trading_system` → `$env:TRADE_MODE='PAPER'` → `.venv\Scripts\python scripts\kiwoom-probe.py --mode PAPER --codes 005930,000660,069500`(약 1~2분, 결과 `var\paper\probe\<시각>-probe.md`, 설명서 §11). 종목 000660·069500은 에이전트 제안. 결과는 kiwoom-kr에 "② 모의 실측"으로 기록 → K-U30·K-U31·K-U32·K-U34 판정 → **단계 2 승인 질문**(별도).
    - Q-3(모의 지정가 ①② 실측)·Q-4·Q-5는 미결. 지정가 PAPER 사용은 Q-3 뒤.
