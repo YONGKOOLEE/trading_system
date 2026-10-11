@@ -129,6 +129,13 @@ PAGES_DEFAULT, PAGES_MAX = 30, 60
 BACK_DAYS_DEFAULT = "365,1095,1825,3650"
 DEEP_PAGES_DEFAULT, DEEP_PAGES_MAX = 400, 1000
 DEEP_SAVE_DIR = "var/backtest/data/kiwoom-investor-probe"
+# [A-090] --collect: 종목 목록 × ka10060 금액·순매수, since 이후만(그 이전 쪽은 받지 않음) → <out>/<코드>.csv
+COLLECT_COLUMNS = ("dt", "acc_trde_prica", "ind_invsr", "frgnr_invsr", "orgn", "fnnc_invt", "insrnc", "invtrt",
+                   "etc_fnnc", "bank", "penfnd_etc", "samo_fund", "natn", "etc_corp", "natfor")
+COLLECT_SINCE_DEFAULT = "2016-01-01"
+COLLECT_MAX_CODES = 300
+COLLECT_PAGES_MAX = 200                     # 종목당 안전 상한 (2016~ 약 27쪽)
+_LIST_CODE = re.compile(r"[0-9A-Z]{6}", re.ASCII)   # 영숫자 신형 코드 포함 (daily_fetch와 같은 규칙)
 DEEP_PROGRESS_EVERY = 10
 FINAL_DAYS = 3                 # 확정 시각 해시를 남길 최근 일자 수
 HASH_LEN = 16
@@ -581,6 +588,145 @@ def deep_main(root: Path, ns: argparse.Namespace, code: str, save_dir: Path, env
     return 0
 
 
+# --- 수집 (--collect, A-090) --------------------------------------------------------------------------------
+
+def read_code_list(path: Path) -> list[str]:
+    """종목 목록: `code,...` 머리 줄이 있는 CSV(kospi200-constituents.csv) 또는 한 줄에 코드 하나. 형식이 아니면 ProbeError."""
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
+    if lines and lines[0].split(",")[0].strip().lower() == "code":
+        lines = lines[1:]
+    codes: list[str] = []
+    for i, line in enumerate(lines, start=1):
+        text = line.split("#", 1)[0].strip()
+        if not text:
+            continue
+        code = text.split(",")[0].strip()
+        if not _LIST_CODE.fullmatch(code):
+            raise ProbeError(f"{path.name}:{i}: 종목코드 형식 아님")
+        if code not in codes:
+            codes.append(code)
+    if not codes:
+        raise ProbeError(f"{path.name}: 종목코드 없음")
+    if len(codes) > COLLECT_MAX_CODES:
+        raise ProbeError(f"{path.name}: 종목 {len(codes)}개 — 최대 {COLLECT_MAX_CODES}")
+    return codes
+
+
+def collect_fetch(adapter: Any, guard: Any, code: str, last_day: date, since: date) -> tuple[dict, list[dict]]:
+    """한 종목 ka10060 연속 조회. since보다 오래된 일자가 나온 쪽에서 멈춘다. 같은 쪽 3회 연속 실패면 그 종목 실패."""
+    body = {"dt": last_day.strftime("%Y%m%d"), "stk_cd": code, **INVSR_BODY}
+    floor = since.strftime("%Y%m%d")
+    res: dict[str, Any] = {"pages": 0, "error": None, "end": None}
+    rows: list[dict] = []
+    cont: tuple[str | None, str | None] = (None, None)
+    streak = 0
+    while res["pages"] < COLLECT_PAGES_MAX:
+        if guard.blocked or fatal_critical(adapter):
+            res["error"] = "허용 밖 API 시도 또는 브로커 치명 오류"
+            return res, rows
+        try:
+            page = _page(adapter, "ka10060", CHART_PATH, body, cont)
+            items = (page.body or {}).get(INVSR_LIST)
+            if not isinstance(items, list):
+                raise BrokerQueryError(f"목록 키 {INVSR_LIST} 없음 또는 목록 아님")
+        except BrokerQueryError as exc:
+            streak += 1
+            if UNSUPPORTED_MARK in str(exc) or streak >= MAX_CONSECUTIVE_FAILURES:
+                res["error"] = _mask(exc)
+                return res, rows
+            continue
+        streak = 0
+        res["pages"] += 1
+        good = [i for i in items if isinstance(i, dict)]
+        rows.extend(good)
+        if any(str(i.get("dt") or "") < floor for i in good):
+            res["end"] = "since 도달"
+            break
+        if not ((page.cont_yn or "").upper() == "Y" and page.next_key):
+            res["end"] = "더 없음"
+            break
+        cont = ("Y", page.next_key)
+    else:
+        res["end"] = f"종목당 상한 {COLLECT_PAGES_MAX}쪽 도달"
+    return res, [r for r in rows if str(r.get("dt") or "") >= floor]
+
+
+def collect_main(root: Path, codes: list[str], since: date, out: Path, codes_file: Path, environ: Mapping[str, str] | None,
+                 clock: Clock, now: datetime, last_day: date, connect: Connect) -> int:
+    conn = connect(root, environ, clock)
+    if isinstance(conn, str):
+        return _refuse(conn)
+    adapter, guard = conn.adapter, conn.guard  # type: ignore[attr-defined]
+    if adapter.cfg.rest_url != MOCK_REST or adapter.cfg.ws_url != MOCK_WS:
+        adapter.close()
+        return _refuse("접속 대상이 키움 모의 도메인이 아님 — 수집하지 않는다")
+    print(f"투자자 수집 시작: {len(codes)}종목 ka10060 금액·순매수 {since:%Y%m%d}~{last_day:%Y%m%d} "
+          f"(TR당 {PROBE_INTERVAL}초 간격) → {out}")
+    meta: dict[str, Any] = {"tool": TOOL, "mode": "collect", "basis": "A-090 (2026-10-11) — 조회만, 주문 없음",
+                            "started_at": now.astimezone(KST).isoformat(timespec="seconds"),
+                            "account_alias": adapter.cfg.account_alias, "codes_file": str(codes_file),
+                            "codes_requested": len(codes), "since": f"{since:%Y%m%d}", "until": f"{last_day:%Y%m%d}",
+                            "request": {"dt": f"{last_day:%Y%m%d}", **INVSR_BODY},
+                            "allowed_rest_apis": sorted(DEEP_REST_APIS), "interval_seconds": PROBE_INTERVAL,
+                            "columns": list(COLLECT_COLUMNS),
+                            "field_units": {f: FIELD_UNITS.get(f, "명세에 없음 — 미확인") for f in COLLECT_COLUMNS},
+                            "token": {"issued": False, "revoked": None}, "ok": 0, "per_code": {}, "failed": [],
+                            "not_queried": []}
+    out.mkdir(parents=True, exist_ok=True)
+    try:
+        try:
+            adapter.tokens.token()
+            meta["token"]["issued"] = True
+        except TokenError as exc:
+            meta["failed"].append({"code": "-", "reason": f"토큰 발급 실패: {_mask(exc)}"})
+            meta["not_queried"] = list(codes)
+        streak = 0
+        for idx, code in enumerate(codes if meta["token"]["issued"] else []):
+            if guard.blocked or fatal_critical(adapter):
+                meta["not_queried"] = codes[idx:]
+                print("중단: 허용 밖 API 시도 또는 브로커 치명 오류 — 나머지 조회 안 함")
+                break
+            res, rows = collect_fetch(adapter, guard, code, last_day, since)
+            if res["error"] is None and rows:
+                out_rows, problems = build_csv(rows, COLLECT_COLUMNS)
+                write_csv(out / f"{code}.csv", COLLECT_COLUMNS, out_rows)
+                meta["per_code"][code] = {"rows": len(out_rows), "pages": res["pages"], "first": out_rows[0]["dt"],
+                                          "last": out_rows[-1]["dt"], "end": res["end"], "problems": problems}
+                meta["ok"] += 1
+                streak = 0
+                print(f"  {idx + 1:>3}/{len(codes)} {code}: {out_rows[0]['dt']}~{out_rows[-1]['dt']} {len(out_rows)}행 "
+                      f"{res['pages']}쪽", flush=True)
+                continue
+            reason = res["error"] or f"{since:%Y%m%d} 이후 행 없음"
+            meta["failed"].append({"code": code, "reason": reason, "pages": res["pages"]})
+            print(f"  {idx + 1:>3}/{len(codes)} {code}: 실패 — {reason}", flush=True)
+            streak += 1
+            if streak >= MAX_CONSECUTIVE_FAILURES or UNSUPPORTED_MARK in reason:
+                meta["not_queried"] = codes[idx + 1:]
+                print(f"중단: 연속 {streak}종목 실패 — 나머지 {len(meta['not_queried'])}종목 조회 안 함")
+                break
+    finally:
+        revoked = adapter.close()   # 토큰 폐기 au10002
+        if meta["token"]["issued"]:
+            meta["token"]["revoked"] = revoked
+            print(f"토큰 폐기 au10002: {'완료' if revoked else '실패 — 만료 시각에 정리됨'}")
+    meta["finished_at"] = clock.now().astimezone(KST).isoformat(timespec="seconds")
+    meta["api_calls"] = _api_summary(guard)
+    meta["calls"] = sum(s["calls"] for s in meta["api_calls"].values())
+    meta["blocked_before_send"] = list(guard.blocked)
+    meta["critical"] = [f"{k}: {_mask(m)}" for k, m in adapter.critical]
+    firsts = sorted(v["first"] for v in meta["per_code"].values())
+    meta["range"] = {"earliest_first": firsts[0] if firsts else None, "latest_first": firsts[-1] if firsts else None,
+                     "late_start_codes": sorted(c for c, v in meta["per_code"].items() if v["first"] > meta["since"][:6]
+                                                + "31")}
+    mpath = out / f"meta-{now.astimezone(KST):%Y%m%d-%H%M%S}.json"
+    mpath.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"요약: 종목 {len(codes)} 성공 {meta['ok']} 실패 {len(meta['failed'])} 미조회 {len(meta['not_queried'])}, "
+          f"호출 {meta['calls']}회, 저장 {out}, 메타 {mpath.name}")
+    bad = meta["failed"] or meta["not_queried"] or meta["blocked_before_send"] or meta["critical"]
+    return 1 if bad else 0
+
+
 # --- 진입점 ----------------------------------------------------------------------------------------------
 
 Connect = Callable[[Path, Mapping[str, str] | None, Clock], object]
@@ -610,6 +756,10 @@ def _args(argv: Sequence[str]) -> argparse.Namespace | None:
     p.add_argument("--deep-max-pages", type=int, default=DEEP_PAGES_DEFAULT,
                    help=f"--deep 연속 조회 안전 상한 (1~{DEEP_PAGES_MAX})")
     p.add_argument("--save-dir", default=DEEP_SAVE_DIR, help="--deep 저장 폴더 (저장소 기준 상대 경로 가능)")
+    p.add_argument("--collect", action="store_true", help="[A-090] 종목 목록 × ka10060 since 이후 수집 + 종목별 CSV")
+    p.add_argument("--codes-file", default=None, help="--collect 종목 목록 (code,... CSV 또는 한 줄에 하나)")
+    p.add_argument("--since", default=COLLECT_SINCE_DEFAULT, help="--collect 첫 날짜 YYYY-MM-DD (그 이전 쪽은 받지 않음)")
+    p.add_argument("--out", default=None, help="--collect 저장 폴더 (기본 var/backtest/data/kiwoom-investor-<마지막 거래일>)")
     try:
         return p.parse_args(list(argv))
     except SystemExit:
@@ -639,6 +789,21 @@ def investor_main(root: Path, argv: Sequence[str], environ: Mapping[str, str] | 
     except ProbeError as exc:
         return _refuse(str(exc))
     save_dir = _resolve(root, ns.save_dir)
+    collect_codes: list[str] = []
+    since = date.min
+    if ns.collect:
+        if ns.deep or ns.codes or ns.compare:
+            return _refuse("--collect는 --deep·--codes·--compare와 함께 쓸 수 없음 (종목은 --codes-file)")
+        if not ns.codes_file:
+            return _refuse("--collect에는 --codes-file이 필요")
+        try:
+            since = date.fromisoformat(ns.since)
+        except ValueError:
+            return _refuse(f"--since {ns.since} — YYYY-MM-DD 형식 아님")
+        try:
+            collect_codes = read_code_list(_resolve(root, ns.codes_file))
+        except (OSError, ProbeError) as exc:
+            return _refuse(f"--codes-file: {exc}")
     if ns.deep:
         if ns.codes is None or len(codes) != 1:
             return _refuse("--deep는 --codes로 정확히 1종목을 지정할 때만 실행한다")
@@ -657,6 +822,17 @@ def investor_main(root: Path, argv: Sequence[str], environ: Mapping[str, str] | 
         return _refuse(running)
     if ns.deep:
         return deep_main(root, ns, codes[0], save_dir, environ, clock, now, connect or _deep_connect)
+    if ns.collect:
+        last_day = last_closed_day(now, _load_calendar(root))
+        if since > last_day:
+            return _refuse(f"--since {since}가 마지막 거래일 {last_day}보다 뒤")
+        out = _resolve(root, ns.out) if ns.out else \
+            root / "var" / "backtest" / "data" / f"kiwoom-investor-{last_day:%Y%m%d}"
+        clash = [c for c in collect_codes if (out / f"{c}.csv").exists()]
+        if clash:
+            return _refuse(f"{out}에 이미 CSV가 있음({', '.join(clash[:5])}) — 덮어쓰지 않는다. 다른 --out 지정")
+        return collect_main(root, collect_codes, since, out, _resolve(root, ns.codes_file), environ, clock, now,
+                            last_day, connect or _deep_connect)
 
     conn = (connect or _default_connect)(root, environ, clock)
     if isinstance(conn, str):
