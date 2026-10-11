@@ -52,6 +52,16 @@ CAP_FIELD = "mac"                                   # ka10001 시가총액 — �
 CAP_BASIS = "ka10001 mac (미확인 필드 — 첫 실행 결과로 확인)"
 CROSS_FIELDS = ("flo_stk", "cur_prc")               # 교차 확인용 상장주식 × 현재가 — 미확인
 DAILY_LIST_KEY = "stk_dt_pole_chart_qry"
+# [A-087] 코스피200 구성(ka20002)·업종 지수 일봉(ka20006) — S2 공식 명세 kiwoom_api_spec.json 확인(2026-10-11). 모의 지원 미확인
+SECT_PATH = "/api/dostk/sect"
+K200_BODY = {"mrkt_tp": "2", "inds_cd": "201", "stex_tp": "1"}     # 2:코스피200, 201:KOSPI200, 1:KRX
+K200_LIST_KEY = "inds_stkpc"
+K200_EXPECTED = 200
+K200_BASIS = "ka20002 현재 구성(조회일 기준) — 과거 편출 종목 없음, 생존편향"
+INDEX_CODES = {"001": "KOSPI 종합", "101": "KOSDAQ 종합", "201": "KOSPI200"}   # 명세 inds_cd 설명의 값만
+INDEX_LIST_KEY = "inds_dt_pole_qry"
+INDEX_SCALE = Decimal("100")                        # 명세: 지수 값은 소수점 제거된 100배 값
+FETCH_APIS = frozenset({"au10001", "au10002", "ka10099", "ka10001", "ka10081", "ka20002", "ka20006"})
 MAX_CONSECUTIVE_FAILURES = 3                        # 연속 실패가 이만큼이면 나머지는 조회하지 않는다
 LATE_START_DAYS = 14                                # 첫 봉이 since보다 이만큼 넘게 늦으면 표시
 CSV_HEADER = ("date", "open", "high", "low", "close", "volume")
@@ -221,6 +231,61 @@ def fetch_daily(adapter, code: str, since: date, until: date) -> list[Bar]:  # t
     return [out[d] for d in sorted(out)]
 
 
+def kospi200_constituents(adapter) -> list[tuple[str, str]]:  # type: ignore[no-untyped-def]
+    """[A-087] ka20002 코스피200 현재 구성 (코드, 이름). 중복은 한 번만. 코드 형식이 아니면 추측하지 않고 중단."""
+    with call_priority(Priority.MARKET):
+        _, rows = adapter.query_raw(SECT_PATH, "ka20002", dict(K200_BODY), K200_LIST_KEY)
+    out: dict[str, str] = {}
+    for r in rows:
+        code = str(r.get("stk_cd") or "").strip()
+        if not _CODE.fullmatch(code):
+            raise FetchError(f"ka20002 종목코드 형식 아님: {code[:12]!r} — 추측하지 않고 중단")
+        out.setdefault(code, str(r.get("stk_nm") or "").strip())
+    if not out:
+        raise FetchError("ka20002 코스피200 구성 종목 0개")
+    return list(out.items())
+
+
+def _index_value(value: object, field: str) -> Decimal:
+    return (parse.price(value, field) / INDEX_SCALE).quantize(Decimal("0.01"))
+
+
+def fetch_index_daily(adapter, inds_cd: str, since: date, until: date) -> list[Bar]:  # type: ignore[no-untyped-def]
+    """[A-087] ka20006 업종 일봉 since~until(오래된 순). 값은 100배 정수 → 지수(소수 둘째 자리). 거래량 단위는 미확인."""
+    floor = since.strftime("%Y%m%d")
+
+    def enough(rows: list[dict]) -> bool:
+        return any(str(r.get("dt") or "") < floor for r in rows)
+
+    with call_priority(Priority.MARKET):
+        _, rows = adapter.query_raw(CHART_PATH, "ka20006", {"inds_cd": inds_cd, "base_dt": until.strftime("%Y%m%d")},
+                                    INDEX_LIST_KEY, enough)
+    out: dict[date, Bar] = {}
+    for r in rows:
+        d = _dt(r)
+        if d < since or d > until:
+            continue
+        if d in out:
+            raise parse.KiwoomParseError(f"지수 일봉 날짜 중복 {d}")
+        out[d] = (d, _index_value(r.get("open_pric"), "open_pric"), _index_value(r.get("high_pric"), "high_pric"),
+                  _index_value(r.get("low_pric"), "low_pric"), _index_value(r.get("cur_prc"), "cur_prc"),
+                  parse.qty(r.get("trde_qty"), "trde_qty"))
+    if not out:
+        raise FetchError(f"지수 {inds_cd}: {since}~{until} 일봉 없음")
+    return [out[d] for d in sorted(out)]
+
+
+def _write_constituents(meta: Path, items: list[tuple[str, str]]) -> Path:
+    meta.mkdir(parents=True, exist_ok=True)
+    path = meta / "kospi200-constituents.csv"
+    with path.open("w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f, lineterminator="\n")
+        w.writerow(["code", "name", "basis"])
+        for code, name in items:
+            w.writerow([code, name, K200_BASIS])
+    return path
+
+
 def write_daily_csv(path: Path, bars: Sequence[Bar]) -> None:
     tmp = path.with_name(path.name + ".tmp")
     with tmp.open("w", encoding="utf-8", newline="") as f:
@@ -237,7 +302,7 @@ Connect = Callable[[Path, Mapping[str, str] | None, Clock], object]
 
 
 def _default_connect(root: Path, environ: Mapping[str, str] | None, clock: Clock) -> object:
-    return connect_paper(root, environ, clock, per_tr_interval=1.1)
+    return connect_paper(root, environ, clock, per_tr_interval=1.1, allowed_apis=FETCH_APIS)   # [A-087] 허용 목록
 
 
 def _refuse(msg: str) -> int:
@@ -254,6 +319,9 @@ def _args(argv: Sequence[str]) -> argparse.Namespace | None:
     p.add_argument("--out", default=None, help="저장 폴더 (기본 var/backtest/data/kiwoom-ka10081-adj-<마지막 확정일>)")
     p.add_argument("--codes", default=None, help="종목코드 목록 파일(한 줄에 하나, # 주석). 주면 순위 계산 생략")
     p.add_argument("--dry-run", action="store_true", help="종목 선정까지만 (일봉 조회 안 함)")
+    p.add_argument("--kospi200", action="store_true",
+                   help="[A-087] ka20002 코스피200 현재 구성 종목으로 수집 (--codes와 함께 쓸 수 없음, 생존편향)")
+    p.add_argument("--index", default=None, help=f"[A-087] ka20006 업종 지수 일봉도 받기: {', '.join(INDEX_CODES)}")
     try:
         return p.parse_args(list(argv))
     except SystemExit:
@@ -335,6 +403,23 @@ def _fetch_all(adapter, guard, ranked: list[Ranked], since: date, until: date, o
     summary["per_code"] = per_code
 
 
+def _fetch_index(adapter, inds_cd: str, since: date, until: date, out: Path, summary: dict) -> int:  # type: ignore[no-untyped-def]
+    """[A-087] 지수 일봉 → `<out>/index/<코드>.csv` (종목 CSV와 섞이지 않게). 실패면 기록하고 1."""
+    try:
+        bars = fetch_index_daily(adapter, inds_cd, since, until)
+    except (BrokerQueryError, parse.KiwoomParseError, FetchError) as exc:
+        summary["failed"].append({"index": inds_cd, "reason": str(exc)})
+        print(f"  지수 {inds_cd} 실패: {exc}")
+        return 1
+    (out / "index").mkdir(parents=True, exist_ok=True)
+    write_daily_csv(out / "index" / f"{inds_cd}.csv", bars)
+    summary["index"] = {inds_cd: {"name": INDEX_CODES[inds_cd], "api": "ka20006 (100배 정수 → 지수, 수정 개념 없음)",
+                                  "first": bars[0][0].isoformat(), "last": bars[-1][0].isoformat(), "rows": len(bars),
+                                  "volume_unit": "명세 '1주' — 지수 거래량 단위 미확인"}}
+    print(f"  지수 {inds_cd} {INDEX_CODES[inds_cd]}: {bars[0][0]} ~ {bars[-1][0]} {len(bars)}행 → index/{inds_cd}.csv")
+    return 0
+
+
 def fetch_main(root: Path, argv: Sequence[str], environ: Mapping[str, str] | None = None, *,
                clock: Clock | None = None, connect: Connect | None = None) -> int:
     ns = _args(argv)
@@ -348,6 +433,10 @@ def fetch_main(root: Path, argv: Sequence[str], environ: Mapping[str, str] | Non
         since = date.fromisoformat(ns.since)
     except ValueError:
         return _refuse(f"--since {ns.since} — YYYY-MM-DD 형식 아님")
+    if ns.kospi200 and ns.codes:
+        return _refuse("--kospi200과 --codes는 함께 쓸 수 없음")
+    if ns.index is not None and ns.index not in INDEX_CODES:
+        return _refuse(f"--index {ns.index} — {', '.join(f'{k}({v})' for k, v in INDEX_CODES.items())}만 허용")
     clock = clock or SystemClock()
     base = root / "var" / "paper"
     if instance_running(base):   # 시작 직후(하트비트 전)도 막는다 (preflight와 같음, RV-15)
@@ -359,8 +448,11 @@ def fetch_main(root: Path, argv: Sequence[str], environ: Mapping[str, str] | Non
     until = latest_complete_day(now, None)   # 일봉 확정 20:00 전이면 전 거래일까지 (DP-5)
     if since > until:
         return _refuse(f"--since {since}가 마지막 확정 거래일 {until}보다 뒤")
+    folder = "kiwoom-kospi200-adj" if ns.kospi200 else "kiwoom-ka10081-adj"
     out = _resolve(root, ns.out) if ns.out else \
-        root / "var" / "backtest" / "data" / f"kiwoom-ka10081-adj-{until.strftime('%Y%m%d')}"
+        root / "var" / "backtest" / "data" / f"{folder}-{until.strftime('%Y%m%d')}"
+    if ns.index is not None and (out / "index" / f"{ns.index}.csv").exists():
+        return _refuse(f"{out / 'index' / (ns.index + '.csv')}가 이미 있음 — 덮어쓰지 않는다. 다른 --out을 지정")
     codes: list[str] | None = None
     if ns.codes:
         try:
@@ -385,10 +477,23 @@ def fetch_main(root: Path, argv: Sequence[str], environ: Mapping[str, str] | Non
     meta = out / "meta"
     summary: dict = {"started_at": now.astimezone(KST).isoformat(), "since": since.isoformat(),
                      "until": until.isoformat(), "api": "ka10081 upd_stkpc_tp=1 (수정주가)", "codes": [],
-                     "ok": 0, "failed": [], "not_queried": [], "order_api_calls": 0, "dry_run": ns.dry_run}
+                     "ok": 0, "failed": [], "not_queried": [], "order_api_calls": 0, "dry_run": ns.dry_run,
+                     "universe": "ka10099+ka10001 시가총액 순위" if codes is None else "--codes 파일"}
     rc = 0
     try:
-        if codes is None:
+        if ns.kospi200:
+            try:
+                items = kospi200_constituents(adapter)
+            except (BrokerQueryError, parse.KiwoomParseError, FetchError) as exc:
+                print(f"코스피200 구성 조회 실패(일봉 조회 안 함): {exc}")
+                return 1
+            where = _write_constituents(meta, items)
+            note = "" if len(items) == K200_EXPECTED else f" — 경고: {K200_EXPECTED}이 아님(확인 필요)"
+            print(f"코스피200 구성 종목 {len(items)} ({K200_BASIS}){note} → {where}")
+            ranked = [Ranked(i, c, n, Decimal("0"), None) for i, (c, n) in enumerate(items, start=1)]
+            codes = [c for c, _ in items]
+            summary["universe"] = K200_BASIS
+        elif codes is None:
             print(f"종목 선정: ka10099 코스피 + ka10001 시가총액 필드 '{CAP_FIELD}' 사용 ({CAP_BASIS})")
             try:
                 ranked, excluded = select_universe(adapter, ns.top, print)
@@ -413,6 +518,8 @@ def fetch_main(root: Path, argv: Sequence[str], environ: Mapping[str, str] | Non
             _fetch_all(adapter, guard, ranked, since, until, out, summary)
             if summary["failed"] or summary["not_queried"]:
                 rc = 1
+            if ns.index is not None and not guard.blocked and not getattr(adapter, "critical", None):
+                rc = max(rc, _fetch_index(adapter, ns.index, since, until, out, summary))
     finally:
         revoked = adapter.close()   # 토큰 폐기 au10002 (calendar_tool과 같음)
         print(f"토큰 폐기: {'완료' if revoked else '실패 — 만료 시각에 정리됨'}")
