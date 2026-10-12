@@ -16,6 +16,8 @@
 [[instruments]]  code, kind(STOCK|ETF|ETN), leverage(문자열, 부호), lot_size(문자열). M1만 — M2 종목은 config/m2/universe
 [[strategies]]   module("패키지.모듈:클래스"), params(파라미터 파일 경로, 저장소 기준), eval_times(["HH:MM"] KST)
                  verification_approval (선택, PAPER만): PAPER-0 검증 전략 승인 A-ID (DP-24 a, A-037)
+                 l6_slots (선택, 정수 ≥ 1) [CP-034 D-197]: 전략별 보유 슬롯. 없으면 슬롯 검사 없음(기존 동작).
+                 배정하면 모든 전략에 배정해야 하고 합 ≤ 계좌 L6 (check_strategy_slots). 미배정 슬롯은 아무도 안 씀(A-092 Q-7)
 
 기본값을 두지 않는다(PAPER 접속 승인 제외). 누락·형식 오류·알 수 없는 키면 시작을 거부한다.
 """
@@ -24,6 +26,7 @@ from __future__ import annotations
 
 import re
 import tomllib
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import time
 from decimal import Decimal, InvalidOperation
@@ -46,6 +49,7 @@ class StrategyDeploy:
     params: Path
     eval_times: tuple[time, ...]
     verification_approval: str | None = None   # PAPER-0 검증 전략 승인 A-ID (등록 검증 예외, DP-24 a)
+    l6_slots: int | None = None                # [CP-034 D-197] 전략별 보유 슬롯. None = 슬롯 검사 없음
 
 
 @dataclass(frozen=True)
@@ -160,11 +164,15 @@ def parse_app_settings(raw: dict, mode: Mode, repo_root: Path) -> AppSettings:
 
     strategies: list[StrategyDeploy] = []
     for i, st in enumerate(raw.get("strategies") or []):
-        optional = {"verification_approval"} if mode is Mode.PAPER else set()
+        optional = ({"verification_approval"} if mode is Mode.PAPER else set()) | {"l6_slots"}
         if not isinstance(st, dict) or not {"module", "params", "eval_times"} <= set(st) or \
                 set(st) - {"module", "params", "eval_times"} - optional:
             problems.append(f"strategies[{i}]: module·params·eval_times 세 키가 필요"
                             f"{' (PAPER는 verification_approval 선택)' if optional else ''}")
+            continue
+        slots = st.get("l6_slots")
+        if slots is not None and (isinstance(slots, bool) or not isinstance(slots, int) or slots < 1):
+            problems.append(f"strategies[{i}].l6_slots: 1 이상 정수 (CP-034 D-197)")
             continue
         va = st.get("verification_approval")
         if va is not None and (not isinstance(va, str) or not re.fullmatch(r"A-\d{3,}", va)):
@@ -183,11 +191,30 @@ def parse_app_settings(raw: dict, mode: Mode, repo_root: Path) -> AppSettings:
             problems.append(f"strategies[{i}].eval_times: ['HH:MM', ...] (KST)")
             continue
         strategies.append(StrategyDeploy(st["module"], p,
-                                         tuple(sorted(time(int(t[:2]), int(t[3:])) for t in set(times))), va))
+                                         tuple(sorted(time(int(t[:2]), int(t[3:])) for t in set(times))), va,
+                                         slots))
     if problems:
         raise ConfigError(problems)
     return AppSettings(account, loop, rec, tuple(servers), infos, tuple(strategies), approved,  # type: ignore[arg-type]
                        telegram, market, broker)
+
+
+def check_strategy_slots(strategies: Iterable[object], l6_max_positions: int) -> None:
+    """전략별 슬롯 시작 검사 (CP-034 D-197, V-272). 문제가 있으면 ConfigError (시작 거부).
+
+    - 아무 전략에도 l6_slots가 없으면 검사 없음(기존 동작).
+    - 일부 전략만 배정: 거부 [제안 — 미배정 전략이 남는 계좌 슬롯을 빌려 쓰지 않게(A-092 Q-7)].
+    - 활성 전략 l6_slots 합 > 계좌 L6: 거부.
+    """
+    slots = [getattr(s, "l6_slots", None) for s in strategies]
+    if all(v is None for v in slots):
+        return
+    if any(v is None for v in slots):
+        raise ConfigError("l6_slots: 일부 전략에만 배정됨 — 모든 활성 전략에 배정하거나 모두 빼야 한다 "
+                          "(미배정 슬롯 빌려 쓰기 금지, CP-034 D-197·A-092 Q-7)")
+    total = sum(v for v in slots if v is not None)
+    if total > l6_max_positions:
+        raise ConfigError(f"l6_slots: 전략 슬롯 합 {total} > 계좌 L6 {l6_max_positions} (CP-034 D-197)")
 
 
 def _market_broker(app: dict, mode: Mode, problems: list[str]) -> tuple[str, str]:

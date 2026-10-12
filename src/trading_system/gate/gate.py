@@ -12,6 +12,7 @@ G2는 정지 유형별 허용표(01 §2.6, domain/halts.py)를 따른다. 계좌
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -299,6 +300,8 @@ class Gate:
             slots = held_symbols | entry_symbols
             if req.instrument not in slots and len(slots) + 1 > lim.l6_max_positions:
                 raise _Reject(Check.G7, f"L6 보유 종목 수 초과 ({len(slots) + 1} > {lim.l6_max_positions})")
+            if self._in.strategy_slots is not None:
+                self._strategy_slots(ctx, self._in.strategy_slots)
         l7_cap = lim.l7_cap(base)   # [CP-034 D-196] 금액 또는 기준 금액 × 비율
         if lim.l7_max_order_ratio is not None:
             s["l7_limit"] = str(l7_cap)
@@ -328,6 +331,30 @@ class Gate:
             owned = self._owned_exposure(ctx, req.owner or "")
             if owned + ctx.exposure_add > base * sl.l3_max_total_ratio:
                 raise _Reject(Check.G7, f"전략 L3 초과 ({owned + ctx.exposure_add} > {base * sl.l3_max_total_ratio})")
+
+    def _strategy_slots(self, ctx: _Ctx, table: Mapping[str, int]) -> None:
+        """전략 슬롯 (CP-034 D-197): 그 전략의 (소유 보유 종목 + 진입 예약 종목, R-28) + 1 > l6_slots → 거부.
+
+        계좌 L6은 이미 통과. 표에 없는 전략은 슬롯 0 — 배정되지 않은 슬롯은 아무 전략도 쓰지 않는다(A-092 Q-7).
+        판정 직렬화·예약으로 동시 신호에도 전략 단위 합산이 성립한다(01 D-022, V-04).
+        """
+        req = ctx.req
+        owner = req.owner or ""
+        cap = table.get(owner)
+        if cap is None:
+            raise _Reject(Check.G7, f"전략 슬롯 미배정 ({owner}) — 배정되지 않은 슬롯은 쓰지 않음 (D-197)")
+        used: set[str] = set()
+        for inst, pos in self._repo.positions(req.account).items():
+            own = self._repo.active_ownership(req.account, inst)
+            if pos.quantity > 0 and own is not None and own.owner == owner:
+                used.add(inst)
+        for r in self._repo.active_reservations(req.account):
+            intent = self._repo.intent(r.intent_id)
+            if intent.owner == owner and intent.request_type == RequestType.ENTRY.value:
+                used.add(r.instrument)
+        ctx.snapshot.update(strategy_slots=str(cap), strategy_slots_used=str(len(used)))
+        if req.instrument not in used and len(used) + 1 > cap:
+            raise _Reject(Check.G7, f"전략 슬롯 초과 ({owner}: {len(used) + 1} > {cap})")
 
     def _owned_exposure(self, ctx: _Ctx, owner: str) -> Decimal:
         """이 전략이 소유한 종목의 보유 노출 + 이 전략 의도의 활성 예약."""

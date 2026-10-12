@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -114,3 +115,5 @@ class GateInputs:
     strategies: StrategyFacts
     clock_health: ClockHealth
     spot_rules: SymbolRulesSource | None = None  # M2 현물 거래 규칙 (D-106). None = M1 (기존 G10 검사만)
+    # [CP-034 D-197] 전략 소유자("전략ID:버전") → 보유 슬롯. None = 슬롯 검사 없음(기존 동작). 있으면 표에 없는 전략은 0
+    strategy_slots: Mapping[str, int] | None = None

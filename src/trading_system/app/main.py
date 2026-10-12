@@ -29,7 +29,7 @@ from datetime import date, time as dtime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from trading_system.config.app_file import AppSettings, load_app_settings
+from trading_system.config.app_file import AppSettings, check_strategy_slots, load_app_settings
 from trading_system.config.capabilities import load_capabilities
 from trading_system.config.errors import ConfigError
 from trading_system.config.market_file import load_market_settings, parse_alert_settings
@@ -180,7 +180,7 @@ def _strategies(app: AppSettings) -> list[StrategyInput]:
         problems = check(params, dep.eval_times) if check is not None else []
         if problems:
             raise ConfigError(f"전략 배포 설정 오류 {strat.spec.strategy_id} v{strat.spec.version}: " + "; ".join(problems))
-        out.append(StrategyInput(strat, params, dep.eval_times, dep.verification_approval))
+        out.append(StrategyInput(strat, params, dep.eval_times, dep.verification_approval, dep.l6_slots))
     return out
 
 
@@ -224,6 +224,7 @@ def run_main(root: Path, environ: dict[str, str] | None = None, max_seconds: flo
         app = load_app_settings(root / "config" / f"app.{mode.value.lower()}.toml", mode, root)
         if app.account != startup.account:
             raise ConfigError("배포 설정의 계좌 별칭과 한도 파일의 계좌가 다르다")
+        check_strategy_slots(app.strategies, startup.limits.l6_max_positions)   # [CP-034 D-197] 브로커 연결 전
         if app.market != Market.M1.value:   # M1 설정 위치(config/)에 다른 시장 설정 (D-097)
             raise MarketScopeError(f"config/app.{mode.value.lower()}.toml의 market이 M1이 아니다 ({app.market}) — "
                                    "M2는 config/m2/와 --market M2")
