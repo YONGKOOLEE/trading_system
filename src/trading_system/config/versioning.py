@@ -18,8 +18,9 @@ from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
-from trading_system.domain.clock import Clock, next_kst_time_after, to_iso
+from trading_system.domain.clock import Clock, to_iso
 from trading_system.domain.limits import AccountLimits
+from trading_system.domain.market_time import M1_TIME, MarketTime
 from trading_system.storage.repository import Repository
 
 KIND = "ACCOUNT_LIMITS"
@@ -92,9 +93,11 @@ def classify(old: AccountLimits, new: AccountLimits) -> ChangeDirection:
 
 
 class SettingsManager:
-    def __init__(self, repo: Repository, clock: Clock) -> None:
+    def __init__(self, repo: Repository, clock: Clock, *, market_time: MarketTime = M1_TIME) -> None:
         self._repo = repo
         self._clock = clock
+        # "다음 일일 기준 시각"을 셀 시장 시각대 (CP-024 D-108). 기본 M1(KST) — M1 호출부 그대로
+        self._market_time = market_time
 
     @staticmethod
     def hash_of(limits: AccountLimits) -> str:
@@ -137,7 +140,7 @@ class SettingsManager:
                 ref_changed = effective.daily_reference_time != proposed.daily_reference_time
                 deferred = direction in (ChangeDirection.LOOSENED, ChangeDirection.MIXED) or ref_changed
                 ref_used = effective.daily_reference_time.strftime("%H:%M")
-                effective_at = next_kst_time_after(now, effective.daily_reference_time) if deferred else now
+                effective_at = self._market_time.next_after(now, effective.daily_reference_time) if deferred else now
                 old_c, new_c = effective.to_canonical(), proposed.to_canonical()
                 changes = {k: [old_c[k], new_c[k]] for k in new_c if old_c[k] != new_c[k]}
                 previous_hash = self.hash_of(effective)

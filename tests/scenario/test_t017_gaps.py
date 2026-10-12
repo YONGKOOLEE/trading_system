@@ -52,7 +52,7 @@ def _assert_k11_then_recovers(env: Env, t: FakeTelegram, n: Notifier, heal) -> N
     heal()
     sent, failed = n.pump()
     assert sent >= 1 and failed == 0                            # 밀린 알림 + K11 발동 알림(정지가 남긴 ALERT)
-    assert t.sent[0]["text"] == "[경고] a"                       # 복구 시 밀린 알림 전송, 순번 순 (V-30)
+    assert t.sent[0]["text"] == "[M1] [경고] a"                  # [M1]: T-M2-13 D-117 / 복구 시 밀린 알림 전송, 순번 순 (V-30)
     assert env.repo.pending_notifications() == []
     assert env.repo.notification_fail_streak() == 0
 
@@ -77,7 +77,7 @@ def test_v171_wrong_token_401_from_server_is_channel_failure_k11(env: Env, tg: F
     assert "K11" in halts(env) and len(env.repo.pending_notifications()) == 1
     assert tg.sent == []
     sent, _ = notifier(env, tg).pump()
-    assert sent >= 1 and tg.sent[0]["text"] == "[경고] a"
+    assert sent >= 1 and tg.sent[0]["text"] == "[M1] [경고] a"  # [M1] 표시: T-M2-13 D-117 A-065 Q5
     assert env.repo.pending_notifications() == []
 
 
@@ -117,7 +117,7 @@ def test_v173_429_without_retry_after_waits_5s(env: Env, tg: FakeTelegram, param
     assert env.repo.notification_fail_streak() == 0 and "K11" not in halts(env)
     env.clock.advance(timedelta(seconds=1))                    # 5초
     assert n.pump() == (1, 0)
-    assert [m["text"] for m in tg.sent] == ["[경고] x"]
+    assert [m["text"] for m in tg.sent] == ["[M1] [경고] x"]  # [M1] 표시: T-M2-13 D-117 A-065 Q5
     assert env.repo.notification_fail_streak() == 0 and "K11" not in halts(env)
 
 
@@ -138,7 +138,7 @@ def test_v177c_non_storage_exception_skips_update_and_is_logged(env: Env, tg: Fa
     tg.push(2, "/status")
     assert b.poll_once(timeout=0) == 1                         # update 1은 다시 처리하지 않는다(offset 진행)
     assert env.repo.pending_commands() == []                   # /kill은 재처리되지 않음 (건너뜀)
-    assert tg.sent[-1]["text"].startswith("정지")              # 뒤 update(/status)는 정상 처리
+    assert tg.sent[-1]["text"].startswith("[M1] 정지")         # [M1]: T-M2-13 D-117 / 뒤 update(/status)는 정상 처리
     getup = [p for p in tg.paths if p.endswith("/getUpdates")]
     assert len(getup) == 2
     logged = "".join(f.read_text(encoding="utf-8") for f in log_dir.rglob("*") if f.is_file())

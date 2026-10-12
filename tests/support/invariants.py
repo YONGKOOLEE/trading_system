@@ -47,10 +47,12 @@ def check_invariants(conn: sqlite3.Connection, mode: str) -> list[str]:
     for r in _rows(conn, "SELECT order_key, quantity, filled_quantity FROM broker_order"):
         if Decimal(r["filled_quantity"]) > Decimal(r["quantity"]):
             v.append(f"INV-04 주문 수량 초과 체결 {r['order_key']}")
-    for r in _rows(conn, """SELECT o.order_key, o.filled_quantity, f.total FROM broker_order o
-                            JOIN (SELECT order_key, SUM(CAST(quantity AS REAL)) AS total FROM fill GROUP BY order_key) f
-                            ON f.order_key = o.order_key"""):
-        if Decimal(str(r["total"])) != Decimal(r["filled_quantity"]):
+    # [T-M2-09] 합계는 Decimal로 (SQL REAL 합은 M2 소수 수량에서 0.1+0.05 같은 이진 오차로 거짓 위반을 낸다. 정수 M1은 결과 같음)
+    fill_totals: dict[str, Decimal] = {}
+    for r in _rows(conn, "SELECT order_key, quantity FROM fill"):
+        fill_totals[r["order_key"]] = fill_totals.get(r["order_key"], Decimal("0")) + Decimal(r["quantity"])
+    for r in _rows(conn, "SELECT order_key, filled_quantity FROM broker_order"):
+        if r["order_key"] in fill_totals and fill_totals[r["order_key"]] != Decimal(r["filled_quantity"]):
             v.append(f"INV-04 체결 합계 불일치 {r['order_key']}")
 
     # INV-05 (계좌, 종목)당 활성 소유권 최대 1
@@ -59,14 +61,17 @@ def check_invariants(conn: sqlite3.Connection, mode: str) -> list[str]:
         v.append(f"INV-05 활성 소유권 {r['c']}개 {r['account']}/{r['instrument']}")
 
     # INV-06 활성 매도 의도 수량 ≤ 포지션 수량
-    for r in _rows(conn, f"""SELECT i.account, i.instrument, SUM(CAST(i.quantity AS REAL)) q,
-                                    COALESCE(p.quantity, '0') pos
-                             FROM intent i LEFT JOIN position p
-                               ON p.account = i.account AND p.instrument = i.instrument
-                             WHERE i.side = 'SELL' AND i.request_type IN ({new}) AND i.state IN ({act})
-                             GROUP BY i.account, i.instrument"""):
-        if Decimal(str(r["q"])) > Decimal(r["pos"]):
-            v.append(f"INV-06 매도 의도가 보유 초과 {r['account']}/{r['instrument']}")
+    sell_totals: dict[tuple[str, str], Decimal] = {}
+    for r in _rows(conn, f"""SELECT account, instrument, quantity, filled_quantity FROM intent
+                             WHERE side = 'SELL' AND request_type IN ({new}) AND state IN ({act})"""):
+        k = (r["account"], r["instrument"])
+        # [T-M2-09] Decimal 합 + 남은 수량(수량 − 체결): 일부 체결된 매도는 그 체결만큼 이미 포지션에서 빠졌다. 전체 수량과
+        # 비교하면 정상인 부분 체결 매도를 위반으로 잡는다(M2 무작위 사건열 seed 128에서 발견). 02 INV-06·G9와 같은 기준
+        sell_totals[k] = sell_totals.get(k, Decimal("0")) + Decimal(r["quantity"]) - Decimal(r["filled_quantity"])
+    for (account, instrument), q in sell_totals.items():
+        p = conn.execute("SELECT quantity FROM position WHERE account=? AND instrument=?", (account, instrument)).fetchone()
+        if q > Decimal(p["quantity"] if p else "0"):
+            v.append(f"INV-06 매도 의도가 보유 초과 {account}/{instrument}")
 
     # INV-07 승인 시점 한도 스냅샷이 한도 이하
     for r in _rows(conn, """SELECT decision_id, symbol_after, symbol_limit, total_after, total_limit

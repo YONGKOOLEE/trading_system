@@ -2,6 +2,7 @@
 
 파일 형식(TOML): 최상위 `account`, `[limits]`, `[time]`. 모든 값은 필수이며 기본값이 없다.
 값(리스크 수치)은 사용자가 정해 `config/limits.<mode>.toml`에 둔다. 저장소에는 형식 예제만 둔다.
+시간 제약은 시장별로 검사한다(CP-024 D-108): 기본 M1(KRX), M2 설정(`config/m2/limits.<mode>.toml`)은 market="M2".
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from trading_system.domain.limits import AccountLimits, check_limits
+from trading_system.domain.market_time import Market
 
 from .errors import ConfigError
 from .schema import Field, alias_problem, parse_fields
@@ -45,7 +47,8 @@ class ParsedLimits:
     warnings: tuple[str, ...]
 
 
-def parse_account_limits(raw: Mapping[str, object]) -> ParsedLimits:
+def parse_account_limits(raw: Mapping[str, object], market: str | Market = Market.M1) -> ParsedLimits:
+    market = Market(market)  # 알 수 없는 시장이면 ValueError (설정 검사 전에 호출 오류로 드러냄)
     problems: list[str] = []
     for key in raw:
         if key not in TOP_KEYS:
@@ -73,13 +76,14 @@ def parse_account_limits(raw: Mapping[str, object]) -> ParsedLimits:
         raise ConfigError(problems)
 
     limits = AccountLimits(**values)  # type: ignore[arg-type]
-    logic_problems, warnings = check_limits(limits)
+    logic_problems, warnings = check_limits(limits, market)
     if logic_problems:
         raise ConfigError(logic_problems)
     return ParsedLimits(account=str(account), limits=limits, warnings=tuple(warnings))
 
 
-def load_limits_file(path: Path) -> ParsedLimits:
+def load_limits_file(path: Path, market: str | Market = Market.M1) -> ParsedLimits:
+    market = Market(market)
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -89,7 +93,7 @@ def load_limits_file(path: Path) -> ParsedLimits:
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path.name}: TOML 문법 오류 ({exc})") from exc
     try:
-        return parse_account_limits(raw)
+        return parse_account_limits(raw, market)
     except ConfigError as exc:
         raise ConfigError([f"{path.name}: {p}" for p in exc.problems]) from exc
 

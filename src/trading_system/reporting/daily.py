@@ -12,7 +12,8 @@ from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
-from trading_system.domain.clock import KST, last_kst_time_at_or_before, to_iso
+from trading_system.domain.clock import to_iso
+from trading_system.domain.market_time import M1_TIME, MarketTime
 from trading_system.domain.daily_base import DailyBaseCorrupt
 from trading_system.domain.enums import IntentState
 from trading_system.domain.market import CostRates, estimate_cost
@@ -21,8 +22,10 @@ from trading_system.storage.repository import Repository
 
 
 def build_report(repo: Repository, account: str, trade_day: date, reference_time: time, cost_rates: CostRates,
-                 price_of: Callable[[str], Decimal | None], settings_hash: str | None) -> dict:
-    start = datetime.combine(trade_day, reference_time, tzinfo=KST)
+                 price_of: Callable[[str], Decimal | None], settings_hash: str | None, *,
+                 market_time: MarketTime = M1_TIME) -> dict:
+    # 거래일 범위 = 그 시장 현지 시각의 일일 기준 시각부터 24시간 (CP-024 D-108). 기본 M1(KST) — 기존 동작 그대로
+    start = datetime.combine(trade_day, reference_time, tzinfo=market_time.tz)
     end = start + timedelta(days=1)
     s, e = to_iso(start), to_iso(end)
     rows = repo.select
@@ -116,18 +119,22 @@ def realized_ratio_text(realized: Decimal, base: Decimal | None, *, corrupt: boo
     return f"실현 손익 일일 기준 대비 {realized / base * 100:+.3f}%"
 
 
-def current_trade_day(now: datetime, reference_time: time) -> date:
-    """`now`가 속한 거래일 = 직전(같은 시각 포함) 일일 기준 시각의 KST 날짜. report_time(예: 16:00) 보고에 쓴다."""
-    return last_kst_time_at_or_before(now, reference_time).astimezone(KST).date()
+def current_trade_day(now: datetime, reference_time: time, market_time: MarketTime = M1_TIME) -> date:
+    """`now`가 속한 거래일 = 직전(같은 시각 포함) 일일 기준 시각의 시장 현지 날짜(M1 = KST). report_time(예: 16:00) 보고에 쓴다."""
+    return market_time.trade_date(now, reference_time)
 
 
 class DailyReporter:
+    """market_time: 거래일을 나누는 시장 시각 기준 (CP-024 D-108, T-M2-09 V-110·V-114). 기본 M1(KST) — M1 조립 그대로.
+    M2는 M2_TIME(UTC). 비용은 시장의 추정 요율(cost_rates)로 계산한다(M2 실제 수수료 기록 fill_fee 반영은 [제안])."""
+
     def __init__(self, repo: Repository, alerts: AlertSink, cost_rates: CostRates,
-                 price_of: Callable[[str], Decimal | None]) -> None:
+                 price_of: Callable[[str], Decimal | None], *, market_time: MarketTime = M1_TIME) -> None:
         self._repo = repo
         self._alerts = alerts
         self._rates = cost_rates
         self._price_of = price_of
+        self._market_time = market_time
 
     def generate(self, account: str, now: datetime, reference_time: time, settings_hash: str | None, *,
                  current_day: bool = False) -> dict | None:
@@ -136,12 +143,12 @@ class DailyReporter:
         current_day=True: 지금 진행 중인 거래일(직전 기준 시각부터 지금까지)의 보고서 — report_time(예: 16:00)에
         부른다 (검토 RV-21). 같은 거래일을 기준 시각 경계에서 다시 만들면 보고 버전이 올라간다(최종본).
         """
-        trade_day = current_trade_day(now, reference_time)
+        trade_day = current_trade_day(now, reference_time, self._market_time)
         if not current_day:
             trade_day -= timedelta(days=1)
         try:
             content = build_report(self._repo, account, trade_day, reference_time, self._rates, self._price_of,
-                                   settings_hash)
+                                   settings_hash, market_time=self._market_time)
         except Exception as exc:  # noqa: BLE001 — 보고 실패는 기록·알림 (V-110)
             with self._repo.tx():
                 self._repo.insert_daily_report(account, trade_day, "FAILED", {"error": type(exc).__name__}, now,
