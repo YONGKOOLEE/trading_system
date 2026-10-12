@@ -25,6 +25,7 @@ from trading_system.domain.strategy import (
     ALLOWED_TRANSITIONS, MARKETS, RULE_KINDS, SIZING_METHODS, UNIVERSE_METHODS, StopReason, StrategyLimits,
     StrategySpec, StrategyState,
 )
+from trading_system.domain.universe import valid_list_id
 from trading_system.storage.repository import Repository
 
 from .capabilities import NOT_IMPLEMENTED, CapabilityTable, capability_row, required_parts, uses_unfilled_cancel
@@ -93,8 +94,15 @@ def validate_spec(spec: StrategySpec, caps: CapabilityTable, account_limits: Acc
         p.append("markets: M1/M2/M3 중 하나 이상")
     if spec.universe_method not in UNIVERSE_METHODS:
         p.append("universe_method: U-A/U-B/U-C")
-    elif spec.universe_method in ("U-A", "U-B") and not spec.universe:
-        p.append("universe: 종목 목록(U-A) 또는 목록 ID(U-B) 필요")
+    elif spec.universe_method == "U-A" and not spec.universe:
+        p.append("universe: 종목 목록(U-A) 필요")
+    if spec.universe_method == "U-B":   # [CP-034 D-198] 사람 목록은 목록 ID로만 가리킨다
+        if not valid_list_id(spec.universe_list):
+            p.append("universe_list: U-B 전략은 목록 ID 필수 (영문·숫자·-·_, 64자 이하, D-198)")
+        if spec.universe:
+            p.append("universe: U-B 전략은 비운다 — 종목은 universe_list 목록의 제출 버전에서 (D-198)")
+    elif spec.universe_list is not None:
+        p.append("universe_list: U-B 전략만 쓴다 (D-198)")
     if spec.sizing not in SIZING_METHODS:
         p.append("sizing: S-1~S-4 중 하나")
     if not isinstance(spec.validity_max_minutes, int) or spec.validity_max_minutes <= 0:

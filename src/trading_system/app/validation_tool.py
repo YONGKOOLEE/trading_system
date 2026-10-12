@@ -67,7 +67,7 @@ def _git_commit(root: Path) -> str:
 
 
 def validate_main(argv: Sequence[str] | None = None, root: Path | None = None) -> int:
-    from trading_system.app.main import _load_common, load_daily_csv
+    from trading_system.app.main import _load_common, load_daily_csv, load_universe_history
     from trading_system.app.wiring import load_strategy
     from trading_system.config.app_file import StrategyDeploy
     from trading_system.config.limits_file import load_limits_file
@@ -92,6 +92,8 @@ def validate_main(argv: Sequence[str] | None = None, root: Path | None = None) -
     p.add_argument("--universe-point-in-time", action="store_true",
                    help="유니버스가 판정 시점 목록임을 선언(생존편향 표시 없음). 기본은 사후 선택 목록으로 본다")
     p.add_argument("--universe-note", default="")
+    p.add_argument("--universe-history", default=None,
+                   help="[CP-034] U-B 전략 목록 이력 CSV(date,code). 있으면 판정 시점 목록, 없으면 C-7 표시")
     p.add_argument("--window-params", action="append", default=[], metavar="K=PATH",
                    help="창 k의 파라미터 파일(사람이 학습 창으로 고른 값). 여러 번 지정")
     p.add_argument("--random-runs", type=int, default=RANDOM_RUNS,
@@ -128,7 +130,8 @@ def validate_main(argv: Sequence[str] | None = None, root: Path | None = None) -
             gate_settings=gate_settings, calendar=calendar, ticks=ticks, slippage_tick=Decimal(ns.slippage_tick),
             data=data, infos=infos, start=date(1900, 1, 1), end=date(1900, 1, 1), initial_cash=Decimal(ns.cash),
             out_dir=out_root, eval_time=eval_times[0], eval_times=eval_times, data_version=f"csv:{data_dir.name}",
-            code_commit=_git_commit(root))
+            code_commit=_git_commit(root),
+            universe_history=load_universe_history(Path(ns.universe_history)) if ns.universe_history else None)
         spec = strat.spec
         name = f"{spec.strategy_id}-v{ns.report_version}"
         if ns.final_check:

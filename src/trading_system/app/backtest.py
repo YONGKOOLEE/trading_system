@@ -103,6 +103,9 @@ class BacktestConfig:
     # (final_check=True, 사용 장부에 이 전략 버전의 최종 확인 기록이 있어야 함, 모든 거래일이 final_from 이후)뿐.
     final_from: date = FINAL_FROM_DEFAULT
     final_check: bool = False
+    # [CP-034 D-198 (8)] U-B 전략의 목록 이력: 날짜 → 그날 판정에 쓰는 목록(date,code 파일). 판정일 d에는 d 이하 날짜 중
+    # 가장 늦은 날짜의 목록만 쓴다(룩어헤드 없음). None이면 데이터 전 종목을 사후 선택 목록으로 쓰고 C-7 표시
+    universe_history: dict[date, tuple[str, ...]] | None = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +134,7 @@ class BacktestResult:
     costs: Decimal = Decimal("0")
     quality_failures: dict[str, list[str]] = field(default_factory=dict)
     signals_by_eval: dict[str, list[tuple]] = field(default_factory=dict)  # "YYYY-MM-DDTHH:MM" → 신호 요약
+    universe_point_in_time: bool | None = None   # [CP-034] U-B만: 목록 이력으로 재현했으면 True, 없으면 False(C-7)
 
 
 def segment_days(days: list[date], segment: str) -> list[date]:
@@ -164,6 +168,32 @@ def _run_days(cfg: BacktestConfig) -> list[date]:
             all_days.append(d)
         d += timedelta(days=1)
     return segment_days(all_days, cfg.segment)
+
+
+UB_NO_HISTORY_NOTE = "U-B 목록 이력 없음 — 데이터 전 종목을 사후 선택 목록으로 사용, 판정 시점 목록 아님(C-7, D-168)"
+
+
+def ub_list_on(history: dict[date, tuple[str, ...]] | None, day: date,
+               all_codes: tuple[str, ...]) -> tuple[tuple[str, ...], dict[str, datetime | None]]:
+    """U-B 판정일 day의 목록과 등재 시각 (CP-034 D-198 (7)(8)). 이력의 날짜 = 그날 판정에 쓰는 목록 버전.
+
+    day 이하 날짜 중 가장 늦은 것을 쓴다(이후 날짜는 보지 않는다). 등재 시각 = 연속 등재가 시작된 이력 날짜의 00:00 KST
+    (제출 시각을 모르므로 그날 판정 전으로 본다). 이력이 없으면 all_codes, 등재 시각 없음."""
+    if history is None:
+        return all_codes, {}
+    dates = sorted(d for d in history if d <= day)
+    if not dates:
+        return (), {}
+    codes = history[dates[-1]]
+    listed: dict[str, datetime | None] = {}
+    for c in codes:
+        start = dates[-1]
+        for d in reversed(dates):
+            if c not in history[d]:
+                break
+            start = d
+        listed[c] = datetime.combine(start, time(0, 0), tzinfo=KST)
+    return codes, listed
 
 
 def _guard_final_period(cfg: BacktestConfig, days: list[date]) -> None:
@@ -306,6 +336,7 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
 
     signals_by_eval: dict[str, list[tuple]] = {}
     ratio = cfg.gate_settings.price_limit_ratio
+    is_ub = spec.universe_method == "U-B"
 
     def absorb_fills(day: date) -> None:
         nonlocal seen_fills, cash, costs_total
@@ -375,9 +406,17 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
                 return bool(repo.active_new_intents(ACCOUNT, inst, Side.BUY.value)
                             or repo.active_new_intents(ACCOUNT, inst, Side.SELL.value))
 
-            snap = store.snapshot(ev_id, "M1", ACCOUNT, clock.now(), base, sorted(cfg.data), pos_view, pending,
-                                  next_eval, history=lambda inst: repo.strategy_history(ACCOUNT, spec.owner, inst))
-            result = run_evaluation(cfg.strategy, snap, cfg.params)
+            insts, ub_extra, ub_entry = sorted(cfg.data), {}, {}
+            if is_ub:   # [CP-034 D-198] 그날 목록 + 이 전략 보유(청산·감액 판정용), 진입·증액은 목록 안에서만
+                codes, listed = ub_list_on(cfg.universe_history, day, tuple(sorted(cfg.data)))
+                owned = {o["instrument"] for o in repo.active_ownerships_of(spec.owner)}
+                insts = sorted((set(codes) | owned) & set(cfg.data))
+                ub_extra = {"listed_at": listed.get}
+                ub_entry = {"entry_universe": frozenset(codes)}
+            snap = store.snapshot(ev_id, "M1", ACCOUNT, clock.now(), base, insts, pos_view, pending,
+                                  next_eval, history=lambda inst: repo.strategy_history(ACCOUNT, spec.owner, inst),
+                                  **ub_extra)
+            result = run_evaluation(cfg.strategy, snap, cfg.params, **ub_entry)
             signals_by_eval[ev_key] = [(s.signal_id, s.kind.value, s.instrument, str(s.quantity), str(s.price))
                                        for s in result.signals]
             for s in result.signals:
@@ -438,7 +477,8 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
                                        sort_keys=True, default=str).encode()).hexdigest()
     result = BacktestResult(cfg.run_id, cfg.segment, days, equity, trades, metrics, rejects, digest,
                             run_dir / "trading.db", signals, fills_log, k2_resumes, costs_total, quality_failures,
-                            signals_by_eval)
+                            signals_by_eval,
+                            universe_point_in_time=(cfg.universe_history is not None) if is_ub else None)
     if cfg.write_exports:
         _write_exports(cfg, result, fill_details, daily_split, times)
     return result
@@ -490,6 +530,10 @@ def _write_exports(cfg: BacktestConfig, result: BacktestResult, details: list[bx
         "costs": str(result.costs),
         "metrics": dict(result.metrics),
         "files": {"trades.csv": "UTF-8 BOM, CRLF", "equity.csv": "UTF-8 BOM, CRLF"},
+        **({"universe": {"method": "U-B", "list": spec.universe_list, "point_in_time": result.universe_point_in_time,
+                         "history_dates": len(cfg.universe_history or {}),
+                         "note": "목록 이력으로 판정일 목록 재현" if result.universe_point_in_time
+                         else UB_NO_HISTORY_NOTE}} if spec.universe_method == "U-B" else {}),
     })
 
 
@@ -700,6 +744,7 @@ def render_report(cfg: BacktestConfig, result: BacktestResult, *, settings_hash:
         "",
         "## 한계",
         "- 생존편향: 상장폐지 종목 데이터 확보 여부 미확인(04 §2.1). U-A 고정 목록은 목록 작성 시점 이전 구간이 사후 선택.",
+        *([f"- {UB_NO_HISTORY_NOTE}"] if result.universe_point_in_time is False else []),
         "- 거래 상태(VI·거래정지) 이력 미반영: 그날 봉이 없으면 체결 없음으로만 처리.",
         "- 모의·실전 체결 차이는 PAPER에서 확인.",
         "- 일일 손실(K2)은 판정 시각에 한 번만 평가: 장중 손실로 K2가 걸려 이후 주문이 막히는 경우는 재현하지 않음(DP-6).",

@@ -189,20 +189,24 @@ class MarketDataStore:
                  instruments: list[str], positions: Callable[[str], PositionView | None],
                  pending: Callable[[str], bool], next_evaluation_at: datetime | None = None,
                  history: Callable[[str], dict] | None = None,
-                 recent_days: int = RECENT_ENTRY_DAYS) -> EvaluationSnapshot:
-        """history: 종목 → 저장소 `strategy_history` 원자료. 주면 보유 거래일 수·직전 청산·최근 진입을 채운다."""
+                 recent_days: int = RECENT_ENTRY_DAYS,
+                 listed_at: Callable[[str], datetime | None] | None = None) -> EvaluationSnapshot:
+        """history: 종목 → 저장소 `strategy_history` 원자료. 주면 보유 거래일 수·직전 청산·최근 진입을 채운다.
+        listed_at: [CP-034 D-198] U-B 전략만 — 종목 → 목록 연속 등재 시작 시각(KST). 없으면 None(U-A)."""
         views = []
         cal = self.calendar.is_trading_day if self.calendar is not None else None
         for i in instruments:
             inst = self._data.get(i)
             pos = positions(i)
             extra: dict = {}
+            if listed_at is not None:
+                extra["listed_at"] = listed_at(i)
             if history is not None:
                 h = history_view(history(i), as_of, cal, recent_days)
                 if pos is not None and h.holding_days is not None:
                     pos = replace(pos, holding_days=h.holding_days)
-                extra = {"last_exit_at": h.last_exit_at, "last_exit_reason": h.last_exit_reason,
-                         "entries_recent": h.entries_recent}
+                extra.update({"last_exit_at": h.last_exit_at, "last_exit_reason": h.last_exit_reason,
+                              "entries_recent": h.entries_recent})
             if inst is None or inst.raw is None:
                 views.append(InstrumentView(instrument=i, data_ok=False, position=pos,
                                             has_pending_order=pending(i), **extra))
