@@ -2,7 +2,8 @@
 
 경계 규칙
 - 접속 대상은 테스트넷 REST(`TESTNET_REST`) 또는 시험용 루프백만. 실전·Demo 도메인 상수는 없다(D-098, 승인 구조 3·4 전).
-- 전송은 주입한다(Transport). 이 작업(T-M2-10)에는 실제 HTTP 구현이 없다 — 테스트넷 연결 승인 뒤 T-M2-14.
+- 전송은 주입한다(Transport). 이 패키지에는 실제 HTTP 구현이 없다 — 실제 전송은 broker/rest_transport(T-M2-14, 테스트넷
+  연결 승인 A-096)를 app이 주입하고, 시작 점검에서는 broker/binance/preflight.PreflightGuard가 허용 목록으로 감싼다.
   Transport는 연결 수립 전 실패면 PreSendError, 그 밖의 전송 중 오류(타임아웃·끊김)면 AfterSendError를 올린다.
 - 주문 변경(신규·취소)은 **한 번만** 보낸다. 결과는 4분류(classify.classify_order_reply). 429·418·인증 오류도 재전송 없음.
   · 전송 전 실패: 요청 생성 실패, 예산 보류(418 차단·429 대기·가중치/주문 수 부족), 연결 수립 실패
@@ -29,10 +30,12 @@ from urllib.parse import urlsplit
 
 from trading_system.domain.enums import SubmitOutcome
 
+from .account import AccountInfo, parse_account
 from .classify import Flag, QueryKind, classify_order_reply, classify_query_reply
 from .numbers import BinanceParseError
 from .orders import (
-    NewOrder, OrderBuildError, Params, cancel_params, new_order_params, query_order_params, window_params,
+    NewOrder, OrderBuildError, Params, cancel_params, new_order_params, query_order_params, symbol_params,
+    window_params,
 )
 from .signing import DEFAULT_RECV_WINDOW_MS, Credentials, encode, signed_query
 from .stream import Fill, OrderState, parse_my_trades, parse_order_list, parse_order_response
@@ -45,7 +48,9 @@ QUERY_BACKOFF_S = (1.0, 2.0)
 CLOCK_STREAK_ALERT = 3
 CLOCK_WARN_MS = 500
 _LOOPBACK = {"127.0.0.1", "localhost", "::1"}
-WEIGHT = {"order": 1, "query_order": 4, "my_trades": 20, "all_orders": 20, "time": 1}
+WEIGHT = {"order": 1, "query_order": 4, "my_trades": 20, "all_orders": 20, "time": 1,
+          # T-M2-14 조회 (BN §3·§6·§7): ping 1, exchangeInfo 20, 계좌 20, 미체결(심볼 지정) 6
+          "ping": 1, "exchange_info": 20, "account": 20, "open_orders": 6}
 
 Alert = Callable[[str, str], None]
 
@@ -195,6 +200,29 @@ class BinanceSpotClient:
         _, body = self._query(path, params, WEIGHT["all_orders"], priority)
         return self._parse(parse_order_list, body, path)
 
+    def ping(self) -> None:
+        """연결 확인 `GET /api/v3/ping` (서명 없음, T-M2-14)."""
+        self._query("/api/v3/ping", [], WEIGHT["ping"], CallPriority.RECONCILE, signed=False)
+
+    def exchange_info(self, symbol: str) -> object:
+        """`GET /api/v3/exchangeInfo?symbol=` 응답 본문(서명 없음). 해석은 rules.parse_exchange_info·facts가 한다."""
+        path = "/api/v3/exchangeInfo"
+        _, body = self._query(path, self._symbol(symbol), WEIGHT["exchange_info"], CallPriority.RECONCILE,
+                              signed=False)
+        return body
+
+    def account(self) -> AccountInfo:
+        """`GET /api/v3/account?omitZeroBalances=true` (서명). 계좌 식별값은 읽지 않는다(account.parse_account)."""
+        path = "/api/v3/account"
+        _, body = self._query(path, [("omitZeroBalances", "true")], WEIGHT["account"], CallPriority.RECONCILE)
+        return self._parse(parse_account, body, path)
+
+    def open_orders(self, symbol: str, *, priority: CallPriority = CallPriority.RECONCILE) -> list[OrderState]:
+        """`GET /api/v3/openOrders?symbol=` (서명, 심볼 지정 weight 6)."""
+        path = "/api/v3/openOrders"
+        _, body = self._query(path, self._symbol(symbol), WEIGHT["open_orders"], priority)
+        return self._parse(parse_order_list, body, path)
+
     def server_time_offset_ms(self) -> int:
         """바이낸스 서버 시각 − 로컬 시각(요청 전후 중간값 기준). 0.5초 이상이면 시계 경고 (D-115)."""
         path = "/api/v3/time"
@@ -209,6 +237,13 @@ class BinanceSpotClient:
         return offset
 
     # --- 내부 ---
+    @staticmethod
+    def _symbol(symbol: str) -> Params:
+        try:
+            return symbol_params(symbol)
+        except OrderBuildError as exc:
+            raise BinanceQueryError(f"조회 요청 생성 실패: {exc}", QueryKind.FAILED) from None
+
     def _window(self, symbol: str, start_ms: int, end_ms: int) -> Params:
         try:
             return window_params(symbol, start_ms=start_ms, end_ms=end_ms)
