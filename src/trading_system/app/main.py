@@ -449,11 +449,13 @@ def backtest_main(argv: Sequence[str], root: Path) -> int:
     p.add_argument("--final-check", action="store_true",
                    help="[CP-030 D-163] 최종 확인 실행: config/validation.toml final_from 이후만, 전략 버전당 1회")
     p.add_argument("--confirmed-by", default="", help="--final-check 때 전략 확정 사용자 선언 A-ID")
+    p.add_argument("--limits", default="config/limits.backtest.toml",
+                   help="한도(정책 프로필) 파일, 저장소 기준 경로 [CP-034 D-196]. 보고서에 프로필·승인 여부 표시")
     ns = p.parse_args(argv)
     try:
         mode = Mode.BACKTEST
         gate_settings, _, calendar, ticks, caps = _load_common(root, mode)
-        limits = load_limits_file(root / "config" / "limits.backtest.toml").limits
+        limits = load_limits_file(root / ns.limits).limits
         eval_times = tuple(dtime(int(hh), int(mm)) for hh, mm in
                            (part.strip().split(":") for part in ns.eval_time.split(",")))
         strat, params = load_strategy(StrategyDeploy(ns.strategy, (root / ns.params).resolve(), ()))

@@ -257,6 +257,8 @@ class Gate:
                 entry_symbols.add(r.instrument)
 
         s = ctx.snapshot
+        if lim.profile is not None:
+            s["profile"] = lim.profile   # [CP-034 D-196] 판정 기록 한도 스냅샷에 프로필 이름 (02)
         s.update(base_amount=str(base), notional=str(notional), exposure_add=str(ctx.exposure_add),
                  symbol_after=str(symbol + ctx.exposure_add), symbol_limit=str(base * lim.l2_max_symbol_ratio),
                  total_after=str(total + ctx.exposure_add), total_limit=str(base * lim.l3_max_total_ratio),
@@ -297,8 +299,11 @@ class Gate:
             slots = held_symbols | entry_symbols
             if req.instrument not in slots and len(slots) + 1 > lim.l6_max_positions:
                 raise _Reject(Check.G7, f"L6 보유 종목 수 초과 ({len(slots) + 1} > {lim.l6_max_positions})")
-        if notional > lim.l7_max_order_amount:
-            raise _Reject(Check.G7, f"L7 1회 주문 최대 금액 초과 ({notional} > {lim.l7_max_order_amount})")
+        l7_cap = lim.l7_cap(base)   # [CP-034 D-196] 금액 또는 기준 금액 × 비율
+        if lim.l7_max_order_ratio is not None:
+            s["l7_limit"] = str(l7_cap)
+        if notional > l7_cap:
+            raise _Reject(Check.G7, f"L7 1회 주문 최대 금액 초과 ({notional} > {l7_cap})")
         if info.is_leveraged and lim.l10_leverage_total_ratio is not None:
             cap = base * lim.l10_leverage_total_ratio
             if leveraged + ctx.exposure_add > cap:

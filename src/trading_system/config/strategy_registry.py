@@ -168,6 +168,10 @@ def _limit_problems(sl: StrategyLimits, acct: AccountLimits | None) -> list[str]
             continue
         if acct is None:
             out.append(f"limits.{name}: 계좌 한도 설정이 없어 비교 불가")
+        elif getattr(acct, name) is None:
+            # [CP-034 D-196] 계좌 L7이 비율 형식이면 기준 금액 없이 비교할 수 없다 — 실행 중 게이트가
+            # min(전략 L7, 계좌 L7)을 판정마다 적용한다(01 §2.3.1-8)
+            continue
         elif v > getattr(acct, name):
             out.append(f"limits.{name}: 계좌 한도보다 큼 (E-10)")
     return out

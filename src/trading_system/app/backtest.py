@@ -42,7 +42,7 @@ from trading_system.config.capabilities import CapabilityTable
 from trading_system.config.strategy_registry import StrategyRegistry
 from trading_system.domain.clock import KST, FixedClock
 from trading_system.domain.enums import GateResult, HaltType, IntentState, Mode, Side
-from trading_system.domain.limits import AccountLimits
+from trading_system.domain.limits import AccountLimits, profile_line
 from trading_system.domain.market import (  # price_limits: CP-032 D-174로 게이트와 공유, 이 모듈 이름도 유지
     CashView, DailyRisk, GateSettings, InstrumentInfo, Quote, estimate_cost, price_limits,
 )
@@ -477,6 +477,10 @@ def _write_exports(cfg: BacktestConfig, result: BacktestResult, details: list[bx
         "seed": cfg.seed,
         "instruments": sorted(cfg.data),
         "settings_hash": cfg.account_limits.version_hash(),
+        # [CP-034 D-196, V-271] 프로필이 있는 한도 파일만 — 프로필 없는 기존 실행의 요약은 그대로(V-231)
+        **({} if cfg.account_limits.profile is None else {
+            "limits_profile": cfg.account_limits.profile,
+            "limits_profile_approved_by": cfg.account_limits.approved_by}),
         "digest": result.digest,
         "reproducible": None,
         "reproducible_note": "재현성(D-074)은 두 번 실행해 지문을 비교해야 알 수 있음 — 이 파일에서는 미산출, report.md 참조",
@@ -672,6 +676,7 @@ def render_report(cfg: BacktestConfig, result: BacktestResult, *, settings_hash:
         f"- 데이터: 버전 `{cfg.data_version or '미기재'}`, 기간 {result.days[0]} ~ {result.days[-1]} "
         f"({len(result.days)}거래일), 종목 {len(cfg.data)}개, 품질 실패 종목 {len(result.quality_failures)}개",
         f"- 설정 해시: `{settings_hash}` / 코드 커밋: `{cfg.code_commit or '미기재'}` / 시드: {cfg.seed}",
+        f"- {profile_line(cfg.account_limits.profile, cfg.account_limits.approved_by)}",
         f"- 체결 가정(D-072): 다음 봉 시가, 시장가 슬리피지 {cfg.slippage_ticks}틱(호가 표 없으면 {cfg.slippage_tick}원), "
         f"지정가 관통 체결, 봉 거래량 {cfg.volume_cap:%} 상한, 상한가 매수·하한가 매도 미체결 "
         f"(상·하한가 = 기준가×(1±{cfg.gate_settings.price_limit_ratio})를 호가 단위로 내림·올림)",
@@ -721,6 +726,7 @@ def render_report(cfg: BacktestConfig, result: BacktestResult, *, settings_hash:
         f"- 룩어헤드 교란 검사(D-073): " + ("통과" if lookahead_bad == [] else
                                        ("미실행" if lookahead_bad is None else f"실패 {lookahead_bad}")),
         f"- 결과: **{'백테스트 통과 조건 충족' if passed else '미충족'}** — 상태 전환(초안 → 백테스트 통과)은 사용자 승인 A-ID로",
+        f"- {profile_line(cfg.account_limits.profile, cfg.account_limits.approved_by)}",
         f"- 결과 지문: `{result.digest}`",
     ]
     return "\n".join(lines) + "\n"

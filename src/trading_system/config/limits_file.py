@@ -2,12 +2,15 @@
 
 파일 형식(TOML): 최상위 `account`, `[limits]`, `[time]`. 모든 값은 필수이며 기본값이 없다.
 [CP-034] 선택 키: `[limits] l1_entry_buffer_ratio`(D-195, 문자열 십진수, 0 이상 0.2 미만). 없으면 기존 동작이다.
+[CP-034 D-196] 최상위 `profile`(정책 프로필 이름, 없으면 legacy)·`approved_by`(그 프로필 값의 승인 A-ID, profile 필요).
+L7은 `l7_max_order_amount`(금액) 또는 `l7_max_order_ratio`(기준 금액 대비 비율, 문자열) 중 하나만 — 둘 다·둘 다 없음은 거부.
 값(리스크 수치)은 사용자가 정해 `config/limits.<mode>.toml`에 둔다. 저장소에는 형식 예제만 둔다.
 시간 제약은 시장별로 검사한다(CP-024 D-108): 기본 M1(KRX), M2 설정(`config/m2/limits.<mode>.toml`)은 market="M2".
 """
 
 from __future__ import annotations
 
+import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -28,21 +31,26 @@ LIMIT_SPEC = (
     Field("l4_daily_loss_ratio", "decimal", min=_POSITIVE, min_exclusive=True),
     Field("l5_daily_new_orders", "int", min=1),
     Field("l6_max_positions", "int", min=1),
-    Field("l7_max_order_amount", "decimal", min=_POSITIVE, min_exclusive=True),
     Field("l10_leverage_total_ratio", "decimal_or_none", min=_POSITIVE, min_exclusive=True),
     Field("warn_usage_ratio", "decimal", min=_POSITIVE, min_exclusive=True, max=Decimal("1")),
 )
 # [CP-034] 선택 키 — 없으면 기존 동작(값 None). 문자열 십진수만(정수·float 불가), 범위는 check_limits
 OPTIONAL_LIMIT_SPEC = (
     Field("l1_entry_buffer_ratio", "decimal"),
+    Field("l7_max_order_amount", "decimal", min=_POSITIVE, min_exclusive=True),   # 기존 형식(정수·문자열 허용)
+    Field("l7_max_order_ratio", "decimal", min=_POSITIVE, min_exclusive=True),
 )
+STRING_ONLY = {"l1_entry_buffer_ratio", "l7_max_order_ratio"}   # 새 키는 문자열 십진수만
+L7_KEYS = ("l7_max_order_amount", "l7_max_order_ratio")
+_PROFILE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+_APPROVAL = re.compile(r"A-\d{3,}")
 TIME_SPEC = (
     Field("order_window_start", "time"),
     Field("order_window_end", "time"),
     Field("daily_reference_time", "time"),
     Field("report_time", "time"),
 )
-TOP_KEYS = {"account", "limits", "time"}
+TOP_KEYS = {"account", "limits", "time", "profile", "approved_by"}
 
 
 @dataclass(frozen=True)
@@ -83,7 +91,7 @@ def parse_account_limits(raw: Mapping[str, object], market: str | Market = Marke
                 if f.name not in body:
                     continue
                 raw_value = body[f.name]
-                if not isinstance(raw_value, str):
+                if f.name in STRING_ONLY and not isinstance(raw_value, str):
                     problems.append(f"{section}.{f.name}: 문자열 십진수여야 한다 (예: \"0.03\")")
                     continue
                 value, err = parse_field(f, raw_value)
@@ -91,15 +99,40 @@ def parse_account_limits(raw: Mapping[str, object], market: str | Market = Marke
                     problems.append(f"{section}.{err}")
                 else:
                     values[f.name] = value
+            if section == "limits":
+                present = [k for k in L7_KEYS if k in body]
+                if len(present) == 2:
+                    problems.append("limits.l7_max_order_amount·l7_max_order_ratio: 둘 중 하나만 둔다 (CP-034 D-196)")
+                elif not present:
+                    problems.append("limits.l7_max_order_amount: 필수 값이 없다 (또는 l7_max_order_ratio, 하나만)")
 
+    profile, approved_by = _profile_fields(raw, problems)
     if problems:
         raise ConfigError(problems)
 
-    limits = AccountLimits(**values)  # type: ignore[arg-type]
+    values.setdefault("l7_max_order_amount", None)
+    limits = AccountLimits(**values, profile=profile, approved_by=approved_by)  # type: ignore[arg-type]
     logic_problems, warnings = check_limits(limits, market)
     if logic_problems:
         raise ConfigError(logic_problems)
     return ParsedLimits(account=str(account), limits=limits, warnings=tuple(warnings))
+
+
+def _profile_fields(raw: Mapping[str, object], problems: list[str]) -> tuple[str | None, str | None]:
+    """정책 프로필 이름·승인 A-ID (CP-034 D-196). 둘 다 선택. 승인 A-ID는 프로필 이름이 있을 때만."""
+    profile = raw.get("profile")
+    approved_by = raw.get("approved_by")
+    if profile is not None and (not isinstance(profile, str) or not _PROFILE.fullmatch(profile)):
+        problems.append("profile: 영문 소문자·숫자·_·- 1~32자 (예: paper0)")
+        profile = None
+    if approved_by is not None:
+        if not isinstance(approved_by, str) or not _APPROVAL.fullmatch(approved_by):
+            problems.append("approved_by: 승인 A-ID 형식(A-숫자)")
+            approved_by = None
+        elif "profile" not in raw:
+            problems.append("approved_by: profile 없이 쓸 수 없다 (승인은 프로필 단위)")
+            approved_by = None
+    return profile, approved_by  # type: ignore[return-value]
 
 
 def load_limits_file(path: Path, market: str | Market = Market.M1) -> ParsedLimits:
