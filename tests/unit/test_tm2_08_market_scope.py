@@ -231,7 +231,8 @@ def test_m2_market_parse_and_errors() -> None:
 
 
 def test_repo_m2_config_files_load_with_placeholders_only() -> None:
-    """config/m2/*.paper.toml: A-064 결정값·자리표시자만, 비밀 키 없음. 유니버스는 미결정(D-105) → 빈 목록."""
+    """config/m2/*.paper.toml: A-064 결정값·자리표시자만, 비밀 키 없음. 유니버스는 A-096(2026-10-12) BTCUSDT
+    (시험 변경 사유: D-105 미결정 → 사용자 결정 A-096, 이전 기대값은 빈 목록)."""
     lim = load_limits_file(M2_DIR / "limits.paper.toml", market="M2")
     app = load_app_settings(M2_DIR / "app.paper.toml", Mode.PAPER, ROOT)
     mk = load_m2_market(M2_DIR / "market.paper.toml")
@@ -241,7 +242,7 @@ def test_repo_m2_config_files_load_with_placeholders_only() -> None:
     assert app.paper_connection_approved is False and app.telegram_enabled is False
     assert mk.quote_max_age_seconds == 60 and mk.buy_buffer == mk.sell_buffer == Decimal("0.005")
     assert mk.server_time_warn_ms == 500
-    assert uni.symbols == ()
+    assert uni.symbols == ("BTCUSDT",)
     for f in M2_DIR.glob("*.toml"):
         low = f.read_text(encoding="utf-8").lower()
         for word in ("secret", "api_key", "apikey", "token", "password"):
