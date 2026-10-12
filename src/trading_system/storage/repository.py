@@ -25,6 +25,7 @@ from pathlib import Path
 from trading_system.domain.clock import KST, from_iso, to_iso
 from trading_system.domain.daily_base import DailyBase, DailyBaseCorrupt
 from trading_system.domain.enums import ACTIVE_INTENT_STATES, IntentState, Mode
+from trading_system.domain.minute_bar import MinuteBar
 from trading_system.domain.models import Account
 from trading_system.domain.universe import SUBMIT_CHANNEL, ListEntry, ListVersion
 
@@ -162,6 +163,18 @@ CREATE TRIGGER IF NOT EXISTS universe_list_no_update BEFORE UPDATE ON universe_l
   BEGIN SELECT RAISE(ABORT, 'universe_list_version is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS universe_list_no_delete BEFORE DELETE ON universe_list_version
   BEGIN SELECT RAISE(ABORT, 'universe_list_version is append-only'); END;
+-- 분봉 (CP-032 D-177, T-028): 키 (종목, 봉 길이, 봉 시작 시각 UTC, 수정주가 구분). 추가 전용 표라 스키마 버전을
+-- 올리지 않는다(A-086 ③·A-072 ⑤와 같은 방식) — 기존 저장소도 열 때 생성. 고치거나 지우지 않는다(아래 트리거, 자동 삭제
+-- 없음). 같은 키가 다시 오면 기존 값을 유지한다. 주문 경로·판정은 아직 읽지 않는다(주기 판정 배선은 T-029)
+CREATE TABLE IF NOT EXISTS minute_bar (
+  instrument TEXT NOT NULL, bar_minutes INTEGER NOT NULL, bar_start TEXT NOT NULL, adjusted TEXT NOT NULL,
+  mode TEXT NOT NULL, open TEXT NOT NULL, high TEXT NOT NULL, low TEXT NOT NULL, close TEXT NOT NULL,
+  volume TEXT NOT NULL, source TEXT NOT NULL, recorded_at TEXT NOT NULL,
+  PRIMARY KEY (instrument, bar_minutes, bar_start, adjusted));
+CREATE TRIGGER IF NOT EXISTS minute_bar_no_update BEFORE UPDATE ON minute_bar
+  BEGIN SELECT RAISE(ABORT, 'minute_bar is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS minute_bar_no_delete BEFORE DELETE ON minute_bar
+  BEGIN SELECT RAISE(ABORT, 'minute_bar is append-only'); END;
 -- 조회 인덱스: 데이터 의미 불변이라 스키마 버전을 올리지 않는다 — 기존 저장소도 열 때 생성 (review C절, DP-38)
 CREATE INDEX IF NOT EXISTS ix_intent_state ON intent(state);
 CREATE INDEX IF NOT EXISTS ix_ops_command_status ON ops_command(status);
@@ -471,6 +484,45 @@ class Repository:
         r = self._x("SELECT memos FROM universe_list_version WHERE list_id=? AND version=?",
                     (list_id, version)).fetchone()
         return tuple(json.loads(r["memos"])) if r else ()
+
+    # --- 분봉 (CP-032 D-177, T-028) ---------------------------------------------
+    def insert_minute_bars(self, bars: Sequence[MinuteBar], source: str, at: datetime) -> tuple[int, int, int]:
+        """분봉을 추가한다. (새로 넣음, 이미 있고 같음, 이미 있고 값이 다름 — 기존 값 유지). 저장 단위 안에서 부른다."""
+        if not self.in_transaction:
+            raise ValueError("insert_minute_bars는 저장 단위(tx) 안에서")
+        inserted = same = differing = 0
+        for b in bars:
+            key = (b.instrument, b.minutes, to_iso(b.start), b.adjusted)
+            values = (str(b.open), str(b.high), str(b.low), str(b.close), str(b.volume))
+            cur = self._x("INSERT OR IGNORE INTO minute_bar(instrument, bar_minutes, bar_start, adjusted, mode, open, "
+                          "high, low, close, volume, source, recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                          (*key, self.mode.value, *values, source, to_iso(at)))
+            if cur.rowcount == 1:
+                inserted += 1
+                continue
+            old = self._x("SELECT open, high, low, close, volume FROM minute_bar WHERE instrument=? AND bar_minutes=? "
+                          "AND bar_start=? AND adjusted=?", key).fetchone()
+            if tuple(Decimal(x) for x in old) == tuple(Decimal(x) for x in values):
+                same += 1
+            else:
+                differing += 1
+        return inserted, same, differing
+
+    def minute_bars(self, instrument: str, minutes: int, adjusted: str = "1", *, start: datetime | None = None,
+                    end: datetime | None = None) -> list[MinuteBar]:
+        """봉 시작 시각 오름차순. start ≤ 봉 시작 < end (주면)."""
+        sql = "SELECT * FROM minute_bar WHERE instrument=? AND bar_minutes=? AND adjusted=?"
+        params: list[object] = [instrument, minutes, adjusted]
+        if start is not None:
+            sql += " AND bar_start >= ?"
+            params.append(to_iso(start))
+        if end is not None:
+            sql += " AND bar_start < ?"
+            params.append(to_iso(end))
+        rows = self._x(sql + " ORDER BY bar_start", tuple(params))
+        return [MinuteBar(r["instrument"], int(r["bar_minutes"]), from_iso(r["bar_start"]), Decimal(r["open"]),
+                          Decimal(r["high"]), Decimal(r["low"]), Decimal(r["close"]), Decimal(r["volume"]),
+                          r["adjusted"]) for r in rows]
 
     # --- 계좌 ---------------------------------------------------------------
     def register_account(self, account: Account) -> None:
