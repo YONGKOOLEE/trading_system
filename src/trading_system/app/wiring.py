@@ -14,7 +14,7 @@ from datetime import time, timedelta
 from pathlib import Path
 
 from trading_system.broker.base import BrokerAdapter
-from trading_system.config.app_file import StrategyDeploy
+from trading_system.config.app_file import StrategyDeploy, check_strategy_slots
 from trading_system.config.capabilities import CapabilityTable, uses_unfilled_cancel
 from trading_system.config.errors import ConfigError
 from trading_system.config.strategy_params import load_params_file, validate_params
@@ -64,6 +64,7 @@ class StrategyInput:
     params: dict[str, object]
     eval_times: tuple[time, ...]
     verification_approval: str | None = None   # PAPER-0 검증 전략 승인 A-ID (DP-24 a)
+    l6_slots: int | None = None                # [CP-034 D-197] 전략별 보유 슬롯. None = 슬롯 검사 없음
 
 
 def build_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: BrokerAdapter, store: MarketDataStore,
@@ -74,6 +75,9 @@ def build_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: BrokerAd
                  requery_wait: Callable[[], None] | None = None) -> Engine:
     if mode not in BROKER_ENV:
         raise ConfigError(f"{mode.value}는 이 구현에서 실행할 수 없다 (실전 경로 없음)")
+    check_strategy_slots(strategies, account_limits.l6_max_positions)   # [CP-034 D-197] 시작 검사 (V-272)
+    slot_table = None if all(si.l6_slots is None for si in strategies) else \
+        {si.strategy.spec.owner: si.l6_slots for si in strategies if si.l6_slots is not None}
     existing = repo.account(account)
     if existing is None:
         repo.register_account(Account(account, mode, BROKER_ENV[mode]))
@@ -103,7 +107,8 @@ def build_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: BrokerAd
     # 조회 이후 매수 체결은 따로 차감하므로 한도 안의 낡음은 외부 거래분만 남는다
     gate_account = ConservativeCashFacts(acct, tracker, clock, max(reconcile_every * 3, timedelta(minutes=10)))
     registry = StrategyRegistry(repo, clock, None)
-    gate = Gate(repo, clock, GateInputs(settings, store, gate_account, registry, clock_health),
+    gate = Gate(repo, clock, GateInputs(settings, store, gate_account, registry, clock_health,
+                                        strategy_slots=slot_table),
                 GatePolicy.from_settings(gate_settings))
     executor = Executor(repo, broker, clock, kill_file, alerts=alerts)
     halts = HaltManager(repo, gate, executor, clock, alerts=alerts,

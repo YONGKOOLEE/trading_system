@@ -29,7 +29,7 @@ from datetime import date, time as dtime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from trading_system.config.app_file import AppSettings, load_app_settings
+from trading_system.config.app_file import AppSettings, check_strategy_slots, load_app_settings
 from trading_system.config.capabilities import load_capabilities
 from trading_system.config.errors import ConfigError
 from trading_system.config.market_file import load_market_settings, parse_alert_settings
@@ -180,7 +180,7 @@ def _strategies(app: AppSettings) -> list[StrategyInput]:
         problems = check(params, dep.eval_times) if check is not None else []
         if problems:
             raise ConfigError(f"전략 배포 설정 오류 {strat.spec.strategy_id} v{strat.spec.version}: " + "; ".join(problems))
-        out.append(StrategyInput(strat, params, dep.eval_times, dep.verification_approval))
+        out.append(StrategyInput(strat, params, dep.eval_times, dep.verification_approval, dep.l6_slots))
     return out
 
 
@@ -224,6 +224,7 @@ def run_main(root: Path, environ: dict[str, str] | None = None, max_seconds: flo
         app = load_app_settings(root / "config" / f"app.{mode.value.lower()}.toml", mode, root)
         if app.account != startup.account:
             raise ConfigError("배포 설정의 계좌 별칭과 한도 파일의 계좌가 다르다")
+        check_strategy_slots(app.strategies, startup.limits.l6_max_positions)   # [CP-034 D-197] 브로커 연결 전
         if app.market != Market.M1.value:   # M1 설정 위치(config/)에 다른 시장 설정 (D-097)
             raise MarketScopeError(f"config/app.{mode.value.lower()}.toml의 market이 M1이 아니다 ({app.market}) — "
                                    "M2는 config/m2/와 --market M2")
@@ -449,11 +450,13 @@ def backtest_main(argv: Sequence[str], root: Path) -> int:
     p.add_argument("--final-check", action="store_true",
                    help="[CP-030 D-163] 최종 확인 실행: config/validation.toml final_from 이후만, 전략 버전당 1회")
     p.add_argument("--confirmed-by", default="", help="--final-check 때 전략 확정 사용자 선언 A-ID")
+    p.add_argument("--limits", default="config/limits.backtest.toml",
+                   help="한도(정책 프로필) 파일, 저장소 기준 경로 [CP-034 D-196]. 보고서에 프로필·승인 여부 표시")
     ns = p.parse_args(argv)
     try:
         mode = Mode.BACKTEST
         gate_settings, _, calendar, ticks, caps = _load_common(root, mode)
-        limits = load_limits_file(root / "config" / "limits.backtest.toml").limits
+        limits = load_limits_file(root / ns.limits).limits
         eval_times = tuple(dtime(int(hh), int(mm)) for hh, mm in
                            (part.strip().split(":") for part in ns.eval_time.split(",")))
         strat, params = load_strategy(StrategyDeploy(ns.strategy, (root / ns.params).resolve(), ()))

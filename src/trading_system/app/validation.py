@@ -42,6 +42,7 @@ from trading_system.app.backtest import (
 )
 from trading_system.domain.clock import KST
 from trading_system.domain.enums import OrderType, RequestType
+from trading_system.domain.limits import profile_label, profile_line
 from trading_system.domain.market import CostRates, estimate_cost
 from trading_system.domain.models import Signal
 from trading_system.domain.strategy import EvaluationSnapshot, RuleSpec, StrategySpec
@@ -672,6 +673,9 @@ def run_validation(inputs: ValidationInputs) -> dict[str, object]:
             "universe_point_in_time": inputs.universe_point_in_time, "universe_note": inputs.universe_note,
             "data_version": tpl.data_version, "code_commit": tpl.code_commit,
             "settings_hash": tpl.account_limits.version_hash(), "tick_table": tpl.ticks is not None,
+            # [CP-034 D-196, V-271] 프로필 이름(없으면 legacy)·승인 A-ID(없으면 None = 미승인 한도 가정)
+            "limits_profile": profile_label(tpl.account_limits),
+            "limits_profile_approved_by": tpl.account_limits.approved_by,
             "price_limit_ratio": str(tpl.gate_settings.price_limit_ratio),
             "cost_rates": {"commission_rate": str(tpl.gate_settings.cost_rates.commission_rate),
                            "sell_tax_rate": str(tpl.gate_settings.cost_rates.sell_tax_rate)},
@@ -887,8 +891,9 @@ def render_validation(o: dict[str, object]) -> str:
           f"- 결과 묶음: `{o['out_dir']}` (창별 trades.csv·equity.csv·summary.json, verdict.json)",
           f"- 명령: `{c['command'] or '(API 호출)'}`",  # type: ignore[index]
           ""]
+    prof = f"- {profile_line(c.get('limits_profile'), c.get('limits_profile_approved_by'))}"  # type: ignore[union-attr]
     if not o.get("windows"):
-        L += ["## 판정표", "", f"- 판정: **{v['verdict']}**", *[f"- {x}" for x in v["reasons"]], ""]  # type: ignore[index]
+        L += ["## 판정표", "", f"- 판정: **{v['verdict']}**", *[f"- {x}" for x in v["reasons"]], prof, ""]  # type: ignore[index]
         return "\n".join(L) + "\n"
     pb, pd = o["pooled"]["base"], o["pooled"]["slip2x"]  # type: ignore[index]
     pr = o["pooled"]["random"]  # type: ignore[index]
@@ -916,6 +921,7 @@ def render_validation(o: dict[str, object]) -> str:
           f"{'해당' if v['banner'] else '해당 없음'} |",  # type: ignore[index]
           f"| C-8 | 최종 확인 | {c['final_from']} 이후는 전략 확정 뒤 1회 | 이 실행에서 미사용 | 해당 없음 |", "",  # type: ignore[index]
           f"- **판정: {v['verdict']}**", *[f"- 사유: {x}" for x in v["reasons"]],  # type: ignore[index]
+          prof,
           f"- 손실 창 수(기본 슬리피지): {pb['loss_windows']} / {len(o['windows'])}",  # type: ignore[arg-type]
           "", "## 실행 조건", "",
           f"- 창(D-162): " + ", ".join(f"k={w['k']} 학습 {w['train'][0]}~{w['train'][1]} / 검증 {w['validation'][0]}~"  # type: ignore[index]
@@ -931,6 +937,7 @@ def render_validation(o: dict[str, object]) -> str:
           f"- 유니버스: {c['universe_method']} {len(c['universe'])}종목 "  # type: ignore[index, arg-type]
           f"({'판정 시점 목록 선언' if c['universe_point_in_time'] else '사후 선택 목록으로 취급'})",  # type: ignore[index]
           f"- 데이터 `{c['data_version']}` / 설정 해시 `{c['settings_hash']}` / 코드 `{c['code_commit']}`",  # type: ignore[index]
+          prof,
           f"- 최종 확인 구간(D-163): {c['final_from']} 이후 — 사용 안 함, 창 끝 이후 일봉은 실행 전에 잘라냄",  # type: ignore[index]
           "", "## 창별 결과 (기본 슬리피지, 비용 반영 후 — 기간별 일관성 §2.6)", "",
           "| 창 | 검증 구간 | 거래 | 기대값(원) | 총수익률 | MDD | 미청산 | 평균·최대 투자 비중 | 2배: 거래·기대값 | 단순 보유 "

@@ -65,6 +65,16 @@ def _sign(old: object, new: object, *, larger_is_looser: bool) -> int:
     return 1 if ((new > old) == larger_is_looser) else -1  # type: ignore[operator]
 
 
+def _l7_sign(old: AccountLimits, new: AccountLimits) -> int:
+    """L7 변경 방향 [CP-034 D-196]. 같은 형식이면 값 비교. 금액↔비율 형식 전환은 기준 금액 없이 비교할 수 없으므로
+    완화로 본다(+1) — 다음 일일 기준 시각부터 적용(보수). 프로필 이름·승인 A-ID는 위험 값이 아니라 방향에 넣지 않는다."""
+    if old.l7_max_order_amount is not None and new.l7_max_order_amount is not None:
+        return _sign(old.l7_max_order_amount, new.l7_max_order_amount, larger_is_looser=True)
+    if old.l7_max_order_ratio is not None and new.l7_max_order_ratio is not None:
+        return _sign(old.l7_max_order_ratio, new.l7_max_order_ratio, larger_is_looser=True)
+    return 1
+
+
 def classify(old: AccountLimits, new: AccountLimits) -> ChangeDirection:
     """위험과 관련된 값의 변경 방향. 기준 시각·보고 시각은 비교하지 않는다."""
     signs = [
@@ -74,13 +84,17 @@ def classify(old: AccountLimits, new: AccountLimits) -> ChangeDirection:
         _sign(old.l4_daily_loss_ratio, new.l4_daily_loss_ratio, larger_is_looser=True),
         _sign(old.l5_daily_new_orders, new.l5_daily_new_orders, larger_is_looser=True),
         _sign(old.l6_max_positions, new.l6_max_positions, larger_is_looser=True),
-        _sign(old.l7_max_order_amount, new.l7_max_order_amount, larger_is_looser=True),
+        _l7_sign(old, new),
         _sign(_INFINITY if old.l10_leverage_total_ratio is None else old.l10_leverage_total_ratio,
               _INFINITY if new.l10_leverage_total_ratio is None else new.l10_leverage_total_ratio,
               larger_is_looser=True),
         _sign(old.warn_usage_ratio, new.warn_usage_ratio, larger_is_looser=True),  # 경고가 늦어지면 완화
         _sign(old.order_window_start, new.order_window_start, larger_is_looser=False),  # 더 일찍 열면 완화
         _sign(old.order_window_end, new.order_window_end, larger_is_looser=True),       # 더 늦게 닫으면 완화
+        # [CP-034 D-195] L1 여유: 없음(상한가 기준) = 가장 엄격. 여유가 작을수록 L1 위험 추정이 작아져 완화
+        _sign(_INFINITY if old.l1_entry_buffer_ratio is None else old.l1_entry_buffer_ratio,
+              _INFINITY if new.l1_entry_buffer_ratio is None else new.l1_entry_buffer_ratio,
+              larger_is_looser=False),
     ]
     loosened, tightened = signs.count(1), signs.count(-1)
     if loosened and tightened:
@@ -142,7 +156,9 @@ class SettingsManager:
                 ref_used = effective.daily_reference_time.strftime("%H:%M")
                 effective_at = self._market_time.next_after(now, effective.daily_reference_time) if deferred else now
                 old_c, new_c = effective.to_canonical(), proposed.to_canonical()
-                changes = {k: [old_c[k], new_c[k]] for k in new_c if old_c[k] != new_c[k]}
+                # [CP-034] 선택 키(여유·프로필 등)는 한쪽에만 있을 수 있다 — 없는 쪽은 None으로 기록
+                changes = {k: [old_c.get(k), new_c.get(k)] for k in sorted(set(old_c) | set(new_c))
+                           if old_c.get(k) != new_c.get(k)}
                 previous_hash = self.hash_of(effective)
 
             self._repo.insert_settings_version({

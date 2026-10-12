@@ -24,7 +24,14 @@ RATIO_FIELDS = (
     "l1_max_loss_ratio", "l2_max_symbol_ratio", "l3_max_total_ratio", "l4_daily_loss_ratio",
 )
 DECIMAL_FIELDS = RATIO_FIELDS + ("l7_max_order_amount", "warn_usage_ratio")
+REQUIRED_DECIMAL_FIELDS = RATIO_FIELDS + ("warn_usage_ratio",)   # [CP-034 D-196] L7은 금액 또는 비율 중 하나
 TIME_FIELDS = ("order_window_start", "order_window_end", "daily_reference_time", "report_time")
+# [CP-034] 선택 값. 없으면(None) 기존 동작이며 표준 형태·해시에 넣지 않는다(기존 설정 버전 해시 불변).
+OPTIONAL_DECIMAL_FIELDS = ("l1_entry_buffer_ratio", "l7_max_order_amount", "l7_max_order_ratio")
+OPTIONAL_TEXT_FIELDS = ("profile", "approved_by")
+L1_BUFFER_MAX = Decimal("0.2")   # 여유 상한(미포함) — 리드 지시 0 ≤ 여유 < 0.2
+LEGACY_PROFILE = "legacy"        # [CP-034 D-196] 한도 파일에 profile이 없을 때의 표시 이름 (기존 동작)
+UNAPPROVED_LABEL = "미승인 한도 가정"   # approved_by(A-ID)가 없을 때 — 공식 BACKTEST_PASSED 근거로 쓰지 않음
 
 
 def _decimal_text(value: Decimal) -> str:
@@ -39,17 +46,29 @@ class AccountLimits:
     l4_daily_loss_ratio: Decimal     # L4 일일 손실
     l5_daily_new_orders: int         # L5 일일 신규 주문 수
     l6_max_positions: int            # L6 보유 종목 수
-    l7_max_order_amount: Decimal     # L7 1회 주문 최대 금액 (KRW)
+    l7_max_order_amount: Decimal | None  # L7 1회 주문 최대 금액 (계좌 통화). None = 비율 형식 [CP-034 D-196]
     l10_leverage_total_ratio: Decimal | None  # L10 레버리지 상품 총 노출. None = 별도 한도 없음
     warn_usage_ratio: Decimal        # 한도 사용률 경고 기준
     order_window_start: time         # L8 위험 확대 주문 허용 시작 (시장 현지 시각)
     order_window_end: time           # L8 종료
     daily_reference_time: time       # 일일 기준 시각
     report_time: time                # 일일 보고 시각
+    # [CP-034 D-195] L1 시장가 매수 진입 기준가 여유: 신호 기준가 × (1 + 여유). None = 기존 계산(예약 가격 = 상한가)
+    l1_entry_buffer_ratio: Decimal | None = None
+    # [CP-034 D-196] L7 비율 형식: 기준 금액 × 비율 (금액과 둘 중 하나만)
+    l7_max_order_ratio: Decimal | None = None
+    # [CP-034 D-196] 정책 프로필 이름(None = legacy)과 그 프로필 값의 사용자 승인 A-ID(None = 미승인 한도 가정)
+    profile: str | None = None
+    approved_by: str | None = None
 
     def __post_init__(self) -> None:
-        for name in DECIMAL_FIELDS:
+        for name in REQUIRED_DECIMAL_FIELDS:
             _require_decimal(name, getattr(self, name))
+        if (self.l7_max_order_amount is None) == (self.l7_max_order_ratio is None):
+            raise ValueError("L7은 l7_max_order_amount와 l7_max_order_ratio 중 하나만 둔다 (CP-034 D-196)")
+        for name in OPTIONAL_DECIMAL_FIELDS:
+            if getattr(self, name) is not None:
+                _require_decimal(name, getattr(self, name))
         if self.l10_leverage_total_ratio is not None:
             _require_decimal("l10_leverage_total_ratio", self.l10_leverage_total_ratio)
         for name in ("l5_daily_new_orders", "l6_max_positions"):
@@ -65,7 +84,7 @@ class AccountLimits:
     def to_canonical(self) -> dict[str, str | int | None]:
         """해시·저장·감사용 표준 형태. 표기 차이(0.20 / 0.2)는 같은 값으로 본다."""
         out: dict[str, str | int | None] = {}
-        for name in DECIMAL_FIELDS:
+        for name in REQUIRED_DECIMAL_FIELDS:
             out[name] = _decimal_text(getattr(self, name))
         out["l5_daily_new_orders"] = self.l5_daily_new_orders
         out["l6_max_positions"] = self.l6_max_positions
@@ -73,6 +92,13 @@ class AccountLimits:
         out["l10_leverage_total_ratio"] = None if l10 is None else _decimal_text(l10)
         for name in TIME_FIELDS:
             out[name] = getattr(self, name).strftime("%H:%M")
+        for name in OPTIONAL_DECIMAL_FIELDS:
+            v = getattr(self, name)
+            if v is not None:
+                out[name] = _decimal_text(v)
+        for name in OPTIONAL_TEXT_FIELDS:
+            if getattr(self, name) is not None:
+                out[name] = getattr(self, name)
         return dict(sorted(out.items()))
 
     @classmethod
@@ -82,6 +108,7 @@ class AccountLimits:
             return time(int(hh), int(mm))
 
         l10 = data["l10_leverage_total_ratio"]
+        opt = {name: Decimal(str(data[name])) for name in OPTIONAL_DECIMAL_FIELDS if data.get(name) is not None}
         return cls(
             l1_max_loss_ratio=Decimal(str(data["l1_max_loss_ratio"])),
             l2_max_symbol_ratio=Decimal(str(data["l2_max_symbol_ratio"])),
@@ -89,14 +116,41 @@ class AccountLimits:
             l4_daily_loss_ratio=Decimal(str(data["l4_daily_loss_ratio"])),
             l5_daily_new_orders=int(data["l5_daily_new_orders"]),  # type: ignore[arg-type]
             l6_max_positions=int(data["l6_max_positions"]),  # type: ignore[arg-type]
-            l7_max_order_amount=Decimal(str(data["l7_max_order_amount"])),
             l10_leverage_total_ratio=None if l10 is None else Decimal(str(l10)),
             warn_usage_ratio=Decimal(str(data["warn_usage_ratio"])),
             order_window_start=t("order_window_start"),
             order_window_end=t("order_window_end"),
             daily_reference_time=t("daily_reference_time"),
             report_time=t("report_time"),
+            l7_max_order_amount=opt.pop("l7_max_order_amount", None),  # type: ignore[arg-type]
+            **opt,  # type: ignore[arg-type]
+            **{name: str(data[name]) for name in OPTIONAL_TEXT_FIELDS if data.get(name) is not None},
         )
+
+    def l7_cap(self, base_amount: Decimal) -> Decimal:
+        """L7 1회 주문 최대 금액: 금액 형식이면 그 값, 비율 형식이면 기준 금액 × 비율 (CP-034 D-196)."""
+        if self.l7_max_order_amount is not None:
+            return self.l7_max_order_amount
+        assert self.l7_max_order_ratio is not None   # __post_init__이 둘 중 하나를 보장
+        return base_amount * self.l7_max_order_ratio
+
+
+def profile_label(lim: AccountLimits) -> str:
+    """판정표·결과 표시용 프로필 이름 (CP-034 D-196). 없으면 legacy."""
+    return lim.profile or LEGACY_PROFILE
+
+
+def profile_approval_label(lim: AccountLimits) -> str:
+    """승인된 프로필이면 '승인 A-xxx', 아니면 '미승인 한도 가정' (CP-034 D-196, V-271)."""
+    return f"승인 {lim.approved_by}" if lim.approved_by else UNAPPROVED_LABEL
+
+
+def profile_line(profile: str | None, approved_by: str | None) -> str:
+    """결과 보고서·판정표 한 줄 표시 (V-271). 미승인이면 공식 BACKTEST_PASSED 근거가 아님을 함께 적는다."""
+    label = profile or LEGACY_PROFILE
+    if approved_by:
+        return f"한도 프로필: {label} (승인 {approved_by}, CP-034 D-196)"
+    return f"한도 프로필: {label} ({UNAPPROVED_LABEL} — 공식 BACKTEST_PASSED 근거로 쓰지 않음, CP-034 D-196)"
 
 
 def _require_decimal(name: str, value: object) -> None:
@@ -134,8 +188,13 @@ def check_limits(lim: AccountLimits, market: str | Market = Market.M1) -> tuple[
     for name in ("l5_daily_new_orders", "l6_max_positions"):
         if getattr(lim, name) < 1:
             problems.append(f"{name}: 1 이상이어야 한다")
-    if lim.l7_max_order_amount <= 0:
+    if lim.l7_max_order_amount is not None and lim.l7_max_order_amount <= 0:
         problems.append("l7_max_order_amount: 0보다 커야 한다")
+    if lim.l7_max_order_ratio is not None and lim.l7_max_order_ratio <= 0:
+        problems.append("l7_max_order_ratio: 0보다 커야 한다")
+    buf = lim.l1_entry_buffer_ratio
+    if buf is not None and not (0 <= buf < L1_BUFFER_MAX):
+        problems.append(f"l1_entry_buffer_ratio: 0 이상 {L1_BUFFER_MAX} 미만이어야 한다 (CP-034 D-195)")
 
     if market is Market.M2:
         problems.extend(_utc_247_time_problems(lim))
@@ -149,6 +208,8 @@ def check_limits(lim: AccountLimits, market: str | Market = Market.M1) -> tuple[
             warnings.append(f"{name}: 100% 초과")
     if lim.l10_leverage_total_ratio is not None and lim.l10_leverage_total_ratio > 1:
         warnings.append("l10_leverage_total_ratio: 100% 초과")
+    if lim.l7_max_order_ratio is not None and lim.l7_max_order_ratio > 1:
+        warnings.append("l7_max_order_ratio: 100% 초과")
     return problems, warnings
 
 

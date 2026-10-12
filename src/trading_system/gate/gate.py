@@ -12,6 +12,7 @@ G2는 정지 유형별 허용표(01 §2.6, domain/halts.py)를 따른다. 계좌
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -145,8 +146,10 @@ class Gate:
         if req.stop_price is not None:
             if rt not in (RequestType.ENTRY, RequestType.INCREASE):
                 raise _Reject(Check.G3, "손절가는 진입·증액 신호에만 쓸 수 있음 (00 §2.5)")
-            if req.stop_price <= 0 or req.stop_price >= req.price:
-                raise _Reject(Check.G3, f"손절가 형식 오류: 진입 기준가({req.price})보다 낮은 양수여야 함")
+            # [CP-034 D-195] 여유가 있으면 경계 = L1 진입 기준가(시장가: 신호 가격 × (1 + 여유), 지정가: 주문가)
+            ceiling = self._l1_entry_reference(ctx) or req.price
+            if req.stop_price <= 0 or req.stop_price >= ceiling:
+                raise _Reject(Check.G3, f"손절가 형식 오류: 진입 기준가({ceiling})보다 낮은 양수여야 함")
 
     def _g4_duplicate(self, ctx: _Ctx) -> None:
         req = ctx.req
@@ -255,15 +258,23 @@ class Gate:
                 entry_symbols.add(r.instrument)
 
         s = ctx.snapshot
+        if lim.profile is not None:
+            s["profile"] = lim.profile   # [CP-034 D-196] 판정 기록 한도 스냅샷에 프로필 이름 (02)
         s.update(base_amount=str(base), notional=str(notional), exposure_add=str(ctx.exposure_add),
                  symbol_after=str(symbol + ctx.exposure_add), symbol_limit=str(base * lim.l2_max_symbol_ratio),
                  total_after=str(total + ctx.exposure_add), total_limit=str(base * lim.l3_max_total_ratio),
                  loss_ratio=str(daily.loss_ratio))
 
         # L1 1회 최대 손실: 손절가가 있으면 (진입 기준가 − 손절가) × 수량 × |배수|, 없으면 주문 금액 전체 × |배수|
-        # 진입 기준가 = 예약 가격(지정가는 주문가, 시장가는 상한가) (01 L1·D-020 v0.5)
+        # 진입 기준가 = 예약 가격(지정가는 주문가, 시장가는 상한가) (01 L1·D-020 v0.5).
+        # [CP-034 D-195] 한도에 여유(l1_entry_buffer_ratio)가 있으면 시장가는 신호 가격 × (1 + 여유), 지정가는 주문가.
+        # 손절가가 없으면 D-020 그대로. G8·L2·L3·L7·예약은 위의 예약 가격(상한가) 기준 그대로 (03 §6.2)
         if req.stop_price is not None:
-            order_risk = max(_ZERO, reserve_price - req.stop_price) * req.quantity * info.exposure_multiplier
+            l1_ref = self._l1_entry_reference(ctx)
+            if l1_ref is not None:
+                s["l1_entry_ref"] = str(l1_ref)
+            entry_ref = reserve_price if l1_ref is None else l1_ref
+            order_risk = max(_ZERO, entry_ref - req.stop_price) * req.quantity * info.exposure_multiplier
         else:
             order_risk = exposure_new
         s["order_risk"] = str(order_risk)
@@ -289,8 +300,13 @@ class Gate:
             slots = held_symbols | entry_symbols
             if req.instrument not in slots and len(slots) + 1 > lim.l6_max_positions:
                 raise _Reject(Check.G7, f"L6 보유 종목 수 초과 ({len(slots) + 1} > {lim.l6_max_positions})")
-        if notional > lim.l7_max_order_amount:
-            raise _Reject(Check.G7, f"L7 1회 주문 최대 금액 초과 ({notional} > {lim.l7_max_order_amount})")
+            if self._in.strategy_slots is not None:
+                self._strategy_slots(ctx, self._in.strategy_slots)
+        l7_cap = lim.l7_cap(base)   # [CP-034 D-196] 금액 또는 기준 금액 × 비율
+        if lim.l7_max_order_ratio is not None:
+            s["l7_limit"] = str(l7_cap)
+        if notional > l7_cap:
+            raise _Reject(Check.G7, f"L7 1회 주문 최대 금액 초과 ({notional} > {l7_cap})")
         if info.is_leveraged and lim.l10_leverage_total_ratio is not None:
             cap = base * lim.l10_leverage_total_ratio
             if leveraged + ctx.exposure_add > cap:
@@ -315,6 +331,30 @@ class Gate:
             owned = self._owned_exposure(ctx, req.owner or "")
             if owned + ctx.exposure_add > base * sl.l3_max_total_ratio:
                 raise _Reject(Check.G7, f"전략 L3 초과 ({owned + ctx.exposure_add} > {base * sl.l3_max_total_ratio})")
+
+    def _strategy_slots(self, ctx: _Ctx, table: Mapping[str, int]) -> None:
+        """전략 슬롯 (CP-034 D-197): 그 전략의 (소유 보유 종목 + 진입 예약 종목, R-28) + 1 > l6_slots → 거부.
+
+        계좌 L6은 이미 통과. 표에 없는 전략은 슬롯 0 — 배정되지 않은 슬롯은 아무 전략도 쓰지 않는다(A-092 Q-7).
+        판정 직렬화·예약으로 동시 신호에도 전략 단위 합산이 성립한다(01 D-022, V-04).
+        """
+        req = ctx.req
+        owner = req.owner or ""
+        cap = table.get(owner)
+        if cap is None:
+            raise _Reject(Check.G7, f"전략 슬롯 미배정 ({owner}) — 배정되지 않은 슬롯은 쓰지 않음 (D-197)")
+        used: set[str] = set()
+        for inst, pos in self._repo.positions(req.account).items():
+            own = self._repo.active_ownership(req.account, inst)
+            if pos.quantity > 0 and own is not None and own.owner == owner:
+                used.add(inst)
+        for r in self._repo.active_reservations(req.account):
+            intent = self._repo.intent(r.intent_id)
+            if intent.owner == owner and intent.request_type == RequestType.ENTRY.value:
+                used.add(r.instrument)
+        ctx.snapshot.update(strategy_slots=str(cap), strategy_slots_used=str(len(used)))
+        if req.instrument not in used and len(used) + 1 > cap:
+            raise _Reject(Check.G7, f"전략 슬롯 초과 ({owner}: {len(used) + 1} > {cap})")
 
     def _owned_exposure(self, ctx: _Ctx, owner: str) -> Decimal:
         """이 전략이 소유한 종목의 보유 노출 + 이 전략 의도의 활성 예약."""
@@ -531,6 +571,16 @@ class Gate:
     def _valuation_price(self, instrument: str, ctx: _Ctx) -> Decimal:
         """보유 평가 가격: 최근 체결가, 신선하지 않으면 평가 불능 → 거부 (01 §2.4)."""
         return self._fresh_quote(instrument, ctx).price
+
+    def _l1_entry_reference(self, ctx: _Ctx) -> Decimal | None:
+        """[CP-034 D-195] L1 진입 기준가. 한도에 여유가 없으면 None(기존 계산 = 예약 가격). 가격을 고치지 않는다."""
+        buf = ctx.limits.l1_entry_buffer_ratio if ctx.limits is not None else None
+        if buf is None:
+            return None
+        req = ctx.req
+        if req.order_type is OrderType.LIMIT:
+            return req.price          # 체결가 ≤ 주문가 — 여유 없음
+        return req.price * (1 + buf)  # 신호 기준가(판정 시점 시세, 00 §2.5) × (1 + 여유)
 
     def _reserve_price(self, ctx: _Ctx) -> Decimal:
         """예약 가격: 지정가는 주문가, 시장가는 상한가(없으면 최근가 × (1 + 가격제한폭)) (03 §6.2)."""
