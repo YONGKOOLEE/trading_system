@@ -25,6 +25,9 @@ from trading_system.domain.strategy import (
     ALLOWED_TRANSITIONS, MARKETS, RULE_KINDS, SIZING_METHODS, UNIVERSE_METHODS, StopReason, StrategyLimits,
     StrategySpec, StrategyState,
 )
+from trading_system.domain.allocation import (
+    ALLOCATION_KIND, ALLOCATION_RULE_KIND, INDEX_CAPABILITY, SPEC_KINDS, STRATEGY_KIND,
+)
 from trading_system.domain.universe import valid_list_id
 from trading_system.storage.repository import Repository
 
@@ -92,7 +95,16 @@ def validate_spec(spec: StrategySpec, caps: CapabilityTable, account_limits: Acc
             p.append(f"{name}: 필수 항목 누락 (E-8)")
     if not spec.markets or not set(spec.markets) <= MARKETS:
         p.append("markets: M1/M2/M3 중 하나 이상")
-    if spec.universe_method not in UNIVERSE_METHODS:
+    alloc = spec.kind == ALLOCATION_KIND
+    if spec.kind not in SPEC_KINDS:
+        p.append(f"kind: {STRATEGY_KIND}|{ALLOCATION_KIND} (CP-034 D-199)")
+    if alloc:
+        p.extend(_allocation_problems(spec))
+    elif spec.allocation_targets:
+        p.append("allocation_targets: 배분 규칙(kind ALLOCATION)만 쓴다 (D-199)")
+    if alloc:
+        pass   # 배분 규칙은 종목·크기·신호 기한이 없다 (출력 = 지정 전략 신규 진입 허용 여부)
+    elif spec.universe_method not in UNIVERSE_METHODS:
         p.append("universe_method: U-A/U-B/U-C")
     elif spec.universe_method == "U-A" and not spec.universe:
         p.append("universe: 종목 목록(U-A) 필요")
@@ -103,9 +115,9 @@ def validate_spec(spec: StrategySpec, caps: CapabilityTable, account_limits: Acc
             p.append("universe: U-B 전략은 비운다 — 종목은 universe_list 목록의 제출 버전에서 (D-198)")
     elif spec.universe_list is not None:
         p.append("universe_list: U-B 전략만 쓴다 (D-198)")
-    if spec.sizing not in SIZING_METHODS:
+    if not alloc and spec.sizing not in SIZING_METHODS:
         p.append("sizing: S-1~S-4 중 하나")
-    if not isinstance(spec.validity_max_minutes, int) or spec.validity_max_minutes <= 0:
+    if not alloc and (not isinstance(spec.validity_max_minutes, int) or spec.validity_max_minutes <= 0):
         p.append("validity_max_minutes: 0보다 큰 정수 (절대 상한, D-007)")
 
     if not spec.capabilities:
@@ -136,7 +148,11 @@ def validate_spec(spec: StrategySpec, caps: CapabilityTable, account_limits: Acc
         if r.rule_id in seen_ids:
             p.append(f"rule {r.rule_id}: 규칙 ID 중복")
         seen_ids.add(r.rule_id)
-        if r.kind not in RULE_KINDS:
+        if alloc and r.kind != ALLOCATION_RULE_KIND:
+            p.append(f"rule {r.rule_id}: 배분 규칙 명세의 규칙 종류는 {ALLOCATION_RULE_KIND}만 ({r.kind}, D-199)")
+        elif not alloc and r.kind == ALLOCATION_RULE_KIND:
+            p.append(f"rule {r.rule_id}: 전략 규칙에 {ALLOCATION_RULE_KIND} 종류 불가 — 배분 규칙으로 분리 (D-199)")
+        elif not alloc and r.kind not in RULE_KINDS:
             p.append(f"rule {r.rule_id}: 알 수 없는 규칙 종류 {r.kind}")
         if r.priority in seen_prio.setdefault(r.kind, set()):
             p.append(f"rule {r.rule_id}: 같은 종류({r.kind}) 안에서 우선순위 중복 — 순서가 모호함 (D-006)")
@@ -161,6 +177,23 @@ def validate_spec(spec: StrategySpec, caps: CapabilityTable, account_limits: Acc
             p.append(f"param {prm.name}: 단위·설명 필수")
 
     p.extend(_limit_problems(spec.limits, account_limits))
+    return p
+
+
+def _allocation_problems(spec: StrategySpec) -> list[str]:
+    """배분 규칙 명세 (CP-034 D-199): 지정 전략 ID, 지수 일봉 능력 선언, 종목 목록 없음."""
+    p: list[str] = []
+    if not spec.allocation_targets:
+        p.append("allocation_targets: 배분 규칙은 지정 전략 ID가 하나 이상 필요 (D-199)")
+    for t in spec.allocation_targets:
+        if not isinstance(t, str) or not _ID.fullmatch(t):
+            p.append(f"allocation_targets: 전략 ID 형식 아님 {str(t)[:40]!r}")
+        elif t == spec.strategy_id:
+            p.append("allocation_targets: 자기 자신을 지정할 수 없음")
+    if INDEX_CAPABILITY not in spec.capabilities:
+        p.append(f"capabilities: 배분 규칙은 {INDEX_CAPABILITY}(지수 일봉) 선언 필수 (D-199)")
+    if spec.universe or spec.universe_list is not None:
+        p.append("universe: 배분 규칙은 종목 목록을 두지 않는다 (입력은 지수 일봉뿐)")
     return p
 
 
@@ -221,6 +254,8 @@ class StrategyRegistry:
             reg_id = self._repo.insert_strategy_registration({
                 "strategy_id": spec.strategy_id, "version": spec.version, "spec_hash": spec.spec_hash(),
                 "spec_json": json.dumps({"limits": _limits_json(spec.limits), "markets": list(spec.markets),
+                                         **({"kind": spec.kind, "allocation_targets": list(spec.allocation_targets)}
+                                            if spec.kind != STRATEGY_KIND else {}),
                                          **({"verification_approval": verification_approval}
                                             if verification_approval is not None else {})},
                                         ensure_ascii=False),

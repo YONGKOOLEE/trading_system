@@ -115,6 +115,8 @@ class StrategySpec:
     holding: str                       # 예상 보유 기간·최대 보유 제한
     limits: StrategyLimits = field(default_factory=StrategyLimits)
     universe_list: str | None = None   # [CP-034 D-198] U-B 목록 ID (U-B 필수, 그 밖에는 없음)
+    kind: str = "STRATEGY"             # [CP-034 D-199] STRATEGY | ALLOCATION(배분 규칙 — 등록·상태 전환은 전략과 같다)
+    allocation_targets: tuple[str, ...] = ()   # [CP-034 D-199] 배분 규칙이 신규 진입을 허용·불허하는 전략 ID
 
     @property
     def owner(self) -> str:
@@ -134,7 +136,7 @@ class StrategySpec:
 
 
 # 기본값이면 명세 해시에서 빼는 항목 (CP-034 — 기존 명세 해시 불변)
-_HASH_OPTIONAL_DEFAULTS: dict[str, object] = {"universe_list": None}
+_HASH_OPTIONAL_DEFAULTS: dict[str, object] = {"universe_list": None, "kind": "STRATEGY", "allocation_targets": ()}
 
 
 def evaluation_id_of(strategy_id: str, version: int, market: str, trigger_key: str) -> str:

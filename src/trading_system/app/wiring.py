@@ -10,7 +10,7 @@ from collections.abc import Callable
 
 import importlib
 from dataclasses import dataclass
-from datetime import time, timedelta
+from datetime import datetime, time, timedelta
 from pathlib import Path
 
 from trading_system.broker.base import BrokerAdapter
@@ -20,6 +20,7 @@ from trading_system.config.errors import ConfigError
 from trading_system.config.strategy_params import load_params_file, validate_params
 from trading_system.config.strategy_registry import StrategyRegistry
 from trading_system.config.versioning import ChangeSource, SettingsManager
+from trading_system.domain.allocation import IndexView
 from trading_system.domain.clock import Clock
 from trading_system.domain.enums import Mode
 from trading_system.domain.limits import AccountLimits
@@ -41,7 +42,7 @@ from trading_system.storage.alerts import AuditAlertSink
 from trading_system.storage.repository import Repository
 from trading_system.strategy.base import Strategy
 
-from .engine import AccountState, Engine, LoadedStrategy
+from .engine import AccountState, Engine, LoadedAllocation, LoadedStrategy
 
 BROKER_ENV = {Mode.BACKTEST: "fake", Mode.PAPER: "mock"}
 
@@ -147,3 +148,31 @@ def build_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: BrokerAd
                                   alerts=alerts, log_dir_of=lambda: engine.log_dir)
     engine.on_tick.append(recorder.on_tick)
     return engine
+
+
+@dataclass(frozen=True)
+class AllocationInput:
+    """배분 규칙 (CP-034 D-199): kind ALLOCATION 명세 + decide(IndexView, params)."""
+
+    rule: object
+    params: dict[str, object]
+
+
+def add_allocations(engine: Engine, inputs: list[AllocationInput], caps: CapabilityTable,
+                    account_limits: AccountLimits | None, mode: Mode,
+                    index_source: Callable[[str, datetime], IndexView] | None = None) -> None:
+    """배분 규칙을 등록 검증(전략과 같은 등록부·능력 기준)한 뒤 엔진에 붙인다. 하나라도 거부되면 아무것도 붙이지 않는다.
+
+    PAPER 배포 설정 연결([[allocations]])은 이 작업 범위 밖 — CAP-DAT-05d 표 반영·지수 수집 경로와 함께 [제안]."""
+    loaded: list[LoadedAllocation] = []
+    for ai in inputs:
+        spec = getattr(ai.rule, "spec", None)
+        if spec is None or getattr(spec, "kind", "") != "ALLOCATION" or not hasattr(ai.rule, "decide"):
+            raise ConfigError(f"배분 규칙이 아님(kind ALLOCATION·decide 필요): {getattr(spec, 'owner', ai.rule)}")
+        reg = engine.registry.register(spec, dict(ai.params), caps, account_limits, mode)
+        if not reg.ok:
+            raise ConfigError([f"배분 규칙 등록 거부 {spec.owner}: {p}" for p in reg.problems])
+        loaded.append(LoadedAllocation(ai.rule, validate_params(spec, ai.params)))
+    engine.allocations.extend(loaded)
+    if index_source is not None:
+        engine.index_source = index_source
