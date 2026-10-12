@@ -1,6 +1,7 @@
 """한도·시간 설정 파일 로더 (01 D-026, §2.3.1).
 
 파일 형식(TOML): 최상위 `account`, `[limits]`, `[time]`. 모든 값은 필수이며 기본값이 없다.
+[CP-034] 선택 키: `[limits] l1_entry_buffer_ratio`(D-195, 문자열 십진수, 0 이상 0.2 미만). 없으면 기존 동작이다.
 값(리스크 수치)은 사용자가 정해 `config/limits.<mode>.toml`에 둔다. 저장소에는 형식 예제만 둔다.
 시간 제약은 시장별로 검사한다(CP-024 D-108): 기본 M1(KRX), M2 설정(`config/m2/limits.<mode>.toml`)은 market="M2".
 """
@@ -17,7 +18,7 @@ from trading_system.domain.limits import AccountLimits, check_limits
 from trading_system.domain.market_time import Market
 
 from .errors import ConfigError
-from .schema import Field, alias_problem, parse_fields
+from .schema import Field, alias_problem, parse_field, parse_fields
 
 _POSITIVE = Decimal("0")
 LIMIT_SPEC = (
@@ -30,6 +31,10 @@ LIMIT_SPEC = (
     Field("l7_max_order_amount", "decimal", min=_POSITIVE, min_exclusive=True),
     Field("l10_leverage_total_ratio", "decimal_or_none", min=_POSITIVE, min_exclusive=True),
     Field("warn_usage_ratio", "decimal", min=_POSITIVE, min_exclusive=True, max=Decimal("1")),
+)
+# [CP-034] 선택 키 — 없으면 기존 동작(값 None). 문자열 십진수만(정수·float 불가), 범위는 check_limits
+OPTIONAL_LIMIT_SPEC = (
+    Field("l1_entry_buffer_ratio", "decimal"),
 )
 TIME_SPEC = (
     Field("order_window_start", "time"),
@@ -68,9 +73,24 @@ def parse_account_limits(raw: Mapping[str, object], market: str | Market = Marke
         elif not isinstance(body, Mapping):
             problems.append(f"{section}: 표(table)여야 한다")
         else:
-            section_values, section_problems = parse_fields(spec, body, section)
+            optional = OPTIONAL_LIMIT_SPEC if section == "limits" else ()
+            names = {f.name for f in optional}
+            section_values, section_problems = parse_fields(
+                spec, {k: v for k, v in body.items() if k not in names}, section)
             values.update(section_values)
             problems.extend(section_problems)
+            for f in optional:
+                if f.name not in body:
+                    continue
+                raw_value = body[f.name]
+                if not isinstance(raw_value, str):
+                    problems.append(f"{section}.{f.name}: 문자열 십진수여야 한다 (예: \"0.03\")")
+                    continue
+                value, err = parse_field(f, raw_value)
+                if err:
+                    problems.append(f"{section}.{err}")
+                else:
+                    values[f.name] = value
 
     if problems:
         raise ConfigError(problems)

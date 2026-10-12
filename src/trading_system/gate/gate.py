@@ -145,8 +145,10 @@ class Gate:
         if req.stop_price is not None:
             if rt not in (RequestType.ENTRY, RequestType.INCREASE):
                 raise _Reject(Check.G3, "손절가는 진입·증액 신호에만 쓸 수 있음 (00 §2.5)")
-            if req.stop_price <= 0 or req.stop_price >= req.price:
-                raise _Reject(Check.G3, f"손절가 형식 오류: 진입 기준가({req.price})보다 낮은 양수여야 함")
+            # [CP-034 D-195] 여유가 있으면 경계 = L1 진입 기준가(시장가: 신호 가격 × (1 + 여유), 지정가: 주문가)
+            ceiling = self._l1_entry_reference(ctx) or req.price
+            if req.stop_price <= 0 or req.stop_price >= ceiling:
+                raise _Reject(Check.G3, f"손절가 형식 오류: 진입 기준가({ceiling})보다 낮은 양수여야 함")
 
     def _g4_duplicate(self, ctx: _Ctx) -> None:
         req = ctx.req
@@ -261,9 +263,15 @@ class Gate:
                  loss_ratio=str(daily.loss_ratio))
 
         # L1 1회 최대 손실: 손절가가 있으면 (진입 기준가 − 손절가) × 수량 × |배수|, 없으면 주문 금액 전체 × |배수|
-        # 진입 기준가 = 예약 가격(지정가는 주문가, 시장가는 상한가) (01 L1·D-020 v0.5)
+        # 진입 기준가 = 예약 가격(지정가는 주문가, 시장가는 상한가) (01 L1·D-020 v0.5).
+        # [CP-034 D-195] 한도에 여유(l1_entry_buffer_ratio)가 있으면 시장가는 신호 가격 × (1 + 여유), 지정가는 주문가.
+        # 손절가가 없으면 D-020 그대로. G8·L2·L3·L7·예약은 위의 예약 가격(상한가) 기준 그대로 (03 §6.2)
         if req.stop_price is not None:
-            order_risk = max(_ZERO, reserve_price - req.stop_price) * req.quantity * info.exposure_multiplier
+            l1_ref = self._l1_entry_reference(ctx)
+            if l1_ref is not None:
+                s["l1_entry_ref"] = str(l1_ref)
+            entry_ref = reserve_price if l1_ref is None else l1_ref
+            order_risk = max(_ZERO, entry_ref - req.stop_price) * req.quantity * info.exposure_multiplier
         else:
             order_risk = exposure_new
         s["order_risk"] = str(order_risk)
@@ -531,6 +539,16 @@ class Gate:
     def _valuation_price(self, instrument: str, ctx: _Ctx) -> Decimal:
         """보유 평가 가격: 최근 체결가, 신선하지 않으면 평가 불능 → 거부 (01 §2.4)."""
         return self._fresh_quote(instrument, ctx).price
+
+    def _l1_entry_reference(self, ctx: _Ctx) -> Decimal | None:
+        """[CP-034 D-195] L1 진입 기준가. 한도에 여유가 없으면 None(기존 계산 = 예약 가격). 가격을 고치지 않는다."""
+        buf = ctx.limits.l1_entry_buffer_ratio if ctx.limits is not None else None
+        if buf is None:
+            return None
+        req = ctx.req
+        if req.order_type is OrderType.LIMIT:
+            return req.price          # 체결가 ≤ 주문가 — 여유 없음
+        return req.price * (1 + buf)  # 신호 기준가(판정 시점 시세, 00 §2.5) × (1 + 여유)
 
     def _reserve_price(self, ctx: _Ctx) -> Decimal:
         """예약 가격: 지정가는 주문가, 시장가는 상한가(없으면 최근가 × (1 + 가격제한폭)) (03 §6.2)."""

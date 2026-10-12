@@ -25,6 +25,9 @@ RATIO_FIELDS = (
 )
 DECIMAL_FIELDS = RATIO_FIELDS + ("l7_max_order_amount", "warn_usage_ratio")
 TIME_FIELDS = ("order_window_start", "order_window_end", "daily_reference_time", "report_time")
+# [CP-034] 선택 값. 없으면(None) 기존 동작이며 표준 형태·해시에 넣지 않는다(기존 설정 버전 해시 불변).
+OPTIONAL_DECIMAL_FIELDS = ("l1_entry_buffer_ratio",)
+L1_BUFFER_MAX = Decimal("0.2")   # 여유 상한(미포함) — 리드 지시 0 ≤ 여유 < 0.2
 
 
 def _decimal_text(value: Decimal) -> str:
@@ -46,10 +49,15 @@ class AccountLimits:
     order_window_end: time           # L8 종료
     daily_reference_time: time       # 일일 기준 시각
     report_time: time                # 일일 보고 시각
+    # [CP-034 D-195] L1 시장가 매수 진입 기준가 여유: 신호 기준가 × (1 + 여유). None = 기존 계산(예약 가격 = 상한가)
+    l1_entry_buffer_ratio: Decimal | None = None
 
     def __post_init__(self) -> None:
         for name in DECIMAL_FIELDS:
             _require_decimal(name, getattr(self, name))
+        for name in OPTIONAL_DECIMAL_FIELDS:
+            if getattr(self, name) is not None:
+                _require_decimal(name, getattr(self, name))
         if self.l10_leverage_total_ratio is not None:
             _require_decimal("l10_leverage_total_ratio", self.l10_leverage_total_ratio)
         for name in ("l5_daily_new_orders", "l6_max_positions"):
@@ -73,6 +81,10 @@ class AccountLimits:
         out["l10_leverage_total_ratio"] = None if l10 is None else _decimal_text(l10)
         for name in TIME_FIELDS:
             out[name] = getattr(self, name).strftime("%H:%M")
+        for name in OPTIONAL_DECIMAL_FIELDS:
+            v = getattr(self, name)
+            if v is not None:
+                out[name] = _decimal_text(v)
         return dict(sorted(out.items()))
 
     @classmethod
@@ -96,6 +108,7 @@ class AccountLimits:
             order_window_end=t("order_window_end"),
             daily_reference_time=t("daily_reference_time"),
             report_time=t("report_time"),
+            **{name: Decimal(str(data[name])) for name in OPTIONAL_DECIMAL_FIELDS if data.get(name) is not None},
         )
 
 
@@ -136,6 +149,9 @@ def check_limits(lim: AccountLimits, market: str | Market = Market.M1) -> tuple[
             problems.append(f"{name}: 1 이상이어야 한다")
     if lim.l7_max_order_amount <= 0:
         problems.append("l7_max_order_amount: 0보다 커야 한다")
+    buf = lim.l1_entry_buffer_ratio
+    if buf is not None and not (0 <= buf < L1_BUFFER_MAX):
+        problems.append(f"l1_entry_buffer_ratio: 0 이상 {L1_BUFFER_MAX} 미만이어야 한다 (CP-034 D-195)")
 
     if market is Market.M2:
         problems.extend(_utc_247_time_problems(lim))

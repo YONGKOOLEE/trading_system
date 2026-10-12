@@ -81,6 +81,10 @@ def classify(old: AccountLimits, new: AccountLimits) -> ChangeDirection:
         _sign(old.warn_usage_ratio, new.warn_usage_ratio, larger_is_looser=True),  # 경고가 늦어지면 완화
         _sign(old.order_window_start, new.order_window_start, larger_is_looser=False),  # 더 일찍 열면 완화
         _sign(old.order_window_end, new.order_window_end, larger_is_looser=True),       # 더 늦게 닫으면 완화
+        # [CP-034 D-195] L1 여유: 없음(상한가 기준) = 가장 엄격. 여유가 작을수록 L1 위험 추정이 작아져 완화
+        _sign(_INFINITY if old.l1_entry_buffer_ratio is None else old.l1_entry_buffer_ratio,
+              _INFINITY if new.l1_entry_buffer_ratio is None else new.l1_entry_buffer_ratio,
+              larger_is_looser=False),
     ]
     loosened, tightened = signs.count(1), signs.count(-1)
     if loosened and tightened:
@@ -142,7 +146,9 @@ class SettingsManager:
                 ref_used = effective.daily_reference_time.strftime("%H:%M")
                 effective_at = self._market_time.next_after(now, effective.daily_reference_time) if deferred else now
                 old_c, new_c = effective.to_canonical(), proposed.to_canonical()
-                changes = {k: [old_c[k], new_c[k]] for k in new_c if old_c[k] != new_c[k]}
+                # [CP-034] 선택 키(여유·프로필 등)는 한쪽에만 있을 수 있다 — 없는 쪽은 None으로 기록
+                changes = {k: [old_c.get(k), new_c.get(k)] for k in sorted(set(old_c) | set(new_c))
+                           if old_c.get(k) != new_c.get(k)}
                 previous_hash = self.hash_of(effective)
 
             self._repo.insert_settings_version({
