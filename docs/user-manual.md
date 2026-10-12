@@ -381,10 +381,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\schedule-unregiste
 ```
 cd C:\AI\trading_system\trading_system
 $env:TRADE_MODE='PAPER'
-.venv\Scripts\python scripts\kiwoom-probe.py --mode PAPER --codes 005930,000660,069500
+.venv\Scripts\python scripts\kiwoom-probe.py --mode PAPER --codes "005930,000660,069500"
 ```
 - 둘째 줄: 이 창에서만 모드를 PAPER로 정한다. 아무것도 출력되지 않으면 정상이다.
-- 셋째 줄: 종목 3개(005930 삼성전자, 000660 SK하이닉스, 069500 KODEX 200 — 에이전트가 고른 예)로 실측한다. 종목은 최대 3개, 6자리 숫자를 쉼표로만 구분한다(띄어쓰기 없이). `--codes …` 부분을 빼면 운영 설정의 종목(지금 005930 하나)만 본다.
+- 셋째 줄: 종목 3개(005930 삼성전자, 000660 SK하이닉스, 069500 KODEX 200 — 에이전트가 고른 예)로 실측한다. 종목은 최대 3개, 6자리 숫자를 쉼표로만 구분한다(띄어쓰기 없이). **반드시 큰따옴표로 감싼다** — PowerShell은 따옴표 없는 `005930,000660`을 숫자 목록으로 읽어 앞의 0을 지운다(그러면 "종목코드 형식 아님: '5930'"로 거부, 2026-10-12 실제 발생). `--codes …` 부분을 빼면 운영 설정의 종목(지금 005930 하나)만 본다.
 - **걸리는 시간**: 약 1~2분(조회 최대 62회 × 1.2초 간격 ≈ 1.2분) + 실시간 수신 대기 10초. 끝날 때까지 창을 닫지 않는다.
 
 기대 결과 (모양만 같다. 쪽 수·줄 수·날짜는 그날 다르다):

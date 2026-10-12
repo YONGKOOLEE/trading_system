@@ -44,7 +44,7 @@
     $env:TRADE_MODE='PAPER'
     .venv\\Scripts\\python scripts\\investor-probe.py --mode PAPER
 
-    선택: --codes 005930,000660,035420 (최대 3), --max-pages 30 (1~60), --back-days 365,1095,1825,3650,
+    선택: --codes "005930,000660,035420" (최대 3), --max-pages 30 (1~60), --back-days 365,1095,1825,3650,
           --compare var\\paper\\probe\\<이전 시각>-investor-probe.json
     확정 시각 확인 예: 거래일 17:10쯤 한 번 실행 → 다음 날 06:00쯤(또는 휴일) --compare로 다시 실행.
 

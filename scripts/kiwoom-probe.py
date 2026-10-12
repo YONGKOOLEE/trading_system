@@ -9,7 +9,7 @@ PAPER run·자동 운영이 꺼진 장외 시간에만 실행한다. 거래일 0
 사용 (PowerShell, 저녁·주말·휴일에):
     cd C:\\AI\\trading_system\\trading_system
     $env:TRADE_MODE='PAPER'
-    .venv\\Scripts\\python scripts\\kiwoom-probe.py --mode PAPER --codes 005930,000660,069500
+    .venv\\Scripts\\python scripts\\kiwoom-probe.py --mode PAPER --codes "005930,000660,069500"
 
     --codes를 빼면 config/app.paper.toml 종목(지금 005930 하나)만 본다.
     선택: --max-pages 5 (ka10080 연속 조회 쪽 수, 1~20), --back-days 30,90,180,365,730 (base_dt를 며칠 전으로),
