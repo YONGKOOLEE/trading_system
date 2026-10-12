@@ -14,7 +14,7 @@ import sqlite3
 import sys
 import threading
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -26,6 +26,7 @@ from trading_system.domain.clock import KST, from_iso, to_iso
 from trading_system.domain.daily_base import DailyBase, DailyBaseCorrupt
 from trading_system.domain.enums import ACTIVE_INTENT_STATES, IntentState, Mode
 from trading_system.domain.models import Account
+from trading_system.domain.universe import SUBMIT_CHANNEL, ListEntry, ListVersion
 
 DAILY_BASE_KIND = "DAILY_BASE"   # 거래일별 일일 기준 감사 기록 (monitoring.watchers.DAILY_BASE와 같은 값)
 DUST_RELEASE_REASON = "dust 확정"  # 소유권 해제 사유 (CP-024 D-102, 01 R-28·02 ENT-20 개정 방향)
@@ -150,6 +151,17 @@ CREATE TABLE IF NOT EXISTS recon_asset (
 CREATE TABLE IF NOT EXISTS client_order (
   client_order_id TEXT PRIMARY KEY, mode TEXT NOT NULL, intent_id TEXT NOT NULL UNIQUE,
   account TEXT NOT NULL, instrument TEXT NOT NULL, created_at TEXT NOT NULL);
+-- U-B 사람 목록 버전 (CP-034 D-198, T-041): 목록 ID별 일련번호·내용 해시·제출 시각·채널·제출자·종목(JSON). 추가 전용
+-- 표라 스키마 버전을 올리지 않는다(A-086 ③·A-072 ⑤와 같은 방식) — 기존 저장소도 열 때 생성. 고치거나 지우지 않는다
+-- (아래 트리거). 제출 채널은 LOCAL만(A-092 Q-8, 저장 함수가 검사). 주문 경로는 판정 입력으로만 읽는다
+CREATE TABLE IF NOT EXISTS universe_list_version (
+  list_id TEXT NOT NULL, version INTEGER NOT NULL, mode TEXT NOT NULL, content_hash TEXT NOT NULL,
+  submitted_at TEXT NOT NULL, channel TEXT NOT NULL, actor TEXT NOT NULL, codes TEXT NOT NULL, memos TEXT NOT NULL,
+  PRIMARY KEY (list_id, version));
+CREATE TRIGGER IF NOT EXISTS universe_list_no_update BEFORE UPDATE ON universe_list_version
+  BEGIN SELECT RAISE(ABORT, 'universe_list_version is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS universe_list_no_delete BEFORE DELETE ON universe_list_version
+  BEGIN SELECT RAISE(ABORT, 'universe_list_version is append-only'); END;
 -- 조회 인덱스: 데이터 의미 불변이라 스키마 버전을 올리지 않는다 — 기존 저장소도 열 때 생성 (review C절, DP-38)
 CREATE INDEX IF NOT EXISTS ix_intent_state ON intent(state);
 CREATE INDEX IF NOT EXISTS ix_ops_command_status ON ops_command(status);
@@ -428,6 +440,37 @@ class Repository:
     def next_seq(self, name: str = "global") -> int:
         self._x("INSERT INTO counter(name, value) VALUES(?, 1) ON CONFLICT(name) DO UPDATE SET value = value + 1", (name,))
         return int(self._x("SELECT value FROM counter WHERE name = ?", (name,)).fetchone()[0])
+
+    # --- U-B 목록 (CP-034 D-198) ------------------------------------------------
+    def insert_universe_version(self, list_id: str, entries: Sequence[ListEntry], content_hash: str, at: datetime,
+                                channel: str, actor: str) -> int:
+        """새 목록 버전을 추가하고 번호를 돌려준다(목록 ID별 1부터). 저장 단위 안에서 부른다.
+
+        제출 채널은 로컬만(A-092 Q-8) — 그 밖이면 ValueError. 목록 ID·종목 형식 검증은 호출자(제출 도구)가 먼저 한다."""
+        if channel != SUBMIT_CHANNEL:
+            raise ValueError(f"U-B 목록 제출은 로컬 도구만 가능 (채널 {channel} 거부, A-092 Q-8)")
+        if not self.in_transaction:
+            raise ValueError("insert_universe_version은 저장 단위(tx) 안에서")
+        row = self._x("SELECT COALESCE(MAX(version), 0) FROM universe_list_version WHERE list_id=?", (list_id,))
+        version = int(row.fetchone()[0]) + 1
+        self._x("INSERT INTO universe_list_version(list_id, version, mode, content_hash, submitted_at, channel, actor, "
+                "codes, memos) VALUES(?,?,?,?,?,?,?,?,?)",
+                (list_id, version, self.mode.value, content_hash, to_iso(at), channel, actor,
+                 json.dumps([e.code for e in entries]), json.dumps([e.memo for e in entries], ensure_ascii=False)))
+        return version
+
+    def universe_versions(self, list_id: str) -> list[ListVersion]:
+        rows = self._x("SELECT * FROM universe_list_version WHERE list_id=? ORDER BY version", (list_id,))
+        return [ListVersion(r["list_id"], int(r["version"]), r["content_hash"], from_iso(r["submitted_at"]),
+                            r["channel"], tuple(json.loads(r["codes"]))) for r in rows]
+
+    def universe_list_ids(self) -> list[str]:
+        return [r["list_id"] for r in self._x("SELECT DISTINCT list_id FROM universe_list_version ORDER BY list_id")]
+
+    def universe_memos(self, list_id: str, version: int) -> tuple[str, ...]:
+        r = self._x("SELECT memos FROM universe_list_version WHERE list_id=? AND version=?",
+                    (list_id, version)).fetchone()
+        return tuple(json.loads(r["memos"])) if r else ()
 
     # --- 계좌 ---------------------------------------------------------------
     def register_account(self, account: Account) -> None:

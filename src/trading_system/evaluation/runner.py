@@ -6,6 +6,9 @@
 - 기한 (D-007): 기한 ≤ 판정 기준 시각 + 절대 상한, 시각·주기 트리거면 ≤ 다음 예정 판정 시각. 넘으면 버린다
   (크기·기한을 고쳐서 대신 내지 않는다 — 게이트와 같은 원칙, 00 D-009).
 - 결과 순서 (00 §2.7): 위험 축소 먼저, 그다음 종목코드 순서. 매번 같은 결과.
+- [CP-034] 신규 진입·증액 제한(감액·청산은 막지 않음): `entry_universe`(U-B 적용 목록 — 목록 밖 보유 종목은 청산·감액
+  판정 대상으로만 남는다, D-198 (4))와 `entry_block`(배분 규칙이 진입을 허용하지 않을 때의 사유, D-199). 둘 다 주지 않으면
+  기존 동작 그대로.
 """
 
 from __future__ import annotations
@@ -38,8 +41,12 @@ def _rank(spec_rules: dict[str, int], s: Signal) -> tuple[int, int]:
     return KIND_ORDER.index(s.kind), spec_rules.get(s.rule_id, 1_000_000)
 
 
+_RISK_UP = (RequestType.ENTRY, RequestType.INCREASE)
+
+
 def run_evaluation(strategy: Strategy, snapshot: EvaluationSnapshot, params: ParamValues,
-                   lot_of: dict[str, Decimal] | None = None) -> EvaluationResult:
+                   lot_of: dict[str, Decimal] | None = None, *, entry_universe: frozenset[str] | None = None,
+                   entry_block: str | None = None) -> EvaluationResult:
     spec = strategy.spec
     result = EvaluationResult()
     try:
@@ -56,6 +63,11 @@ def run_evaluation(strategy: Strategy, snapshot: EvaluationSnapshot, params: Par
     valid: list[Signal] = []
     for s in raw:
         reason = _check(s, spec, snapshot, rules, universe, hard_cap, lot_of or {})
+        if reason is None and isinstance(s, Signal) and s.kind in _RISK_UP:
+            if entry_block is not None:
+                reason = entry_block
+            elif entry_universe is not None and s.instrument not in entry_universe:
+                reason = "U-B 적용 목록 밖 종목 — 신규 진입·증액 불가, 청산·감액만 (D-198)"
         if reason:
             result.dropped.append(Dropped(getattr(s, "instrument", "?"), getattr(s, "rule_id", "?"), reason))
         else:

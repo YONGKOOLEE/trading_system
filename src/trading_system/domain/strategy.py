@@ -114,15 +114,29 @@ class StrategySpec:
     sizing: str                        # S-1~S-4
     holding: str                       # 예상 보유 기간·최대 보유 제한
     limits: StrategyLimits = field(default_factory=StrategyLimits)
+    universe_list: str | None = None   # [CP-034 D-198] U-B 목록 ID (U-B 필수, 그 밖에는 없음)
+    kind: str = "STRATEGY"             # [CP-034 D-199] STRATEGY | ALLOCATION(배분 규칙 — 등록·상태 전환은 전략과 같다)
+    allocation_targets: tuple[str, ...] = ()   # [CP-034 D-199] 배분 규칙이 신규 진입을 허용·불허하는 전략 ID
 
     @property
     def owner(self) -> str:
         return f"{self.strategy_id}:{self.version}"
 
     def spec_hash(self) -> str:
-        """명세 해시 (02 ENT-05). 파라미터 값은 포함하지 않는다(값은 설정 버전)."""
-        text = json.dumps(asdict(self), sort_keys=True, ensure_ascii=False, default=str, separators=(",", ":"))
+        """명세 해시 (02 ENT-05). 파라미터 값은 포함하지 않는다(값은 설정 버전).
+
+        CP-034에서 더한 선택 항목은 기본값이면 해시에 넣지 않는다 — 기존 전략(예: paper0-verify v2)의 해시가 바뀌면
+        등록 일치 검사(D-011)가 이미 등록된 버전을 거부하기 때문이다."""
+        values = asdict(self)
+        for name, default in _HASH_OPTIONAL_DEFAULTS.items():
+            if values.get(name) == default:
+                values.pop(name, None)
+        text = json.dumps(values, sort_keys=True, ensure_ascii=False, default=str, separators=(",", ":"))
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# 기본값이면 명세 해시에서 빼는 항목 (CP-034 — 기존 명세 해시 불변)
+_HASH_OPTIONAL_DEFAULTS: dict[str, object] = {"universe_list": None, "kind": "STRATEGY", "allocation_targets": ()}
 
 
 def evaluation_id_of(strategy_id: str, version: int, market: str, trigger_key: str) -> str:
@@ -168,6 +182,7 @@ class InstrumentView:
     last_exit_reason: str | None = None
     entries_recent: int = 0
     data_ok: bool = True     # 품질 실패면 False → 전략은 신호를 내지 않음
+    listed_at: datetime | None = None   # [CP-034 D-198] U-B 목록 연속 등재 시작 버전의 제출 시각(KST). U-A는 None
 
 
 @dataclass(frozen=True)

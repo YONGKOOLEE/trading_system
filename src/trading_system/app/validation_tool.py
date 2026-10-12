@@ -8,6 +8,9 @@
 - 결과: `var/backtest/validation/<전략ID>-v<n>/` (창별 결과 파일, verdict.json, validation-v<n>.md).
   판정표는 docs/strategies/<ID>/로 사람이 옮긴다(이 명령은 docs/를 쓰지 않는다).
 - 최종 확인 구간(`config/validation.toml` final_from 이후)은 `--final-check --confirmed-by A-xxx`로만, 전략 버전당 1회(D-163).
+- [CP-034 D-199, Q-9] `--allocation 패키지.모듈:클래스 --allocation-params <파일> --index <data>/index/001.csv`를 주면
+  배분 규칙 대조(필터 유·무 × 기본·2배 슬리피지, 7개 창)만 실행해 ①~⑥ 판정표를 쓴다(app.allocation_check).
+  결과: `var/backtest/validation/<전략ID>-alloc-<규칙ID>-v<n>/`. 기초 전략의 C-1~C-8은 --allocation 없이 따로 실행한다.
 """
 
 from __future__ import annotations
@@ -66,8 +69,41 @@ def _git_commit(root: Path) -> str:
         return "미기재"
 
 
+def _load_allocation(module: str, params_path: Path) -> tuple[object, dict[str, object]]:
+    """배분 규칙 '패키지.모듈:클래스' → 인스턴스 + 검증된 파라미터 (kind ALLOCATION·decide 필요)."""
+    import importlib
+
+    from trading_system.config.strategy_params import load_params_file
+    mod_name, _, cls_name = module.partition(":")
+    try:
+        obj = getattr(importlib.import_module(mod_name), cls_name)()
+    except (ImportError, AttributeError, TypeError) as exc:
+        raise ConfigError(f"배분 규칙을 불러올 수 없음 {module}: {type(exc).__name__}") from None
+    spec = getattr(obj, "spec", None)
+    if spec is None or getattr(spec, "kind", "") != "ALLOCATION" or not hasattr(obj, "decide"):
+        raise ConfigError(f"배분 규칙 형식이 아님(kind ALLOCATION·decide 필요): {module}")
+    return obj, load_params_file(spec, params_path)
+
+
+def _allocation_main(ns: argparse.Namespace, root: Path, template: BacktestConfig, out_root: Path,
+                     settings: dict[str, object]) -> int:
+    from trading_system.app.allocation_check import compare_allocation
+    from trading_system.app.main import load_daily_csv
+    if not ns.allocation_params or not ns.index:
+        raise ConfigError("--allocation에는 --allocation-params와 --index(지수 CSV)가 필요")
+    rule, rparams = _load_allocation(ns.allocation, (root / ns.allocation_params).resolve())
+    tpl = replace(template, allocation=rule, allocation_params=rparams, index_bars=tuple(load_daily_csv(Path(ns.index))))
+    spec = template.strategy.spec
+    out_dir = out_root / f"{spec.strategy_id}-alloc-{rule.spec.strategy_id}-v{ns.report_version}"  # type: ignore[attr-defined]
+    out = compare_allocation(tpl, out_dir=out_dir, report_version=ns.report_version,
+                             final_from=settings["final_from"], slippage_base=settings["slippage_base"])  # type: ignore[arg-type]
+    print(f"배분 규칙 판정: {out['verdict']['verdict']}  ({out_dir.as_posix()}/allocation-v{ns.report_version}.md)")
+    print(f"  {out['verdict']['⑥']}")
+    return 0
+
+
 def validate_main(argv: Sequence[str] | None = None, root: Path | None = None) -> int:
-    from trading_system.app.main import _load_common, load_daily_csv
+    from trading_system.app.main import _load_common, load_daily_csv, load_universe_history
     from trading_system.app.wiring import load_strategy
     from trading_system.config.app_file import StrategyDeploy
     from trading_system.config.limits_file import load_limits_file
@@ -92,6 +128,8 @@ def validate_main(argv: Sequence[str] | None = None, root: Path | None = None) -
     p.add_argument("--universe-point-in-time", action="store_true",
                    help="유니버스가 판정 시점 목록임을 선언(생존편향 표시 없음). 기본은 사후 선택 목록으로 본다")
     p.add_argument("--universe-note", default="")
+    p.add_argument("--universe-history", default=None,
+                   help="[CP-034] U-B 전략 목록 이력 CSV(date,code). 있으면 판정 시점 목록, 없으면 C-7 표시")
     p.add_argument("--window-params", action="append", default=[], metavar="K=PATH",
                    help="창 k의 파라미터 파일(사람이 학습 창으로 고른 값). 여러 번 지정")
     p.add_argument("--random-runs", type=int, default=RANDOM_RUNS,
@@ -103,6 +141,9 @@ def validate_main(argv: Sequence[str] | None = None, root: Path | None = None) -
     p.add_argument("--confirmed-by", default="", help="--final-check 때 전략 확정 사용자 선언 A-ID")
     p.add_argument("--end", default=None, help="--final-check 때 종료일(기본 데이터 마지막 날)")
     p.add_argument("--ledger", default="var/backtest/final-usage.json", help="최종 구간 사용 장부(백테스트 FINAL과 공용)")
+    p.add_argument("--allocation", default=None, help="[CP-034 Q-9] 배분 규칙 패키지.모듈:클래스 — 대조 판정만 실행")
+    p.add_argument("--allocation-params", default=None, help="배분 규칙 파라미터 파일 (저장소 기준 경로)")
+    p.add_argument("--index", default=None, help="지수 일봉 CSV(date,open,high,low,close,volume — index/001.csv)")
     ns = p.parse_args(argv)
     try:
         settings = load_validation_settings(root / "config" / "validation.toml")
@@ -128,9 +169,12 @@ def validate_main(argv: Sequence[str] | None = None, root: Path | None = None) -
             gate_settings=gate_settings, calendar=calendar, ticks=ticks, slippage_tick=Decimal(ns.slippage_tick),
             data=data, infos=infos, start=date(1900, 1, 1), end=date(1900, 1, 1), initial_cash=Decimal(ns.cash),
             out_dir=out_root, eval_time=eval_times[0], eval_times=eval_times, data_version=f"csv:{data_dir.name}",
-            code_commit=_git_commit(root))
+            code_commit=_git_commit(root),
+            universe_history=load_universe_history(Path(ns.universe_history)) if ns.universe_history else None)
         spec = strat.spec
         name = f"{spec.strategy_id}-v{ns.report_version}"
+        if ns.allocation:
+            return _allocation_main(ns, root, template, out_root, settings)
         if ns.final_check:
             end = date.fromisoformat(ns.end) if ns.end else max(r.day for raw in data.values() for r in raw)
             res = run_final_check(template, out_root / f"{name}-final", final_from=settings["final_from"],  # type: ignore[arg-type]

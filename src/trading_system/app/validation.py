@@ -384,6 +384,14 @@ def percentile(value: Decimal, dist: Sequence[Decimal]) -> Decimal | None:
 
 # --- 판정 (§3.3, D-161·D-167·D-168) -------------------------------------------------------------
 
+def universe_after_the_fact(template: BacktestConfig, *, declared_point_in_time: bool) -> bool:
+    """C-7(D-168) 생존편향 표시 여부. U-B 전략은 목록 이력이 있으면 판정 시점 목록, 없으면 사후 선택 목록(CP-034 D-198 (8))
+    — 사용자 선언보다 이력 유무가 우선한다. 그 밖(U-A 등)은 기존처럼 사용자 선언(--universe-point-in-time)을 따른다."""
+    if template.strategy.spec.universe_method == "U-B":
+        return template.universe_history is None
+    return not declared_point_in_time
+
+
 def is_verification_strategy(spec: StrategySpec) -> bool:
     return any(spec.strategy_id == f or spec.strategy_id.startswith(f + "-") for f in VERIFY_FAMILY)
 
@@ -656,7 +664,7 @@ def run_validation(inputs: ValidationInputs) -> dict[str, object]:
     spec = tpl.strategy.spec
     _check_inputs(inputs)
     s1, s2 = inputs.slippage_base, inputs.slippage_base * 2
-    after_the_fact = not inputs.universe_point_in_time
+    after_the_fact = universe_after_the_fact(inputs.template, declared_point_in_time=inputs.universe_point_in_time)
     eval_times = tuple(tpl.eval_times) or (tpl.eval_time,)
     out: dict[str, object] = {
         "strategy_id": spec.strategy_id, "strategy_version": spec.version, "report_version": inputs.report_version,
@@ -670,7 +678,9 @@ def run_validation(inputs: ValidationInputs) -> dict[str, object]:
             "params": {k: str(v) for k, v in sorted(tpl.params.items())},
             "window_params_files": {str(k): v for k, v in sorted(inputs.window_params_files.items())},
             "universe": sorted(set(tpl.data) & set(spec.universe)), "universe_method": spec.universe_method,
-            "universe_point_in_time": inputs.universe_point_in_time, "universe_note": inputs.universe_note,
+            "universe_point_in_time": not after_the_fact, "universe_note": inputs.universe_note,
+            **({"universe_list": spec.universe_list, "universe_history_dates": len(tpl.universe_history or {})}
+               if spec.universe_method == "U-B" else {}),
             "data_version": tpl.data_version, "code_commit": tpl.code_commit,
             "settings_hash": tpl.account_limits.version_hash(), "tick_table": tpl.ticks is not None,
             # [CP-034 D-196, V-271] 프로필 이름(없으면 legacy)·승인 A-ID(없으면 None = 미승인 한도 가정)

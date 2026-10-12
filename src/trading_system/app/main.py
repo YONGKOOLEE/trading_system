@@ -430,6 +430,33 @@ def load_daily_csv(path: Path) -> list[RawDaily]:
     return rows
 
 
+def load_universe_history(path: Path) -> dict[date, tuple[str, ...]]:
+    """U-B 목록 이력 CSV (CP-034 D-198 (8)): `date,code` 한 줄에 한 종목 — 그날 판정에 쓰는 목록. UTF-8(BOM 허용).
+
+    code가 빈 행(`2026-01-12,`)은 그날 빈 목록. 같은 날 같은 종목 중복·코드 형식(KRX 6자리 영숫자) 오류면 거부."""
+    from trading_system.domain.universe import CODE_RE
+    out: dict[date, list[str]] = {}
+    with path.open(encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None or not {"date", "code"} <= set(reader.fieldnames):
+            raise ConfigError(f"{path.name}: 열이 부족 (필요: date, code)")
+        for i, r in enumerate(reader, start=2):
+            try:
+                day = date.fromisoformat((r["date"] or "").strip())
+            except ValueError:
+                raise ConfigError(f"{path.name}:{i}: 날짜 형식 오류") from None
+            code = (r["code"] or "").strip()
+            codes = out.setdefault(day, [])
+            if not code:
+                continue
+            if not CODE_RE.fullmatch(code):
+                raise ConfigError(f"{path.name}:{i}: 종목코드 형식 오류 (KRX 6자리 영숫자)")
+            if code in codes:
+                raise ConfigError(f"{path.name}:{i}: 같은 날 종목 중복 {code}")
+            codes.append(code)
+    return {d: tuple(sorted(c)) for d, c in sorted(out.items())}
+
+
 def backtest_main(argv: Sequence[str], root: Path) -> int:
     from trading_system.app.backtest import BacktestConfig, BacktestError, perturbation_check, render_report, \
         run_backtest, run_sensitivity
@@ -452,6 +479,8 @@ def backtest_main(argv: Sequence[str], root: Path) -> int:
     p.add_argument("--confirmed-by", default="", help="--final-check 때 전략 확정 사용자 선언 A-ID")
     p.add_argument("--limits", default="config/limits.backtest.toml",
                    help="한도(정책 프로필) 파일, 저장소 기준 경로 [CP-034 D-196]. 보고서에 프로필·승인 여부 표시")
+    p.add_argument("--universe-history", default=None,
+                   help="[CP-034] U-B 전략 목록 이력 CSV(date,code). 없으면 데이터 전 종목·판정 시점 목록 아님(C-7) 표시")
     ns = p.parse_args(argv)
     try:
         mode = Mode.BACKTEST
@@ -475,7 +504,9 @@ def backtest_main(argv: Sequence[str], root: Path) -> int:
                              final_usage_ledger=root / "var" / "backtest" / "final-usage.json",
                              data_version=f"csv:{data_dir.name}",
                              final_from=load_validation_settings(root / "config" / "validation.toml")["final_from"],  # type: ignore[arg-type]
-                             final_check=ns.final_check)
+                             final_check=ns.final_check,
+                             universe_history=load_universe_history(Path(ns.universe_history))
+                             if ns.universe_history else None)
         if ns.final_check:
             # 인자·날짜를 먼저 검사하고(실패하면 장부 미기록) 장부에 1회 사용을 기록한 뒤 실행 (D-163)
             from trading_system.app.backtest import _run_days

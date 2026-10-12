@@ -39,7 +39,9 @@ from pathlib import Path
 from trading_system.app import backtest_export as bx
 from trading_system.broker.fake.fill_model import BacktestBroker, BarFacts
 from trading_system.config.capabilities import CapabilityTable
+from trading_system.config.strategy_params import validate_params
 from trading_system.config.strategy_registry import StrategyRegistry
+from trading_system.domain.allocation import INDEX_KOSPI, AllocationDecision
 from trading_system.domain.clock import KST, FixedClock
 from trading_system.domain.enums import GateResult, HaltType, IntentState, Mode, Side
 from trading_system.domain.limits import AccountLimits, profile_line
@@ -54,6 +56,7 @@ from trading_system.gate.gate import Gate
 from trading_system.gate.ports import GateInputs, GatePolicy
 from trading_system.halt.manager import Channel, HaltManager
 from trading_system.marketdata.calendar import KrxCalendar
+from trading_system.marketdata.index_feed import IndexBarStore, store_from_bars
 from trading_system.marketdata.quality import RawDaily, preprocess_daily
 from trading_system.marketdata.store import MarketDataStore
 from trading_system.marketdata.ticks import TickTable
@@ -103,6 +106,14 @@ class BacktestConfig:
     # (final_check=True, 사용 장부에 이 전략 버전의 최종 확인 기록이 있어야 함, 모든 거래일이 final_from 이후)뿐.
     final_from: date = FINAL_FROM_DEFAULT
     final_check: bool = False
+    # [CP-034 D-198 (8)] U-B 전략의 목록 이력: 날짜 → 그날 판정에 쓰는 목록(date,code 파일). 판정일 d에는 d 이하 날짜 중
+    # 가장 늦은 날짜의 목록만 쓴다(룩어헤드 없음). None이면 데이터 전 종목을 사후 선택 목록으로 쓰고 C-7 표시
+    universe_history: dict[date, tuple[str, ...]] | None = None
+    # [CP-034 D-199] 배분 규칙(kind ALLOCATION, decide)과 지수 일봉(index/001.csv, 과거 파일 = 확정값). 판정마다 전략 판정
+    # 전에 평가해 불허·판정 실패면 신규 진입·증액 거부(청산·감액은 그대로). None이면 기존 동작
+    allocation: object | None = None
+    allocation_params: dict[str, object] = field(default_factory=dict)
+    index_bars: tuple[RawDaily, ...] | list[RawDaily] | None = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +142,8 @@ class BacktestResult:
     costs: Decimal = Decimal("0")
     quality_failures: dict[str, list[str]] = field(default_factory=dict)
     signals_by_eval: dict[str, list[tuple]] = field(default_factory=dict)  # "YYYY-MM-DDTHH:MM" → 신호 요약
+    universe_point_in_time: bool | None = None   # [CP-034] U-B만: 목록 이력으로 재현했으면 True, 없으면 False(C-7)
+    allocation: dict | None = None               # [CP-034 D-199] 배분 규칙 판정 집계 (규칙이 있을 때만)
 
 
 def segment_days(days: list[date], segment: str) -> list[date]:
@@ -164,6 +177,32 @@ def _run_days(cfg: BacktestConfig) -> list[date]:
             all_days.append(d)
         d += timedelta(days=1)
     return segment_days(all_days, cfg.segment)
+
+
+UB_NO_HISTORY_NOTE = "U-B 목록 이력 없음 — 데이터 전 종목을 사후 선택 목록으로 사용, 판정 시점 목록 아님(C-7, D-168)"
+
+
+def ub_list_on(history: dict[date, tuple[str, ...]] | None, day: date,
+               all_codes: tuple[str, ...]) -> tuple[tuple[str, ...], dict[str, datetime | None]]:
+    """U-B 판정일 day의 목록과 등재 시각 (CP-034 D-198 (7)(8)). 이력의 날짜 = 그날 판정에 쓰는 목록 버전.
+
+    day 이하 날짜 중 가장 늦은 것을 쓴다(이후 날짜는 보지 않는다). 등재 시각 = 연속 등재가 시작된 이력 날짜의 00:00 KST
+    (제출 시각을 모르므로 그날 판정 전으로 본다). 이력이 없으면 all_codes, 등재 시각 없음."""
+    if history is None:
+        return all_codes, {}
+    dates = sorted(d for d in history if d <= day)
+    if not dates:
+        return (), {}
+    codes = history[dates[-1]]
+    listed: dict[str, datetime | None] = {}
+    for c in codes:
+        start = dates[-1]
+        for d in reversed(dates):
+            if c not in history[d]:
+                break
+            start = d
+        listed[c] = datetime.combine(start, time(0, 0), tzinfo=KST)
+    return codes, listed
 
 
 def _guard_final_period(cfg: BacktestConfig, days: list[date]) -> None:
@@ -236,6 +275,8 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
     days = _run_days(cfg)
     if not days:
         raise BacktestError("구간에 거래일이 없음")
+    if cfg.allocation is not None and spec.strategy_id not in cfg.allocation.spec.allocation_targets:  # type: ignore[attr-defined]
+        raise BacktestError(f"배분 규칙 대상(allocation_targets)에 이 전략({spec.strategy_id})이 없음 (D-199)")
     _guard_final_period(cfg, days)
     _claim_final(cfg)
 
@@ -275,6 +316,19 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
     if not reg.ok:
         repo.close()
         raise BacktestError(f"전략 등록 거부: {'; '.join(reg.problems)}")
+    alloc, alloc_params, index_store, alloc_stats = cfg.allocation, {}, None, None
+    if alloc is not None:
+        aspec = alloc.spec  # type: ignore[attr-defined]
+        areg = registry.register(aspec, dict(cfg.allocation_params), cfg.caps, cfg.account_limits, Mode.BACKTEST)
+        if not areg.ok:
+            repo.close()
+            raise BacktestError(f"배분 규칙 등록 거부: {'; '.join(areg.problems)}")
+        alloc_params = validate_params(aspec, cfg.allocation_params)
+        index_code = getattr(alloc, "index_code", INDEX_KOSPI)
+        index_store = store_from_bars(index_code, list(cfg.index_bars or ()), cfg.calendar)
+        alloc_stats = {"rule": aspec.owner, "index_code": index_code, "index_bars": len(cfg.index_bars or ()),
+                       "allowed_evaluations": 0, "blocked_evaluations": 0, "failed_evaluations": 0,
+                       "first_failure": None}
 
     # 데이터 준비: 단일 전처리 (D-088). 품질 실패 종목은 그 데이터로 판정하지 않는다
     bars: dict[str, dict[date, RawDaily]] = {}
@@ -306,6 +360,7 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
 
     signals_by_eval: dict[str, list[tuple]] = {}
     ratio = cfg.gate_settings.price_limit_ratio
+    is_ub = spec.universe_method == "U-B"
 
     def absorb_fills(day: date) -> None:
         nonlocal seen_fills, cash, costs_total
@@ -375,9 +430,22 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
                 return bool(repo.active_new_intents(ACCOUNT, inst, Side.BUY.value)
                             or repo.active_new_intents(ACCOUNT, inst, Side.SELL.value))
 
-            snap = store.snapshot(ev_id, "M1", ACCOUNT, clock.now(), base, sorted(cfg.data), pos_view, pending,
-                                  next_eval, history=lambda inst: repo.strategy_history(ACCOUNT, spec.owner, inst))
-            result = run_evaluation(cfg.strategy, snap, cfg.params)
+            insts, ub_extra, ub_entry = sorted(cfg.data), {}, {}
+            if is_ub:   # [CP-034 D-198] 그날 목록 + 이 전략 보유(청산·감액 판정용), 진입·증액은 목록 안에서만
+                codes, listed = ub_list_on(cfg.universe_history, day, tuple(sorted(cfg.data)))
+                owned = {o["instrument"] for o in repo.active_ownerships_of(spec.owner)}
+                insts = sorted((set(codes) | owned) & set(cfg.data))
+                ub_extra = {"listed_at": listed.get}
+                ub_entry = {"entry_universe": frozenset(codes)}
+            snap = store.snapshot(ev_id, "M1", ACCOUNT, clock.now(), base, insts, pos_view, pending,
+                                  next_eval, history=lambda inst: repo.strategy_history(ACCOUNT, spec.owner, inst),
+                                  **ub_extra)
+            block: dict[str, str] = {}
+            if alloc is not None:   # [CP-034 D-199] 전략 판정 전에 배분 규칙 평가 (판정 시각 기준 전 거래일까지 확정값)
+                reason = _allocation_reason(alloc, alloc_params, index_store, clock.now(), alloc_stats)  # type: ignore[arg-type]
+                if reason is not None:
+                    block = {"entry_block": reason}
+            result = run_evaluation(cfg.strategy, snap, cfg.params, **ub_entry, **block)
             signals_by_eval[ev_key] = [(s.signal_id, s.kind.value, s.instrument, str(s.quantity), str(s.price))
                                        for s in result.signals]
             for s in result.signals:
@@ -438,10 +506,36 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
                                        sort_keys=True, default=str).encode()).hexdigest()
     result = BacktestResult(cfg.run_id, cfg.segment, days, equity, trades, metrics, rejects, digest,
                             run_dir / "trading.db", signals, fills_log, k2_resumes, costs_total, quality_failures,
-                            signals_by_eval)
+                            signals_by_eval,
+                            universe_point_in_time=(cfg.universe_history is not None) if is_ub else None,
+                            allocation=alloc_stats)
     if cfg.write_exports:
         _write_exports(cfg, result, fill_details, daily_split, times)
     return result
+
+
+def _allocation_reason(rule: object, params: dict, index_store: IndexBarStore, at: datetime,
+                       stats: dict) -> str | None:
+    """배분 규칙 한 판정 (D-199). 진입 불허·판정 실패면 거부 사유, 허용이면 None. 엔진과 같은 규칙(지수 공급 index_feed)."""
+    view = index_store.view(getattr(rule, "index_code", INDEX_KOSPI), at)
+    failed, reason = True, view.issue
+    if view.data_ok:
+        try:
+            d = rule.decide(view, params)  # type: ignore[attr-defined]
+            if not isinstance(d, AllocationDecision):
+                raise TypeError("배분 결정 형식이 아님")
+            failed, reason = False, d.reason
+            if d.allow_entry:
+                stats["allowed_evaluations"] += 1
+                return None
+        except Exception as exc:  # noqa: BLE001 — 규칙 오류 = 판정 실패(진입 거부)
+            reason = f"배분 규칙 오류: {type(exc).__name__}: {exc}"
+    if failed:
+        stats["failed_evaluations"] += 1
+        stats["first_failure"] = stats["first_failure"] or f"{at.astimezone(KST):%Y-%m-%d %H:%M} {reason}"
+        return f"배분 규칙 판정 실패 — 신규 진입 거부: {reason} (D-199)"
+    stats["blocked_evaluations"] += 1
+    return f"배분 규칙: 신규 진입 불허 ({reason}) (D-199)"
 
 
 def _write_exports(cfg: BacktestConfig, result: BacktestResult, details: list[bx.FillDetail],
@@ -494,6 +588,11 @@ def _write_exports(cfg: BacktestConfig, result: BacktestResult, details: list[bx
         "costs": str(result.costs),
         "metrics": dict(result.metrics),
         "files": {"trades.csv": "UTF-8 BOM, CRLF", "equity.csv": "UTF-8 BOM, CRLF"},
+        **({"allocation": result.allocation} if result.allocation is not None else {}),
+        **({"universe": {"method": "U-B", "list": spec.universe_list, "point_in_time": result.universe_point_in_time,
+                         "history_dates": len(cfg.universe_history or {}),
+                         "note": "목록 이력으로 판정일 목록 재현" if result.universe_point_in_time
+                         else UB_NO_HISTORY_NOTE}} if spec.universe_method == "U-B" else {}),
     })
 
 
@@ -705,6 +804,7 @@ def render_report(cfg: BacktestConfig, result: BacktestResult, *, settings_hash:
         "",
         "## 한계",
         "- 생존편향: 상장폐지 종목 데이터 확보 여부 미확인(04 §2.1). U-A 고정 목록은 목록 작성 시점 이전 구간이 사후 선택.",
+        *([f"- {UB_NO_HISTORY_NOTE}"] if result.universe_point_in_time is False else []),
         "- 거래 상태(VI·거래정지) 이력 미반영: 그날 봉이 없으면 체결 없음으로만 처리.",
         "- 모의·실전 체결 차이는 PAPER에서 확인.",
         "- 일일 손실(K2)은 판정 시각에 한 번만 평가: 장중 손실로 K2가 걸려 이후 주문이 막히는 경우는 재현하지 않음(DP-6).",

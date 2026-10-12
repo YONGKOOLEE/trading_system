@@ -32,13 +32,15 @@ from time import monotonic
 from trading_system.broker.base import BrokerAdapter, BrokerQueryError
 from trading_system.broker.ratelimit import Priority, call_priority
 from trading_system.config.strategy_registry import StrategyRegistry
-from trading_system.domain.clock import KST, Clock, from_iso, last_kst_time_at_or_before
+from trading_system.domain.allocation import INDEX_KOSPI, AllocationDecision, IndexView
+from trading_system.domain.clock import KST, Clock, from_iso, last_kst_time_at_or_before, to_iso
 from trading_system.domain.enums import GateResult, HaltType, IntentState, RequestSource, RequestType, Side
 from trading_system.domain.limits import AccountLimits
 from trading_system.domain.market import CashView
 from trading_system.domain.models import GateRequest, OrderEvent
 from trading_system.domain.sinks import AlertSink
 from trading_system.domain.strategy import PositionView, evaluation_id_of
+from trading_system.domain.universe import listed_since, select_version
 from trading_system.evaluation.runner import run_evaluation
 from trading_system.execution.executor import ExecutionBlocked, Executor
 from trading_system.execution.resolver import ResolveOutcome, ResolveProgress, UnknownResolver
@@ -57,6 +59,28 @@ from trading_system.strategy.base import Strategy
 
 EVAL_GRACE = timedelta(minutes=5)       # 예정 시각을 이만큼 넘기면 그 판정은 건너뛴다(늦은 판정 금지, DP-21)
 GLOBAL_BLOCKS = {"K1", "K5", "K6", "K7", "K8"}   # 전역 정지 중에는 판정 자체를 하지 않는다(어차피 위험 확대 거부)
+
+
+@dataclass
+class LoadedAllocation:
+    """배분 규칙 (CP-034 D-199): spec(kind ALLOCATION)·decide(IndexView, params) → AllocationDecision."""
+
+    rule: object
+    params: dict[str, object]
+
+    @property
+    def owner(self) -> str:
+        return self.rule.spec.owner  # type: ignore[attr-defined]
+
+
+@dataclass(frozen=True)
+class _UbInput:
+    """U-B 전략 한 판정의 유니버스 입력 (CP-034 D-198)."""
+
+    instruments: list[str]                    # 스냅샷 종목 = 적용 목록 + 이 전략 보유 (배포 설정 종목만)
+    entry: frozenset[str]                     # 신규 진입·증액 허용 종목 = 적용 목록
+    listed_at: dict[str, datetime | None]     # 종목 → 연속 등재 시작 시각(KST)
+    record: dict[str, object]                 # 판정 기록에 남길 목록 버전
 
 
 @dataclass
@@ -144,6 +168,10 @@ class Engine:
     _k5_retries: int = 0                         # 장 밖 K5 대조 재시도 횟수 (CP-028 D-150, 메모리 — 재시작 시 0)
     _last_cash_observed: tuple | None = None      # 직전 CASH_OBSERVED 값 (같은 값 반복 기록 방지)
     _report_at: datetime | None = None           # 마지막으로 지난 보고 시각 (RV-21)
+    _ub_warned: set[tuple[str, date]] = field(default_factory=set)   # U-B 빈 목록 경고 (목록, 거래일) — 하루 1회
+    # [CP-034 D-199] 배분 규칙과 지수 일봉 공급자(CAP-DAT-05d). 없으면(기본) 기존 동작 그대로
+    allocations: list[LoadedAllocation] = field(default_factory=list)
+    index_source: Callable[[str, datetime], IndexView] | None = None
 
     def __post_init__(self) -> None:
         self.last_progress = self.mono()
@@ -520,21 +548,103 @@ class Engine:
 
         daily = self.account_state.daily_risk(self.account)
         base = daily.base_amount if daily is not None else Decimal("0")
-        insts = sorted(set(spec.universe) & set(self._known_instruments())) if spec.universe_method == "U-A" \
-            else sorted(self._known_instruments())
+        # 배분 규칙: 판정 직렬화 안에서 전략 판정 전에 평가 (D-199). 지정되지 않은 전략은 영향 없음
+        block, alloc = self._allocation_block(ls, at) if self.allocations else (None, None)
+        ub = self._universe_b(ls, at) if spec.universe_method == "U-B" else None
+        if ub is not None:
+            insts = ub.instruments
+        else:
+            insts = sorted(set(spec.universe) & set(self._known_instruments())) if spec.universe_method == "U-A" \
+                else sorted(self._known_instruments())
         snap = self.store.snapshot(ev_id, "M1", self.account, now, base, insts, pos_view, pending,
                                    self._next_eval(ls, at),
-                                   history=lambda inst: self.repo.strategy_history(self.account, owner, inst))
+                                   history=lambda inst: self.repo.strategy_history(self.account, owner, inst),
+                                   **({"listed_at": ub.listed_at.get} if ub is not None else {}))
         lots = {i: info.lot_size for i in insts if (info := self.store.instrument(i)) is not None}
-        result = run_evaluation(ls.strategy, snap, ls.params, lots)
-        self._audit("EVALUATION", ev_id, {"strategy": owner, "signals": len(result.signals),
-                                          "dropped": len(result.dropped), "error": result.error})
+        result = run_evaluation(ls.strategy, snap, ls.params, lots,
+                                **({"entry_universe": ub.entry} if ub is not None else {}),
+                                **({"entry_block": block} if block is not None else {}))
+        summary: dict[str, object] = {"strategy": owner, "signals": len(result.signals),
+                                      "dropped": len(result.dropped), "error": result.error}
+        if ub is not None:
+            summary["universe_list"] = ub.record   # 판정 입력에 쓴 목록 버전 (D-198 (3))
+        if alloc is not None:
+            summary["allocation"] = {k: alloc[k] for k in ("rule", "allow_entry", "failed")}
+        self._audit("EVALUATION", ev_id, summary)
         if result.error:
             self.alerts.alert("WARNING", f"전략 판정 오류 {owner}: {result.error}", ev_id)
         for s in result.signals:
             d = self.gate.decide(GateRequest.from_signal(s))
             if d.result is GateResult.APPROVED and d.approved is not None:
                 self.executor.submit(d.approved)
+
+    def _allocation_block(self, ls: LoadedStrategy, at: datetime) -> tuple[str | None, dict | None]:
+        """이 전략을 지정한 배분 규칙을 평가한다 (CP-034 D-199). 하나라도 불허·판정 실패면 신규 진입·증액 거부 사유.
+
+        판정 실패 = 배분 규칙 상태가 이 모드 신호 불가, 지수 공급자 없음, 지수 결측·지연·품질 실패(D-189), 규칙 오류 →
+        진입 거부 + 알림(조용히 멈추지 않게). 청산·감액은 막지 않는다. 판정마다 ALLOCATION_EVALUATION 감사."""
+        sid = ls.strategy.spec.strategy_id
+        block: str | None = None
+        first: dict | None = None
+        for a in self.allocations:
+            if sid not in a.rule.spec.allocation_targets:  # type: ignore[attr-defined]
+                continue
+            failed, allow, reason, evidence, last = True, False, "", {}, None
+            rejection = self.registry.signal_rejection(a.owner, RequestType.ENTRY)
+            if rejection is not None:
+                reason = f"배분 규칙 상태: {rejection}"
+            elif self.index_source is None:
+                reason = "지수 공급자 없음 (CAP-DAT-05d)"
+            else:
+                try:
+                    view = self.index_source(getattr(a.rule, "index_code", INDEX_KOSPI), at)
+                    last = view.bars[-1].at.isoformat() if view.bars else None
+                    if not view.data_ok:
+                        reason = view.issue or "지수 일봉 품질 실패"
+                    else:
+                        d = a.rule.decide(view, a.params)  # type: ignore[attr-defined]
+                        if not isinstance(d, AllocationDecision):
+                            raise TypeError("배분 결정 형식이 아님")
+                        failed, allow, reason, evidence = False, d.allow_entry, d.reason, dict(d.evidence)
+                except Exception as exc:  # noqa: BLE001 — 규칙·공급자 오류 = 판정 실패(진입 거부)
+                    reason = f"배분 규칙 오류: {type(exc).__name__}: {exc}"
+            rec = {"rule": a.owner, "target": ls.owner, "allow_entry": allow and not failed, "failed": failed,
+                   "reason": reason, "evidence": evidence, "index_last": last, "at": to_iso(at)}
+            self._audit("ALLOCATION_EVALUATION", a.owner, rec)
+            if failed:
+                self.alerts.alert("WARNING", f"배분 규칙 판정 실패 {a.owner} → {ls.owner} 신규 진입 거부: {reason} "
+                                             "(D-199)", a.owner)
+            if not rec["allow_entry"] and block is None:
+                block = f"배분 규칙 {a.owner}: 신규 진입 불허 ({'판정 실패 — ' if failed else ''}{reason}) (D-199)"
+                first = rec
+            first = first or rec
+        return block, first
+
+    def _universe_b(self, ls: LoadedStrategy, at: datetime) -> _UbInput:
+        """U-B 판정 입력 (CP-034 D-198). 판정 시각 at − 10분 이전 제출 최신 버전의 종목 + 이 전략 보유(목록에서 빠져도
+        청산·감액 판정 대상). 신규 진입·증액은 적용 목록 안에서만. 빈 목록·버전 없음 → 진입 0, 경고 하루 1회."""
+        list_id = ls.strategy.spec.universe_list or ""
+        versions = self.repo.universe_versions(list_id)
+        applied = select_version(versions, at)
+        codes = applied.codes if applied is not None else ()
+        known = set(self._known_instruments())
+        owned = {o["instrument"] for o in self.repo.active_ownerships_of(ls.owner) if o["account"] == self.account}
+        listed = {c: listed_since(versions, applied, c) for c in codes} if applied is not None else {}
+        record: dict[str, object] = {
+            "list": list_id, "version": applied.version if applied is not None else None,
+            "hash": applied.content_hash if applied is not None else None,
+            "submitted_at": to_iso(applied.submitted_at) if applied is not None else None, "count": len(codes)}
+        unknown = sorted(set(codes) - known)
+        if unknown:
+            record["not_configured"] = unknown   # 배포 설정에 없는 종목은 데이터가 없어 판정하지 않는다
+        if not codes:
+            day = at.astimezone(KST).date()
+            if (list_id, day) not in self._ub_warned:
+                self._ub_warned.add((list_id, day))
+                state = "비어 있음" if applied is not None else "없음(적용 가능한 제출 버전 없음)"
+                self.alerts.alert("WARNING", f"U-B 목록 {list_id} {state} — 신규 진입 없음, 보유 종목 청산 판정은 계속 "
+                                             "(D-198)", list_id)
+        return _UbInput(sorted((set(codes) | owned) & known), frozenset(codes), listed, record)
 
     def _known_instruments(self) -> list[str]:
         return [i for i in self.store._data]  # noqa: SLF001 — 등록된 종목 = 배포 설정의 종목
