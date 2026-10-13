@@ -120,6 +120,11 @@ def query_order_params(symbol: str, *, order_id: int | None, client_order_id: st
     return [("symbol", _symbol(symbol)), *_order_ref(order_id, client_order_id)]
 
 
+def symbol_params(symbol: str) -> Params:
+    """심볼 하나만 받는 조회(exchangeInfo·openOrders, T-M2-14)."""
+    return [("symbol", _symbol(symbol))]
+
+
 def window_params(symbol: str, *, start_ms: int, end_ms: int) -> Params:
     if end_ms < start_ms or end_ms - start_ms > MAX_WINDOW_MS:
         raise OrderBuildError("조회 창은 24시간 이내, 시작 ≤ 끝")
