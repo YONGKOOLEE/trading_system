@@ -1,7 +1,7 @@
 # 보조 기록 — 승인 근거가 아니다. 승인 근거는 docs/approvals.md.
 # 이 파일과 approvals.md가 충돌하면 진행하지 말고 사용자에게 확인한다.
-current_stage: 6            # 구현 — PAPER-0 3일차(2026-10-08) 완료(1~3일차, 전략 paper0-verify v2, 3일차는 "보는 자동 운영" 성공). 10-09 휴장, 10-12(월)부터 무인 자동 운영 예정(CP-029 A-080, 사용자 예약 작업 등록 필요). main ec84e74 1254 passed. 인계: docs/handoff.md
-delivery: M1                # 국내주식·ETF (키움 모의). M2 구현 진행(A-071, 브랜치 미병합)
+current_stage: 6            # 구현 — M1 PAPER-0 조건부 통과(A-097, 2026-10-13, 5거래일·무인 2일). 매일 06:45 무인 자동 운영 유지(paper0-verify v2). PAPER-1은 실제 전략 결정 뒤(D-076). 인계: docs/handoff.md
+delivery: M1                # 국내주식·ETF (키움 모의). M2 오프라인 구현(T-M2-01~14) main 병합, 테스트넷 키 입력 대기(A-096)
 business_definition: v0.6 approved   # 근거: A-029 (v0.5·v0.4·v0.3 superseded). v0.7 draft(CP-024) 승인 전
 gates:
   strategy: approved         # 00-strategy.md v0.4, A-029. v0.5 draft(CP-024·CP-030) 승인 전
@@ -14,4 +14,4 @@ implementation_start: authorized   # A-022 (2026-10-01). M2 구현 시작 A-071 
 live_order_code: not-authorized
 live_run: not-authorized    # 시장별: M1/M2/M3 모두 없음. PAPER 자동 운영(CP-029)은 PAPER 전용
 commit_policy: D-082 (A-017) + A-030   # 작업 완료·테스트 통과 시 로컬 커밋(문서 포함, A-030), push·main 병합은 지시 시
-last_updated: 2026-10-11   # A-085(CP-032 Q-1·Q-2 승인, 전략실 C:\AI\strategy-lab 생성). main 3ee9f97 코드 1566 passed(T-027 지정가 오프라인·실측 도구·capabilities 03a/03b·문서 반영), 이후 문서만. 미병합 integ/m2-2026-10-09 9df2fd2 2293 passed(M2 T-M2-04~13 완료·T-M2-09 대부분, 10-12 성공 조건부 병합 A-086). 마지막 기록 A-086(M2 임시 결정 확정, M2 병합 10-12 성공 조건부). 이전: main 2418489(예약 등록 수정·정지 요청 재시도, 1452 passed). 이전 4e76347(A-084 후속·백테스트·confirm-unknown 병합, 1449 passed), CP-032 draft. 마지막 기록 A-084(전체 점검 후속 작업 지시·결정 위임 2-1 CP-031 K3, 2-2 CAP-ORD-02 미지원, 2-3 텔레그램 금액 제외). 게이트 변경 없음. CP 승인: CP-026~CP-030(A-070·072·074·080·082), CP-031 A-084 위임, CP-025 미승인
+last_updated: 2026-10-13   # 세션 45 끝. main 13e2325(통합 2763 passed/1 skipped + PV-12 도구). 마지막 승인 기록 A-097(PAPER-0 조건부 통과·매일 자동 운영·PV-12/PV-11·M2 체크아웃 갱신). 승인 CP: CP-026~CP-032(단계 1·2)·CP-034(A-092~A-094), CP-031 위임, CP-025·CP-033 미승인. 게이트 변경 없음. 실전 주문 코드·LIVE 승인 없음
