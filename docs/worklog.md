@@ -468,3 +468,4 @@
 - 미해결: PV-11 절차 승인·Q-1(토큰 발급 감사 기록 코드 추가 여부)·Q-2(종료 시각)·Q-3(업데이트 1주 일시 중지). 외부 수동 매수 감지 시험 날짜.
 - 다음 세션 첫 행동: 10-15 06:50 "run 시작" 텔레그램·`autopilot-20261015.log` 확인(A-098 대책 첫날) → PV-11 절차 승인 받기(금요일 전).
 - (46 계속) 사용자 "Q-1 진행 전부 권장대로하고 push도 수행해" → **A-099**(PV-11 절차 승인 v0.2, 토큰 발급 감사 기록, 일요일 종료, 업데이트 일시 중지, push). 브랜치 feat/T-PV11-token-audit: `TokenIssue`·`on_issued`(token.py, 발급 루프는 `_issue_with_retry`로 이동만), adapter `on_token_issued`, main `token_issue_recorder`(감사 `TOKEN_ISSUED`, REFRESH만 INFO, 기록 실패는 K8로 번지지 않게 격리). 시험 `tests/scenario/test_pv11_token_audit.py` 9건(먼저 작성 → ImportError 실패 확인 → 구현 → 통과). 독립 재검토 1회: 막는 문제 없음, 기록 실패 격리·시험 3건 보강 반영. CLAUDE.md §12 모델 사용 규칙 추가(사용자 지시).
+- (46 계속) 사용자: 10-15 수동 매수 시험 예정, 전략 구성 중, "정리도 수행" → worktree 37개 제거·브랜치 3개 삭제(위 handoff). push는 권한 설정이 막아 미실행 — 사용자 실행 안내. 테스트넷 키 입력 안내(M2 체크아웃에 자격정보 파일 없음 확인, 파일 읽기 UTF-8 BOM 비허용). 승인 요청 "두개 승인"은 대상이 모호해 확인 질문(CP-033, draft 묶음 — 묶음에 미승인 CP-025 내용 포함·CP-032 단계 2·CP-034 미반영).
