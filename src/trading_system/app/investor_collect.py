@@ -21,6 +21,8 @@
 - 저장(D-190, storage investor_flow·investor_flow_seen): 새 값 = 회차 1, 같은 값 = 관측만 추가, 다른 값 = 새 회차 + 감사
   INVESTOR_FLOW_CORRECTED. 확정(D-189)은 관측 시각으로 판정한다 — 다음 날 저녁 수집이 전날 값을 다시 받아 확정 근거가 된다.
 - 종목 사이마다 run.lock·하트비트·마감 시한을 다시 보고, 걸리면 나머지는 조회하지 않는다. 3종목 연속 실패도 중단.
+- [T-037 D-194] 설정 financials = true면 투자자 수집 뒤 종목마다 ka10001 1회로 재무 스냅샷(CAP-DAT-05b)을 축적한다
+  (허용 목록에 ka10001 추가, 수집일 = 마지막으로 장이 끝난 거래일, 판정·백테스트 입력 아님). 요약에 축적 시작일.
 - 기록: var/paper/collect/evening-<YYYYMMDD-HHMMSS>.json (종목별 결과·건수·호출 수 — 값·토큰·앱키·계좌번호 없음).
 종료 코드: 0 = 모두 정상, 1 = 일부 실패·미조회·중단, 2 = 연결 전 거부(연결 없음).
 """
@@ -35,12 +37,15 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
+from trading_system.broker.base import BrokerQueryError
 from trading_system.broker.kiwoom.adapter import MOCK_REST, MOCK_WS
+from trading_system.broker.ratelimit import Priority, call_priority
 from trading_system.broker.kiwoom.token import TokenError
 from trading_system.config.errors import ConfigError
 from trading_system.domain.clock import KST, Clock
 from trading_system.domain.enums import Mode
 from trading_system.marketdata.calendar import KrxCalendar
+from trading_system.marketdata.fin_snapshot import FinParseError, parse_ka10001_fin
 from trading_system.marketdata.investor_flow import SOURCE as FLOW_SOURCE, is_trading_day, parse_ka10060_rows
 from trading_system.storage.repository import Repository
 
@@ -52,6 +57,8 @@ from .probe_tool import (MAX_CONSECUTIVE_FAILURES, PROBE_INTERVAL, UNSUPPORTED_M
 
 CONFIG_REL = Path("config") / "collect.paper.toml"
 EVENING_REST_APIS = frozenset({"au10001", "au10002", "ka10060"})   # HTTP 경계 허용 목록 (D-192·V-262)
+FIN_REST_APIS = EVENING_REST_APIS | {"ka10001"}                     # [T-037] financials = true일 때 (D-194)
+INFO_PATH = "/api/dostk/stkinfo"
 EVENING_EARLIEST = time(15, 45)            # 자동 운영 Schedule.stop_at과 같은 값 (시험이 같음을 확인)
 AFTER_CLOSE = timedelta(minutes=15)        # 자동 운영 Schedule.stop_after_close와 같은 값
 DEADLINE_DEFAULT = time(17, 30)
@@ -119,8 +126,6 @@ def load_collect_settings(path: Path, root: Path) -> CollectSettings:
     financials = raw.get("financials", False)
     if not isinstance(financials, bool):
         raise ConfigError("financials: true|false")
-    if financials:
-        raise ConfigError("financials: 재무 스냅샷 축적(T-037) 미구현 — false만")
     path_ = None if codes is None else (Path(codes) if Path(codes).is_absolute() else root / codes)
     return CollectSettings(enabled, path_, window, deadline, financials)
 
@@ -221,13 +226,58 @@ def collect_investor_flows(adapter: Any, guard: Any, repo: Repository, codes: Se
     return out
 
 
+def collect_fin_snapshots(adapter: Any, guard: Any, repo: Repository, codes: Sequence[str], day: date,
+                          clock: Clock, *, should_stop: Callable[[], str | None], log: Callable[[str], None],
+                          run_id: str) -> dict:
+    """[T-037 D-194] 종목마다 ka10001 1회 → 재무 필드 축적(판정·백테스트 입력 아님). 수집일 = 마지막으로 장이 끝난 거래일."""
+    out: dict[str, Any] = {"codes": len(codes), "ok": 0, "unchanged": 0, "duplicate_day": 0, "failed": [],
+                           "not_queried": [], "stopped": None, "first_day": None}
+    streak = 0
+    for idx, code in enumerate(codes):
+        why = should_stop()
+        if why is None and (guard.blocked or fatal_critical(adapter)):
+            why = "허용 밖 API 시도 또는 브로커 치명 오류"
+        if why is not None:
+            out["not_queried"], out["stopped"] = list(codes[idx:]), why
+            log(f"  재무 중단: {why} — 나머지 {len(codes) - idx}종목 조회 안 함")
+            break
+        try:
+            with call_priority(Priority.MARKET):
+                body, _ = adapter.query_raw(INFO_PATH, "ka10001", {"stk_cd": code}, None)
+            values = parse_ka10001_fin(body)
+        except (BrokerQueryError, FinParseError) as exc:
+            reason = _mask(exc)
+            out["failed"].append({"code": code, "reason": reason})
+            log(f"  재무 {code}: 실패 — {reason}")
+            streak += 1
+            if streak >= MAX_CONSECUTIVE_FAILURES or UNSUPPORTED_MARK in reason:
+                out["not_queried"], out["stopped"] = list(codes[idx + 1:]), f"연속 {streak}종목 실패"
+                break
+            continue
+        streak = 0
+        with repo.tx():
+            result = repo.record_fin_snapshot(code, day, values, clock.now(), run_id)
+        out["ok"] += 1
+        out["unchanged"] += result == "UNCHANGED"
+        out["duplicate_day"] += result == "DUPLICATE_DAY"
+    first = repo.fin_snapshot_first_day()
+    out["first_day"] = first.isoformat() if first is not None else None
+    return out
+
+
 # --- 진입 ---------------------------------------------------------------------------------------------------------
 
 Connect = Callable[[Path, Mapping[str, str] | None, Clock], object]
 
 
-def _default_connect(root: Path, environ: Mapping[str, str] | None, clock: Clock) -> object:
-    return connect_paper(root, environ, clock, per_tr_interval=PROBE_INTERVAL, allowed_apis=EVENING_REST_APIS)
+def rest_apis(settings: CollectSettings) -> frozenset[str]:
+    return FIN_REST_APIS if settings.financials else EVENING_REST_APIS
+
+
+def _connect_for(settings: CollectSettings) -> Connect:
+    def connect(root: Path, environ: Mapping[str, str] | None, clock: Clock) -> object:
+        return connect_paper(root, environ, clock, per_tr_interval=PROBE_INTERVAL, allowed_apis=rest_apis(settings))
+    return connect
 
 
 def _stop_reason(base: Path, clock: Clock, deadline: time) -> str | None:
@@ -261,7 +311,7 @@ def evening_collect(root: Path, environ: Mapping[str, str] | None, clock: Clock,
         codes = read_code_list(settings.codes_file)
     except (OSError, ProbeError) as exc:
         return refuse(f"종목 목록 {settings.codes_file.name}: {type(exc).__name__ if isinstance(exc, OSError) else exc}")
-    conn = (connect or _default_connect)(root, environ, clock)
+    conn = (connect or _connect_for(settings))(root, environ, clock)
     if isinstance(conn, str):
         return refuse(conn)
     adapter, guard = conn.adapter, conn.guard  # type: ignore[attr-defined]
@@ -275,11 +325,11 @@ def evening_collect(root: Path, environ: Mapping[str, str] | None, clock: Clock,
     log(f"저녁 수집 시작: {len(codes)}종목 ka10060 {first:%Y%m%d}~{last_day:%Y%m%d} (TR당 {PROBE_INTERVAL}초 간격)")
     meta: dict[str, Any] = {"tool": "app/investor_collect.py", "run": run_id, "basis": "CP-033 A-100 — 조회만, 주문 없음",
                             "started_at": stamp.isoformat(timespec="seconds"), "account_alias": adapter.cfg.account_alias,
-                            "codes_file": settings.codes_file.name, "allowed_rest_apis": sorted(EVENING_REST_APIS),
+                            "codes_file": settings.codes_file.name, "allowed_rest_apis": sorted(rest_apis(settings)),
                             "window": {"first": first.isoformat(), "last": last_day.isoformat(),
                                        "trading_days": settings.window_days},
                             "token": {"issued": False, "revoked": None}, "failures": [], "investor": None,
-                            "stopped": None}
+                            "financials": None, "stopped": None}
     repo = Repository(base / "trading.db", Mode.PAPER)
     try:
         try:
@@ -293,6 +343,14 @@ def evening_collect(root: Path, environ: Mapping[str, str] | None, clock: Clock,
                                          should_stop=lambda: _stop_reason(base, clock, settings.deadline),
                                          log=log, run_id=run_id)
             meta["investor"], meta["stopped"] = inv, inv["stopped"]
+            if settings.financials and inv["stopped"] is None:
+                fin = collect_fin_snapshots(adapter, guard, repo, codes, last_day, clock,
+                                            should_stop=lambda: _stop_reason(base, clock, settings.deadline),
+                                            log=log, run_id=run_id)
+                meta["financials"], meta["stopped"] = fin, fin["stopped"]
+            elif settings.financials:
+                meta["financials"] = {"codes": len(codes), "ok": 0, "unchanged": 0, "duplicate_day": 0, "failed": [],
+                                      "not_queried": list(codes), "stopped": inv["stopped"], "first_day": None}
     finally:
         revoked = adapter.close()   # 토큰 폐기 au10002
         repo.close()
@@ -308,11 +366,18 @@ def evening_collect(root: Path, environ: Mapping[str, str] | None, clock: Clock,
     mpath.write_text(json.dumps(meta, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     inv = meta["investor"] or {"codes": len(codes), "ok": 0, "failed": [], "not_queried": list(codes), "new": 0,
                                "same": 0, "corrected": 0, "invalid_days": 0, "sum_warnings": 0}
+    fin = meta["financials"]
+    if settings.financials and fin is None:
+        fin = {"codes": len(codes), "ok": 0, "unchanged": 0, "failed": [], "not_queried": list(codes), "first_day": None}
     bad = bool(meta["failures"] or inv["failed"] or inv["not_queried"] or meta["blocked_before_send"]
-               or meta["critical"])
+               or meta["critical"] or (fin is not None and (fin["failed"] or fin["not_queried"])))
     log(f"저녁 수집(05a): 종목 {inv['codes']} 성공 {inv['ok']} 실패 {len(inv['failed'])} 미조회 "
         f"{len(inv['not_queried'])}, 새 {inv['new']} 같음 {inv['same']} 정정 {inv['corrected']}, 무효 일자 "
-        f"{inv['invalid_days']}, 합계 경고 {inv['sum_warnings']}, 호출 {meta['calls']}회"
+        f"{inv['invalid_days']}, 합계 경고 {inv['sum_warnings']}"
+        + ("" if fin is None else f", 재무 스냅샷(05b): 성공 {fin['ok']} 변화 없음 {fin['unchanged']} 실패 "
+                                  f"{len(fin['failed'])} 미조회 {len(fin['not_queried'])}, 축적 시작일 "
+                                  f"{fin['first_day'] or '없음'}")
+        + f", 호출 {meta['calls']}회"
         + (f", 중단: {meta['stopped']}" if meta["stopped"] else "") + (", 토큰 발급 실패" if meta["failures"] else ""))
     return 1 if bad else 0
 
@@ -333,6 +398,6 @@ def evening_from_autopilot(root: Path, environ: Mapping[str, str] | None, clock:
     return rc, "\n".join([lines[-1], *lines[:-1]]) if lines else ""
 
 
-__all__ = ["AFTER_CLOSE", "CONFIG_REL", "CollectSettings", "EVENING_EARLIEST", "EVENING_REST_APIS",
-           "collect_investor_flows", "evening_collect", "evening_from_autopilot", "evening_refusal",
+__all__ = ["AFTER_CLOSE", "CONFIG_REL", "CollectSettings", "EVENING_EARLIEST", "EVENING_REST_APIS", "FIN_REST_APIS",
+           "collect_fin_snapshots", "collect_investor_flows", "rest_apis", "evening_collect", "evening_from_autopilot", "evening_refusal",
            "load_collect_settings", "window_start"]

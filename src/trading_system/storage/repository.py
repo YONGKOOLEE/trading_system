@@ -25,6 +25,7 @@ from pathlib import Path
 from trading_system.domain.clock import KST, from_iso, to_iso
 from trading_system.domain.daily_base import DailyBase, DailyBaseCorrupt
 from trading_system.domain.enums import ACTIVE_INTENT_STATES, IntentState, Mode
+from trading_system.domain.fin import FIN_BASIS, FIN_SOURCE
 from trading_system.domain.investor_flow import INVESTOR_KEYS, UNIT_AMOUNT, FlowRevision, FlowWrite, InvestorFlow
 from trading_system.domain.minute_bar import MinuteBar
 from trading_system.domain.models import Account
@@ -197,6 +198,17 @@ CREATE TRIGGER IF NOT EXISTS investor_flow_seen_no_update BEFORE UPDATE ON inves
   BEGIN SELECT RAISE(ABORT, 'investor_flow_seen is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS investor_flow_seen_no_delete BEFORE DELETE ON investor_flow_seen
   BEGIN SELECT RAISE(ABORT, 'investor_flow_seen is append-only'); END;
+-- 재무 스냅샷 (CAP-DAT-05b, CP-033 D-194·02 ENT-34, T-037): 키 (종목, 수집일). 축적만 — 판정·백테스트 입력에 쓰지 않는다.
+-- 추가 전용(트리거, 자동 삭제 없음, 스키마 번호 유지). fields = ka10001 필드 JSON, unchanged = 직전 스냅샷과 같음,
+-- basis = 기준 기간 미확인 표시. 같은 날 다시 받으면 처음 값 유지
+CREATE TABLE IF NOT EXISTS fin_snapshot (
+  instrument TEXT NOT NULL, collected_day TEXT NOT NULL, mode TEXT NOT NULL, fields TEXT NOT NULL,
+  unparsed TEXT NOT NULL, unchanged INTEGER NOT NULL, basis TEXT NOT NULL, source TEXT NOT NULL,
+  collected_at TEXT NOT NULL, collect_run TEXT NOT NULL, PRIMARY KEY (instrument, collected_day));
+CREATE TRIGGER IF NOT EXISTS fin_snapshot_no_update BEFORE UPDATE ON fin_snapshot
+  BEGIN SELECT RAISE(ABORT, 'fin_snapshot is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS fin_snapshot_no_delete BEFORE DELETE ON fin_snapshot
+  BEGIN SELECT RAISE(ABORT, 'fin_snapshot is append-only'); END;
 -- 조회 인덱스: 데이터 의미 불변이라 스키마 버전을 올리지 않는다 — 기존 저장소도 열 때 생성 (review C절, DP-38)
 CREATE INDEX IF NOT EXISTS ix_intent_state ON intent(state);
 CREATE INDEX IF NOT EXISTS ix_ops_command_status ON ops_command(status);
@@ -619,6 +631,31 @@ class Repository:
             flow = InvestorFlow(instrument, date.fromisoformat(day), unit, tuple(vals))
             out.append(FlowRevision(flow, rev, from_iso(rows[0]["collected_at"]), tuple(seen.get((day, rev), ()))))
         return out
+
+    # --- 재무 스냅샷 (CAP-DAT-05b, CP-033 D-194, T-037) — 축적만 ------------------------------
+    def record_fin_snapshot(self, instrument: str, day: date, values: object, at: datetime, run_id: str) -> str:
+        """재무 스냅샷 1건 추가. "NEW" / "UNCHANGED"(직전 스냅샷과 같음 — 표시만, 값도 저장) / "DUPLICATE_DAY"(같은 날
+        이미 있음 — 처음 값 유지). values: marketdata.fin_snapshot.FinValues(as_dict·unparsed). 저장 단위 안에서 부른다."""
+        if not self.in_transaction:
+            raise ValueError("record_fin_snapshot는 저장 단위(tx) 안에서")
+        fields = dict(values.as_dict())  # type: ignore[attr-defined]
+        unparsed = list(values.unparsed)  # type: ignore[attr-defined]
+        if self._x("SELECT 1 FROM fin_snapshot WHERE instrument=? AND collected_day=?",
+                   (instrument, day.isoformat())).fetchone():
+            return "DUPLICATE_DAY"
+        prev = self._x("SELECT fields FROM fin_snapshot WHERE instrument=? AND collected_day<? "
+                       "ORDER BY collected_day DESC LIMIT 1", (instrument, day.isoformat())).fetchone()
+        unchanged = prev is not None and json.loads(prev["fields"]) == fields
+        self._x("INSERT INTO fin_snapshot(instrument, collected_day, mode, fields, unparsed, unchanged, basis, source, "
+                "collected_at, collect_run) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (instrument, day.isoformat(), self.mode.value, json.dumps(fields, ensure_ascii=False, sort_keys=True),
+                 json.dumps(unparsed, ensure_ascii=False), int(unchanged), FIN_BASIS, FIN_SOURCE, to_iso(at), run_id))
+        return "UNCHANGED" if unchanged else "NEW"
+
+    def fin_snapshot_first_day(self) -> date | None:
+        """축적 시작일 (가장 이른 수집일). 없으면 None."""
+        r = self._x("SELECT MIN(collected_day) FROM fin_snapshot").fetchone()
+        return date.fromisoformat(r[0]) if r is not None and r[0] else None
 
     def investor_flow_instruments(self, unit: str = UNIT_AMOUNT) -> list[str]:
         return [r["instrument"] for r in self._x("SELECT DISTINCT instrument FROM investor_flow WHERE unit=? "
