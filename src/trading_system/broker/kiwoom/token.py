@@ -7,6 +7,7 @@
 - 발급도 호출 제한기(TR au10001)를 거치고, 시도 사이에 1·2초 대기한다. 발급 전체 시간 예산(기본 20초)을 넘길
   시도는 시작하지 않는다 — 잠금을 쥔 채 최악 약 27초(시도 13초 × 2 + 대기 1초)를 넘지 않는다 (RV-19, D-048).
 - 폐기 au10002 `POST /oauth2/revoke`(appkey·secretkey·token)는 종료 시 1회.
+- 발급 성공은 `on_issued`로 알린다(사유·시각·만료 시각, 토큰 값 없음 — PV-11 관찰, A-099). 콜백 오류는 무시한다.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from trading_system.domain.clock import Clock
@@ -36,11 +38,22 @@ class TokenError(RuntimeError):
         self.error_class = error_class
 
 
+@dataclass(frozen=True)
+class TokenIssue:
+    """발급 성공 기록 (PV-11). INITIAL 첫 발급 / REFRESH 만료 임박 갱신 / REISSUE 무효화(인증 오류) 뒤 재발급."""
+    reason: str
+    issued_at: datetime
+    expires_at: datetime | None
+    previous_expires_at: datetime | None
+    count: int
+
+
 class TokenManager:
     def __init__(self, http: KiwoomHttp, app_key: Callable[[], str], secret_key: Callable[[], str], clock: Clock,
                  on_critical: Callable[[str, str], None] | None = None, *,
                  limiter: RateLimiter | None = None, sleep: Callable[[float], None] = time.sleep,
-                 monotonic: Callable[[], float] = time.monotonic, issue_budget: float = ISSUE_BUDGET) -> None:
+                 monotonic: Callable[[], float] = time.monotonic, issue_budget: float = ISSUE_BUDGET,
+                 on_issued: Callable[[TokenIssue], None] | None = None) -> None:
         self._http = http
         self._limiter = limiter
         self._sleep = sleep
@@ -50,6 +63,7 @@ class TokenManager:
         self._secret = secret_key
         self._clock = clock
         self._critical = on_critical or (lambda kind, msg: None)
+        self._on_issued = on_issued
         self._lock = threading.Lock()
         self._token: str | None = None
         self._expires: datetime | None = None
@@ -62,28 +76,45 @@ class TokenManager:
             if self._token is not None and self._expires is not None and \
                     self._clock.now() < self._expires - REFRESH_BEFORE:
                 return self._token
-            last: TokenError | None = None
-            start = self._mono()
-            for attempt in range(ISSUE_ATTEMPTS):
-                if attempt:
-                    pause = ISSUE_BACKOFF[min(attempt - 1, len(ISSUE_BACKOFF) - 1)]
-                    if self._mono() - start + pause > self._budget:
-                        break  # 시간 예산 초과 — 더 시도하지 않는다 (RV-19)
-                    self._sleep(pause)
-                try:
-                    self._acquire(start)
-                    self._issue()
-                    self.consecutive_failures = 0
-                    assert self._token is not None
-                    return self._token
-                except TokenError as exc:
-                    last = exc
-                    self.consecutive_failures += 1
-                    if exc.error_class in (ErrorClass.MODE_MISMATCH, ErrorClass.TERMINAL):
-                        break  # 다시 해도 같은 결과: 바로 치명 처리
-            kind = last.error_class.value if last and last.error_class else "AUTH"
-            self._critical(kind, f"토큰 발급 실패 {self.consecutive_failures}회: {last}")
-            raise last or TokenError("토큰 발급 실패")
+            reason = "REFRESH" if self._token is not None else ("INITIAL" if self.issued == 0 else "REISSUE")
+            previous = self._expires
+            tok = self._issue_with_retry()
+            event = TokenIssue(reason, self._clock.now(), self._expires, previous, self.issued)
+        self._report(event)   # 잠금 밖에서 — 기록이 느려도 다른 스레드의 토큰 사용을 막지 않는다
+        return tok
+
+    def _issue_with_retry(self) -> str:
+        """잠금을 쥔 채 호출한다. 최대 3회 발급, 모두 실패하면 치명 알림 뒤 TokenError."""
+        last: TokenError | None = None
+        start = self._mono()
+        for attempt in range(ISSUE_ATTEMPTS):
+            if attempt:
+                pause = ISSUE_BACKOFF[min(attempt - 1, len(ISSUE_BACKOFF) - 1)]
+                if self._mono() - start + pause > self._budget:
+                    break  # 시간 예산 초과 — 더 시도하지 않는다 (RV-19)
+                self._sleep(pause)
+            try:
+                self._acquire(start)
+                self._issue()
+                self.consecutive_failures = 0
+                assert self._token is not None
+                return self._token
+            except TokenError as exc:
+                last = exc
+                self.consecutive_failures += 1
+                if exc.error_class in (ErrorClass.MODE_MISMATCH, ErrorClass.TERMINAL):
+                    break  # 다시 해도 같은 결과: 바로 치명 처리
+        kind = last.error_class.value if last and last.error_class else "AUTH"
+        self._critical(kind, f"토큰 발급 실패 {self.consecutive_failures}회: {last}")
+        raise last or TokenError("토큰 발급 실패")
+
+    def _report(self, event: TokenIssue) -> None:
+        if self._on_issued is None:
+            return
+        try:
+            self._on_issued(event)
+        except Exception:  # noqa: BLE001 — 관찰 기록 실패가 토큰 경로를 바꾸지 않는다
+            pass
 
     def _acquire(self, start: float) -> None:
         """발급도 호출 제한기를 거친다 (TR au10001, RV-19). 대기는 남은 예산까지."""
