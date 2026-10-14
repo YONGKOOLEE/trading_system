@@ -1,7 +1,7 @@
 # 00 — 전략 정의 형식과 등록 절차
 
 - 버전: v0.4
-- 상태: approved (2026-10-02 사용자 승인, A-029. CP-018 반영. 이전 승인본 v0.3 → [archive/00-strategy-v0.3.md](archive/00-strategy-v0.3.md))
+- 상태: approved (2026-10-02 사용자 승인, A-029. CP-018 반영. 이전 승인본 v0.3 → [archive/00-strategy-v0.3.md](archive/00-strategy-v0.3.md)) — **superseded** (2026-10-14, 00 v0.5 승인 A-102로 대체)
 - 작성일 / 최종 수정일: 2026-10-01 / 2026-10-02
 - 단계 / 게이트: 0단계 / strategy:approved
 - 인도 차수: 공통 본문 + M1 부록 (M2·M3는 알려진 차이만)

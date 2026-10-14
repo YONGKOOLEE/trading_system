@@ -1,15 +1,16 @@
 # 세션 인계 (짧게 유지 — 작업이 끝날 때마다 덮어쓴다)
 
-- 갱신: **2026-10-14 밤(세션 46)**. 마지막 승인 기록 **A-099**(다음 번호 A-100). main **13e2325** — push 없음, 체크아웃 main, 미커밋 변경 없음(`.claude/`는 worktree 폴더).
+- 갱신: **2026-10-14 밤(세션 46 끝)**. 마지막 승인 기록 **A-103**(다음 번호 A-104). 체크아웃 main. 사용자가 밤에 push함(origin 갱신) — 이후 로컬 커밋 몇 개는 push 대기(`git status -sb`로 확인, push는 사용자 실행 — 에이전트 권한 차단).
+- **계획 문서 재승인 A-102**: 업무정의서 v0.7·00 v0.5·01 v0.9·02 v0.8·03 v1.0·04 v0.9·05 v0.6 approved(CP-024~034 반영, CP-032 단계 3~5 제외). **승인 제외(미결)**: 01 K9 교체 행 vs 04 V-180 충돌. 이전 승인본 archive superseded. 검토 요약 `docs/changes/draft-bundle-review-2026-10-14.md`(보류 H-1~H-9, §6 미결 목록).
 - **PAPER-0 조건부 통과(A-097)**: 10-06·07·08(수동·반자동)·10-12·13(**무인**) 5거래일, 왕복 4건, 결과 불명·중복·불일치 0. 10-13: 시작 점검 시계 0.06초·장중 최대 0.353초, 매수 237,500·매도 232,500, 15:45 종료 코드 0. 07-paper-review §12D·§12E. **매일 06:45 무인 자동 운영 유지**(paper0-verify v2, 예약 작업 `TradingSystem-PAPER-Autopilot`·`ClockSync`).
 - **main 최신 시험**: 통합 2763 passed/1 skipped(T-028·T-M2-14 병합 시점), 이후 PV-12 도구 병합(73 passed, 에이전트 전체 2836 passed). 실제 `config/*.paper.toml`로 M1 시작 일치·DB 메타·공통 설정 오프라인 검사 통과.
 - **10-14(수) 자동 운영 미실행**: 05:44·05:48 Windows Update 계획 재시작 → 08:52 로그온 전이라 Interactive 예약 작업 건너뜀(CP-029 R-4 발생, 07 §12F). 대책 **A-098**: 업데이트 사용 시간 05:00~23:00(확인), 업데이트 후 자동 로그인(사용자 보고). D-158 유지. 내부 상태 이상 없음.
-- 실전 주문 코드·LIVE 승인 **없음**. 00~05·업무정의서 draft 묶음 승인 전(검토 요약 docs/changes/draft-bundle-review-2026-10-07.md).
+- 실전 주문 코드·LIVE 승인 **없음**.
 
 ## 지금 main에 들어 있는 것 (이번 주 병합)
 | 항목 | 상태 |
 |---|---|
-| M2(바이낸스) 오프라인 구현 T-M2-01~14 | 병합(c2ed1e1, 722d0c2). 테스트넷은 **조회만**·주문 계열 19경로 전송 전 차단. 유니버스 BTCUSDT(A-096). 실제 연결은 **사용자 키 입력 대기** |
+| M2(바이낸스) 오프라인 구현 T-M2-01~14 | 병합(c2ed1e1, 722d0c2). 테스트넷은 **조회만**·주문 계열 19경로 전송 전 차단. 유니버스 BTCUSDT(A-096). **테스트넷 시작 점검 통과 2026-10-14 23:06**(서버 시각 57ms, BTCUSDT 규칙·rateLimits — binance-spot §12, PV-M2-03). 사용자 키·접속 스위치 입력 완료 |
 | CP-032 단계 1 지정가(T-027) | 오프라인 구현·능력 표 "검증 중". PAPER 사용 금지(Q-3 미승인) |
 | CP-032 단계 2 분봉(T-028) | 수집·저장·정규장 필터·`fetch-minute.py` 병합. 판정 연결(T-029)은 우선순위 낮음, 분봉 전략 검증 기준 보류(A-095) |
 | CP-034(L1 여유 3%·정책 프로필·전략별 슬롯·U-B 목록·배분 규칙) | 승인 A-092·A-093·A-094, 구현 병합(79933ba). paper0 값 불변. 프로필 파일 `config/limits.research.toml`·`limits.paper1.toml` |
@@ -18,22 +19,22 @@
 | 수집 | 코스피200 201종목 일봉+KOSPI 지수(`var\backtest\data\kiwoom-kospi200-adj-20261009`), 투자자별 ka10060 201종목(`kiwoom-investor-20261008`), 005930 깊은 조회(`kiwoom-investor-probe`) |
 
 ## 다음 세션 첫 행동
-1. `git status`·이 파일·`docs/approvals.md` 끝 3행(A-097~A-099)·`docs/worklog.md` 마지막 항목(46) 확인. 실행 모드 확인은 `status.py --mode PAPER`(읽기).
+1. `git status`·이 파일·`docs/approvals.md` 끝 5행(A-099~A-103)·`docs/worklog.md` 마지막 항목(46) 확인. 실행 모드 확인은 `status.py --mode PAPER`(읽기).
 2. **10-15(목) 아침 결과 확인 — A-098 대책 첫날**: 06:50 "시작 점검 통과, run 시작" 텔레그램 수신 여부(사용자), `var\paper\logs\autopilot-20261015.log` 존재·종료 코드, `Get-ScheduledTaskInfo` NumberOfMissedRuns. 업데이트 재시작이 있었다면 이벤트 1074 시각과 자동 로그인 동작을 확인.
    - **외부 수동 매수 감지 시험(PV-13 대체)**: 10-14 미실행 → **사용자 10-15(목) 수행 예정**. 방법은 그대로(장중 09:31 이후 005930 아닌 종목 1주 손 매수 → 주기 대조 K4·긴급 알림·14:30 매도 허용 관찰 → 다음 날 아침 전 `reconcile-resolve`).
 3. **텔레그램 `[M1]` 접두어**: 10-13부터 붙는다. 사용자에게 화면 확인을 한 번 요청(로그에는 안 남음).
-4. **M2 테스트넷 연결**(사용자 **로컬**에 있을 때만): 테스트넷 키 발급(testnet.binance.vision, GitHub 로그인, **HMAC**) → `C:\AI\trading_system\m2-binance\.env.paper`(메모장 UTF-8: `TRADE_MODE=PAPER`·`BINANCE_TESTNET_API_KEY`·`BINANCE_TESTNET_SECRET_KEY`) → `m2-binance\config\m2\app.paper.toml`의 `connection_approved = true` → PowerShell `cd C:\AI\trading_system\m2-binance` / `$env:TRADE_MODE='PAPER'` / `C:\AI\trading_system\trading_system\.venv\Scripts\python.exe scripts\binance-preflight.py --market M2`(M1 자동 운영이 꺼진 저녁). m2-binance는 브랜치 `m2/run`(=main 6673a64, T-M2-14 포함). 키 값은 읽지 않는다. 결과 파일 `m2-binance\var\paper\preflight\*-m2-preflight.md`로 PV-M2-03 기록(BTCUSDT 규칙·rateLimits·서버 시각).
+4. **M2**: 테스트넷 시작 점검 **통과(2026-10-14, PV-M2-03 기록)**. 키는 m2-binance 폴더의 자격정보 파일에 사용자가 입력 완료(TRADE_MODE 줄 첫 시도 누락 → 수정), 접속 스위치 켜짐(m2-binance 작업 트리의 설정 파일 수정 — 커밋하지 않음). 다음은 T-M2-15 M2 PAPER-0(테스트넷 모의 주문) — **검증 전략(종목·시각·수량) 승인 + 별도 승인** 필요. 에이전트가 검증 전략 초안을 제안할 수 있음.
 5. **PV-11 주말 장시간 실행 — 승인 A-099**, 절차 `docs/strategies/paper0-verify/pv11-weekend-run.md` v0.2. 금 10-16 저녁 사용자 시작(자동 운영 요약 수신 뒤 status → preflight → 수동 run, **K8 풀지 않음**), **일요일 21:00~22:30 정지**(`ops-stop.py` → backup → paper-review → status: 정지는 K8·K9뿐이어야 월요일 자동 재개). Windows Update 1주 일시 중지(사용자). 토큰 발급 감사 기록 `TOKEN_ISSUED`(INITIAL·REFRESH·REISSUE, REFRESH는 텔레그램 INFO "토큰 갱신") main 반영 — **10-15 아침 run에서 INITIAL 행 생기는지 확인**(첫 실제 실행). 끝나면 사용자 "주말 실행 끝" → 절차 §8대로 07 §12G 기록.
 6. 응답 방식: 사용자는 터미널에 익숙하지 않다 — **복사해 붙일 전체 명령**, 쉼표 목록은 큰따옴표(`--codes "005930,000660"`), 용어 풀어서. "실전"은 LIVE에만. 평일 07:15 출발·장중 부재·텔레그램만 가능(10-14 수동 매수는 휴대폰 앱으로 가능).
 
 ## 사용자 결정 대기 (급하지 않음)
 1. **실제 매매 전략** — 전략실(별도 세션)에서 연구 중. 전략이 정해져야 PAPER-1(최소 20거래일) 시작. 지금 가장 큰 병목.
-2. **CP-033**(수급 데이터 CAP-DAT-05a·재무 스냅샷 축적, draft) 승인 + Q-6(저녁 수집을 자동 운영 단계로 붙일지)·Q-7·Q-8(수집 대상 종목). 데이터는 이미 수집됨(실측 결과 K-U42 일부 해소: 005930은 2006-01-02부터 값 있음, 합계 불일치 836행 원인 미확인).
+2. **CP-033 승인 A-100**(Q-6 (a) 15:45 종료 뒤 저녁 수집·Q-7·Q-8 201종목) — **구현 T-035~T-037 작업 지시 대기**. 데이터는 이미 수집됨(실측 결과 K-U42 일부 해소: 005930은 2006-01-02부터 값 있음, 합계 불일치 836행 원인 미확인).
 3. **분봉 매일 축적**(A-095 ②) — 대상 종목 목록을 전략실이 정하면 `fetch-minute.py` 저녁 실행 안내(첫 실행 종목당 약 3.5분). 자동 운영 단계에 넣는 것은 CP-029 범위 변경 → 별도 확인.
-4. **CP-034 후속**(구현 대기): Q-10 (가)=아침 06:00 이후 run 전 지수 수집(A-094) — 자동 운영 절차 단계 추가 + 배분 규칙 PAPER 배포 연결(`[[allocations]]`) 미구현; 전략 명세 `policy_profile` 선언 검사 미구현; 00~05에 `[CP-034]`·`[CP-032 단계 2]` 표시 반영 안 됨(draft 문서 갱신).
+4. **CP-034 후속**(구현 대기): Q-10 (가)=아침 06:00 이후 run 전 지수 수집(A-094) — 자동 운영 절차 단계 추가 + 배분 규칙 PAPER 배포 연결(`[[allocations]]`) 미구현; 전략 명세 `policy_profile` 선언 검사 미구현. (문서 반영은 A-102로 완료)
 5. **CP-032 Q-3**(모의 지정가 실측: 500원 배수 접수·250원 거부, PAPER 주문)·Q-4(단타 프로필 값)·Q-5(다종목 CP).
 6. **M2 다음**: T-M2-15 M2 PAPER-0(테스트넷 모의 주문)은 검증 전략 승인과 함께 별도 승인. V-157 미실행 4개(V-02·V-76 부분, V-112·V-127).
-7. 문서 승인 묶음(CP-025부터, 00~05 draft 승인) — 코드는 이미 main에 있음.
+7. **문서 묶음 승인 완료(A-102)**. 남은 것: 01 K9 교체 행 vs 04 V-180 충돌 결정, 검토 요약 §6 미결(문서에 착수 시점 표시), `docs/capabilities.md`를 CP-024 능력 표 draft(changes/CP-024-capabilities-draft.md, 조건 "00 v0.5 승인" 충족)로 교체할지 — 실행 코드가 읽는 파일이라 run 꺼진 저녁에, 별도 지시로.
 8. 분봉 전략 검증 기준(제공 약 1년이라 CP-030 7창 불가) — 분봉 전략 후보가 나올 때(A-095 ③ 보류).
 
 ## 에이전트가 사용자에게 아직 못 알린 것

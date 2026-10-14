@@ -1,7 +1,7 @@
 # 업무정의서 — 개인용 자동매매 시스템
 
-- 문서명/버전: 업무정의서 **v0.7 (draft, CP-024 반영, A-066 승인 CP. 승인 전 — 이전 승인본 v0.6 → [archive/business-definition-v0.6.md](archive/business-definition-v0.6.md))**
-- 현재 승인본: v0.6 (approved, 2026-10-02 사용자 승인, A-029 — CP-018 반영). 이 draft가 승인되기 전까지 v0.6이 기준이다
+- 문서명/버전: 업무정의서 **v0.7 (approved, 2026-10-14 사용자 승인, A-102 — 계획 문서 묶음, CP-024 반영. 이전 승인본 v0.6 → [archive/business-definition-v0.6.md](archive/business-definition-v0.6.md), superseded)**
+- 현재 승인본: **v0.7** (A-102). v0.6(A-029)은 superseded
 - [v0.7] 변경 (draft, 미승인): CP-024 §3 업무정의서 행 (A-066) — §0-1 U-12·U-13·U-14 해소 표시, R-04·R-23 기준 통화 문구(계좌(시장)별 단일 기준 통화, 시장 간 합산 한도 없음), R-14·R-27 M2 내용. **M1 동작 변경 없음**(M1은 KRW 단일·KRX 달력·R-27 국내 규칙 그대로). 바뀐 곳은 `[v0.7 CP-024]`로 표시
 - 이전 버전: v0.5 (superseded, A-012) → [archive/business-definition-v0.5.md](archive/business-definition-v0.5.md), v0.4 (superseded, A-002·A-003) → [archive/business-definition-v0.4.md](archive/business-definition-v0.4.md), v0.3 (superseded) → [archive/business-definition-v0.3.md](archive/business-definition-v0.3.md)
 - [v0.6] 변경: CP-018 Q2 (A-029) — R-17·E-8의 "검증 통과 전 PAPER 투입 불가"를 "이 시스템 백테스트 실행 기록과 사용자 승인 전 PAPER 투입 불가"로 변경. 그 외 본문은 v0.5와 같다

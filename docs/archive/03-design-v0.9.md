@@ -1,7 +1,7 @@
 # 03 — 시스템 구조와 기술 선택
 
 - 버전: v0.9
-- 상태: approved (2026-10-05 사용자 승인, A-060. CP-023 반영. 이전 승인본 v0.8 → [archive/03-design-v0.8.md](archive/03-design-v0.8.md))
+- 상태: approved (2026-10-05 사용자 승인, A-060. CP-023 반영. 이전 승인본 v0.8 → [archive/03-design-v0.8.md](archive/03-design-v0.8.md)) — **superseded** (2026-10-14, 03 v1.0 승인 A-102로 대체)
 - 작성일 / 최종 수정일: 2026-10-01 / 2026-10-05
 - 단계 / 게이트: 3단계 / design:approved
 - 인도 차수: 공통 본문 + M1 부록 (M2·M3는 알려진 차이만)

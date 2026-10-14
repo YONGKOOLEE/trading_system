@@ -1,17 +1,17 @@
 # 보조 기록 — 승인 근거가 아니다. 승인 근거는 docs/approvals.md.
 # 이 파일과 approvals.md가 충돌하면 진행하지 말고 사용자에게 확인한다.
 current_stage: 6            # 구현 — M1 PAPER-0 조건부 통과(A-097, 2026-10-13, 5거래일·무인 2일). 매일 06:45 무인 자동 운영 유지(paper0-verify v2). PAPER-1은 실제 전략 결정 뒤(D-076). 인계: docs/handoff.md
-delivery: M1                # 국내주식·ETF (키움 모의). M2 오프라인 구현(T-M2-01~14) main 병합, 테스트넷 키 입력 대기(A-096)
-business_definition: v0.6 approved   # 근거: A-029 (v0.5·v0.4·v0.3 superseded). v0.7 draft(CP-024) 승인 전
+delivery: M1                # 국내주식·ETF (키움 모의). M2: 오프라인 구현 main 병합, 테스트넷 시작 점검 통과 2026-10-14(PV-M2-03, 조회만 A-096). M2 PAPER-0(T-M2-15)은 검증 전략 승인 대기
+business_definition: v0.7 approved   # 근거: A-102 (2026-10-14 계획 문서 묶음). v0.6 superseded
 gates:
-  strategy: approved         # 00-strategy.md v0.4, A-029. v0.5 draft(CP-024·CP-030) 승인 전
-  requirements: approved     # 01-requirements.md v0.8, A-060 (CP-021·022·023). v0.9 draft(CP-024~CP-031) 승인 전
-  data-model: approved       # 02-data-model.md v0.7, A-029. v0.8 draft 승인 전
-  design: approved           # 03-design.md v0.9, A-060 (CP-022·023). v1.0 draft(CP-024~CP-031) 승인 전
-  validation: approved       # 04-validation.md v0.8, A-060 (CP-022·023). v0.9 draft(CP-024~CP-031) 승인 전
-  plan: approved             # 05-plan.md v0.5, A-033 (CP-019). v0.6 draft(CP-024·026·027·029·030) 승인 전
+  strategy: approved         # 00-strategy.md v0.5, A-102 (v0.4 superseded)
+  requirements: approved     # 01-requirements.md v0.9, A-102 (v0.8 superseded). 제외(미결): K9 교체 행 vs 04 V-180
+  data-model: approved       # 02-data-model.md v0.8, A-102 (v0.7 superseded)
+  design: approved           # 03-design.md v1.0, A-102 (v0.9 superseded)
+  validation: approved       # 04-validation.md v0.9, A-102 (v0.8 superseded). 제외(미결): V-180
+  plan: approved             # 05-plan.md v0.6, A-102 (v0.5 superseded)
 implementation_start: authorized   # A-022 (2026-10-01). M2 구현 시작 A-071 (2026-10-07)
 live_order_code: not-authorized
 live_run: not-authorized    # 시장별: M1/M2/M3 모두 없음. PAPER 자동 운영(CP-029)은 PAPER 전용
 commit_policy: D-082 (A-017) + A-030   # 작업 완료·테스트 통과 시 로컬 커밋(문서 포함, A-030), push·main 병합은 지시 시
-last_updated: 2026-10-14   # 세션 46. 10-14 자동 운영 미실행(Windows Update 재시작, 07 §12F) → A-098. A-099 PV-11 주말 실행 절차 승인(v0.2)·토큰 발급 감사 기록 TOKEN_ISSUED main 병합(b75e0b4, 전체 2845 passed/1 skipped). 게이트 변경 없음. 실전 주문 코드·LIVE 승인 없음
+last_updated: 2026-10-14   # 세션 46 밤. A-098~A-103: 재부팅 대책, PV-11 절차·토큰 감사 기록(main 병합), CP-033·CP-025 승인, 계획 문서 묶음 재승인(A-102), R-9 정정. M2 테스트넷 시작 점검 통과(PV-M2-03). 실전 주문 코드·LIVE 승인 없음

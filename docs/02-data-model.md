@@ -1,7 +1,7 @@
 # 02 — 범용 데이터 모델 (논리)
 
 - 버전: v0.8
-- 상태: draft (CP-024 반영, A-066 승인 CP. 승인 전 — 이전 승인본 v0.7 → [archive/02-data-model-v0.7.md](archive/02-data-model-v0.7.md))
+- 상태: **approved** (2026-10-14 사용자 승인, A-102 — 계획 문서 묶음. 포함 CP: 024·025·026~031·032 단계 1·2·033·034. 승인 제외(미결): 01 K9 교체 행 vs 04 V-180 충돌. 이전 승인본 v0.7 → [archive/02-data-model-v0.7.md](archive/02-data-model-v0.7.md), superseded)
 - 작성일 / 최종 수정일: 2026-10-01 / 2026-10-14
 - 단계 / 게이트: 2단계 / data-model:approved (v0.7 기준. v0.8은 승인 전)
 - 인도 차수: 공통 본문 + M1 부록 + M2 부록 (M3는 필드만 예약) [v0.8 CP-024]

@@ -1,6 +1,6 @@
 # 업무정의서 — 개인용 자동매매 시스템
 
-- 문서명/버전: 업무정의서 **v0.6 (approved, 2026-10-02 사용자 승인, A-029 — CP-018 반영)**
+- 문서명/버전: 업무정의서 **v0.6 (approved, 2026-10-02 사용자 승인, A-029 — CP-018 반영) — **superseded** (2026-10-14, v0.7 승인 A-102로 대체)**
 - 이전 버전: v0.5 (superseded, A-012) → [archive/business-definition-v0.5.md](archive/business-definition-v0.5.md), v0.4 (superseded, A-002·A-003) → [archive/business-definition-v0.4.md](archive/business-definition-v0.4.md), v0.3 (superseded) → [archive/business-definition-v0.3.md](archive/business-definition-v0.3.md)
 - [v0.6] 변경: CP-018 Q2 (A-029) — R-17·E-8의 "검증 통과 전 PAPER 투입 불가"를 "이 시스템 백테스트 실행 기록과 사용자 승인 전 PAPER 투입 불가"로 변경. 그 외 본문은 v0.5와 같다
 - [v0.5] 변경: CP-012 (03-design 승인 A-011에 포함) — §0-1 U-06·U-07·U-15 행만 변경
