@@ -20,7 +20,7 @@
 ## 다음 세션 첫 행동
 1. `git status`·이 파일·`docs/approvals.md` 끝 3행(A-097~A-099)·`docs/worklog.md` 마지막 항목(46) 확인. 실행 모드 확인은 `status.py --mode PAPER`(읽기).
 2. **10-15(목) 아침 결과 확인 — A-098 대책 첫날**: 06:50 "시작 점검 통과, run 시작" 텔레그램 수신 여부(사용자), `var\paper\logs\autopilot-20261015.log` 존재·종료 코드, `Get-ScheduledTaskInfo` NumberOfMissedRuns. 업데이트 재시작이 있었다면 이벤트 1074 시각과 자동 로그인 동작을 확인.
-   - **외부 수동 매수 감지 시험(PV-13 대체)**: 10-14 미실행(사용자 바쁨). 다시 할 날을 사용자와 정한다 — 방법은 그대로(장중 09:31 이후 005930 아닌 종목 1주 손 매수 → 주기 대조 K4·긴급 알림·14:30 매도 허용 관찰 → 다음 날 아침 전 `reconcile-resolve`).
+   - **외부 수동 매수 감지 시험(PV-13 대체)**: 10-14 미실행 → **사용자 10-15(목) 수행 예정**. 방법은 그대로(장중 09:31 이후 005930 아닌 종목 1주 손 매수 → 주기 대조 K4·긴급 알림·14:30 매도 허용 관찰 → 다음 날 아침 전 `reconcile-resolve`).
 3. **텔레그램 `[M1]` 접두어**: 10-13부터 붙는다. 사용자에게 화면 확인을 한 번 요청(로그에는 안 남음).
 4. **M2 테스트넷 연결**(사용자 **로컬**에 있을 때만): 테스트넷 키 발급(testnet.binance.vision, GitHub 로그인, **HMAC**) → `C:\AI\trading_system\m2-binance\.env.paper`(메모장 UTF-8: `TRADE_MODE=PAPER`·`BINANCE_TESTNET_API_KEY`·`BINANCE_TESTNET_SECRET_KEY`) → `m2-binance\config\m2\app.paper.toml`의 `connection_approved = true` → PowerShell `cd C:\AI\trading_system\m2-binance` / `$env:TRADE_MODE='PAPER'` / `C:\AI\trading_system\trading_system\.venv\Scripts\python.exe scripts\binance-preflight.py --market M2`(M1 자동 운영이 꺼진 저녁). m2-binance는 브랜치 `m2/run`(=main 6673a64, T-M2-14 포함). 키 값은 읽지 않는다. 결과 파일 `m2-binance\var\paper\preflight\*-m2-preflight.md`로 PV-M2-03 기록(BTCUSDT 규칙·rateLimits·서버 시각).
 5. **PV-11 주말 장시간 실행 — 승인 A-099**, 절차 `docs/strategies/paper0-verify/pv11-weekend-run.md` v0.2. 금 10-16 저녁 사용자 시작(자동 운영 요약 수신 뒤 status → preflight → 수동 run, **K8 풀지 않음**), **일요일 21:00~22:30 정지**(`ops-stop.py` → backup → paper-review → status: 정지는 K8·K9뿐이어야 월요일 자동 재개). Windows Update 1주 일시 중지(사용자). 토큰 발급 감사 기록 `TOKEN_ISSUED`(INITIAL·REFRESH·REISSUE, REFRESH는 텔레그램 INFO "토큰 갱신") main 반영 — **10-15 아침 run에서 INITIAL 행 생기는지 확인**(첫 실제 실행). 끝나면 사용자 "주말 실행 끝" → 절차 §8대로 07 §12G 기록.
@@ -41,9 +41,10 @@
 - CP-034 구현 [제안] 6건(CP-034 §8.2): 배분 규칙은 증액도 차단, 일부 전략만 `l6_slots` 주면 시작 거부 등 — A-094로 사용자 확인 완료.
 - 키움 모의: **NXT·시간외 미지원**(K-U44·K-U45, 사용자 확인). PV-13 NXT·SOR 대조는 LIVE 전 필수로 이관.
 
-## 브랜치·worktree 정리
-- 미병합으로 남은 로컬 브랜치 `integ/backtest-m2`(+4)·`tmp/merge-dryrun`(+3)는 옛 통합 시도 — M2는 `integ/m2-2026-10-09` 경로로 main에 들어갔으므로 **폐기 후보**(삭제는 사용자 승인 후).
-- `.claude\worktrees\agent-*` 폴더와 `C:\AI\trading_system\<이름>` worktree 다수가 병합 끝난 채 남아 있음 — `git worktree list`로 확인 후 사용자가 `git worktree remove` 실행(에이전트는 권한 거부됨). `agent-a69d4fe0ef25b29e6`는 생성 실패한 빈 폴더.
+## 브랜치·worktree 정리 — 2026-10-14 완료 (사용자 "정리도 수행")
+- 병합 끝난 worktree 37개 제거(`git worktree remove`, 강제 옵션 없음, 거부 0). 남은 worktree: main, `m2-binance`(m2/run).
+- 브랜치 삭제: `integ/backtest-m2`(cb698ed, main 대비 +4), `tmp/merge-dryrun`(09f80e0, +3), `feat/T-PV11-token-audit`(병합됨). 병합된 옛 브랜치 이름 약 115개는 남겨 둠(이력은 main에 있음).
+- push는 권한 설정(`.claude/settings.local.json`)이 막음 — 사용자가 `git push origin main` 실행(main은 origin보다 311개 앞섬, 이력 비밀값 검사 통과).
 - `m2-binance`(m2/run)와 `strategy-lab`(`C:\AI\strategy-lab`, 별도 저장소, 다른 세션이 작업 — 이 세션은 읽기만, 커밋 없음)는 정리 대상 아님.
 
 ## 전략실 (2026-10-09 생성, A-085) — `C:\AI\strategy-lab`, 별도 git 저장소(커밋 없음 — 사용자 지시 시)
