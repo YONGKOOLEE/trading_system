@@ -225,3 +225,14 @@
 | Q3 (U-14) | 24/7 시장의 일일 기준 시각: UTC 00:00(=KST 09:00, 1d 봉 경계와 일치) / KST 00:00 / 기타 | **결정 A-055**: UTC 00:00 (= KST 09:00, 1d 봉 경계와 일치) |
 | Q4 | API 키 유형: Ed25519(문서 권장, WebSocket API 사용자 스트림 subscribe 경로) / HMAC(실전은 IP 제한 필수) | **결정 A-063⑨**: 테스트넷 HMAC + signature 방식 구독(B-U9 전제), 실전 키는 LIVE 준비 때 재결정 |
 | Q5 | 테스트넷 리셋 발생 시 PAPER 기록 처리: 즉시 정지 후 사람 확인, 리셋 이전·이후 기간을 PAPER 평가 기간에서 어떻게 셀지 | **결정 A-062①**: 정지·사람 확인, PAPER 기간은 리셋 시점부터 다시 계산 |
+
+## 12. ② 테스트넷 실측 — M2 시작 점검 (2026-10-14 23:06 KST, PV-M2-03)
+- 실행: 사용자, M2 체크아웃 `m2-binance`(m2/run 6673a64), `binance-preflight.py --market M2`(T-M2-14, 승인 A-096 — 조회만). 결과 파일 `m2-binance/var/paper/preflight/20261014-230643-m2-preflight.md`·`.json`(키·서명·계좌 식별값 없음). 1차 시도는 자격정보 파일의 TRADE_MODE 줄 누락으로 연결 전 거부(코드 2) — 사용자 수정 후 통과.
+- 결과: **통과**(실패 0, 경고 0), 주문 API 전송 0, 시작 대조 NO_BASELINE(M2 DB 없음 — 첫 시작 전 정상).
+- 시계: 바이낸스 서버 − 로컬 **57ms**(경고 500ms, A-064), SNTP 0.004838초(time.kriss.re.kr).
+- BTCUSDT(유니버스 D-105): TRADING, 기초 BTC·호가 USDT, quoteAssetPrecision 8, 주문 유형 LIMIT·LIMIT_MAKER·MARKET·STOP_LOSS(_LIMIT)·TAKE_PROFIT(_LIMIT).
+  - PRICE_FILTER tickSize 0.01 (0.01~1,000,000) / LOT_SIZE stepSize 0.00001 (0.00001~9000) / MARKET_LOT_SIZE minQty 0·maxQty 133.97193096·stepSize 0(시장가 별도 단위 없음) / NOTIONAL minNotional 5·applyMinToMarket True·maxNotional 9,000,000·applyMaxToMarket False·avgPriceMins 5 / MIN_NOTIONAL 없음.
+  - 해석하지 않은 필터(기록만): ICEBERG_PARTS, MAX_NUM_ALGO_ORDERS, MAX_NUM_ORDER_AMENDS, MAX_NUM_ORDER_LISTS, TRAILING_DELTA.
+- rateLimits(테스트넷): REQUEST_WEIGHT 6000/60초(내부 예산 3000), ORDERS 50/10초(25), ORDERS 160,000/일(80,000), RAW_REQUESTS 300,000/5분.
+- 계좌: SPOT, canTrade True. 테스트넷 가상 잔고 BTC 1·USDT 10,000 외 자산 다수(517개 0 아닌 자산 — 테스트넷 기본 지급).
+- 미확인 해소: **B-U1 테스트넷 rateLimits 값 확인**(실전 값은 여전히 미확인 — LIVE 준비 때). **B-U4 부분 해소**: BTCUSDT 존재·규칙값 확인, 호가 유동성·체결 품질은 PAPER-0(T-M2-15) 관찰 대상으로 남음.
