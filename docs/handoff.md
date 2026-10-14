@@ -1,6 +1,6 @@
 # 세션 인계 (짧게 유지 — 작업이 끝날 때마다 덮어쓴다)
 
-- 갱신: **2026-10-14 밤(세션 46)**. 마지막 승인 기록 **A-098**(다음 번호 A-099). main **13e2325** — push 없음, 체크아웃 main, 미커밋 변경 없음(`.claude/`는 worktree 폴더).
+- 갱신: **2026-10-14 밤(세션 46)**. 마지막 승인 기록 **A-099**(다음 번호 A-100). main **13e2325** — push 없음, 체크아웃 main, 미커밋 변경 없음(`.claude/`는 worktree 폴더).
 - **PAPER-0 조건부 통과(A-097)**: 10-06·07·08(수동·반자동)·10-12·13(**무인**) 5거래일, 왕복 4건, 결과 불명·중복·불일치 0. 10-13: 시작 점검 시계 0.06초·장중 최대 0.353초, 매수 237,500·매도 232,500, 15:45 종료 코드 0. 07-paper-review §12D·§12E. **매일 06:45 무인 자동 운영 유지**(paper0-verify v2, 예약 작업 `TradingSystem-PAPER-Autopilot`·`ClockSync`).
 - **main 최신 시험**: 통합 2763 passed/1 skipped(T-028·T-M2-14 병합 시점), 이후 PV-12 도구 병합(73 passed, 에이전트 전체 2836 passed). 실제 `config/*.paper.toml`로 M1 시작 일치·DB 메타·공통 설정 오프라인 검사 통과.
 - **10-14(수) 자동 운영 미실행**: 05:44·05:48 Windows Update 계획 재시작 → 08:52 로그온 전이라 Interactive 예약 작업 건너뜀(CP-029 R-4 발생, 07 §12F). 대책 **A-098**: 업데이트 사용 시간 05:00~23:00(확인), 업데이트 후 자동 로그인(사용자 보고). D-158 유지. 내부 상태 이상 없음.
@@ -18,12 +18,12 @@
 | 수집 | 코스피200 201종목 일봉+KOSPI 지수(`var\backtest\data\kiwoom-kospi200-adj-20261009`), 투자자별 ka10060 201종목(`kiwoom-investor-20261008`), 005930 깊은 조회(`kiwoom-investor-probe`) |
 
 ## 다음 세션 첫 행동
-1. `git status`·이 파일·`docs/approvals.md` 끝 3행(A-096~A-098)·`docs/worklog.md` 마지막 항목(46) 확인. 실행 모드 확인은 `status.py --mode PAPER`(읽기).
+1. `git status`·이 파일·`docs/approvals.md` 끝 3행(A-097~A-099)·`docs/worklog.md` 마지막 항목(46) 확인. 실행 모드 확인은 `status.py --mode PAPER`(읽기).
 2. **10-15(목) 아침 결과 확인 — A-098 대책 첫날**: 06:50 "시작 점검 통과, run 시작" 텔레그램 수신 여부(사용자), `var\paper\logs\autopilot-20261015.log` 존재·종료 코드, `Get-ScheduledTaskInfo` NumberOfMissedRuns. 업데이트 재시작이 있었다면 이벤트 1074 시각과 자동 로그인 동작을 확인.
    - **외부 수동 매수 감지 시험(PV-13 대체)**: 10-14 미실행(사용자 바쁨). 다시 할 날을 사용자와 정한다 — 방법은 그대로(장중 09:31 이후 005930 아닌 종목 1주 손 매수 → 주기 대조 K4·긴급 알림·14:30 매도 허용 관찰 → 다음 날 아침 전 `reconcile-resolve`).
 3. **텔레그램 `[M1]` 접두어**: 10-13부터 붙는다. 사용자에게 화면 확인을 한 번 요청(로그에는 안 남음).
 4. **M2 테스트넷 연결**(사용자 **로컬**에 있을 때만): 테스트넷 키 발급(testnet.binance.vision, GitHub 로그인, **HMAC**) → `C:\AI\trading_system\m2-binance\.env.paper`(메모장 UTF-8: `TRADE_MODE=PAPER`·`BINANCE_TESTNET_API_KEY`·`BINANCE_TESTNET_SECRET_KEY`) → `m2-binance\config\m2\app.paper.toml`의 `connection_approved = true` → PowerShell `cd C:\AI\trading_system\m2-binance` / `$env:TRADE_MODE='PAPER'` / `C:\AI\trading_system\trading_system\.venv\Scripts\python.exe scripts\binance-preflight.py --market M2`(M1 자동 운영이 꺼진 저녁). m2-binance는 브랜치 `m2/run`(=main 6673a64, T-M2-14 포함). 키 값은 읽지 않는다. 결과 파일 `m2-binance\var\paper\preflight\*-m2-preflight.md`로 PV-M2-03 기록(BTCUSDT 규칙·rateLimits·서버 시각).
-5. **PV-11 주말 장시간 실행** — 절차 초안 **`docs/strategies/paper0-verify/pv11-weekend-run.md` v0.1 draft**(승인 전). 결정 대기 Q-1 토큰 발급 감사 기록 코드 추가 여부(권장: 추가, 목요일 밤까지 테스트·병합 안 되면 현 코드로 간접 증거만), Q-2 종료 시각(권장 일요일 21:00~22:30 — 월요일 06:45 자동 운영이 전 거래일 run을 보면 STOP 작성·그날 운영 안 함, autopilot.py:210), Q-3 Windows Update 1주 일시 중지. 승인 → A-ID → 금요일 저녁 사용자 시작. 핵심 사실: 토큰 갱신 성공은 기록이 남지 않음(token.py), 수동 run은 콘솔 로그 파일·종료 백업/집계 없음, K8은 풀지 않음(주문 0).
+5. **PV-11 주말 장시간 실행 — 승인 A-099**, 절차 `docs/strategies/paper0-verify/pv11-weekend-run.md` v0.2. 금 10-16 저녁 사용자 시작(자동 운영 요약 수신 뒤 status → preflight → 수동 run, **K8 풀지 않음**), **일요일 21:00~22:30 정지**(`ops-stop.py` → backup → paper-review → status: 정지는 K8·K9뿐이어야 월요일 자동 재개). Windows Update 1주 일시 중지(사용자). 토큰 발급 감사 기록 `TOKEN_ISSUED`(INITIAL·REFRESH·REISSUE, REFRESH는 텔레그램 INFO "토큰 갱신") main 반영 — **10-15 아침 run에서 INITIAL 행 생기는지 확인**(첫 실제 실행). 끝나면 사용자 "주말 실행 끝" → 절차 §8대로 07 §12G 기록.
 6. 응답 방식: 사용자는 터미널에 익숙하지 않다 — **복사해 붙일 전체 명령**, 쉼표 목록은 큰따옴표(`--codes "005930,000660"`), 용어 풀어서. "실전"은 LIVE에만. 평일 07:15 출발·장중 부재·텔레그램만 가능(10-14 수동 매수는 휴대폰 앱으로 가능).
 
 ## 사용자 결정 대기 (급하지 않음)
@@ -66,7 +66,7 @@
 |---|---|---|
 | 1 | 매일 무인 자동 운영 유지(PAPER-0 건강 검진) | A-097 |
 | 2 | M2 테스트넷 시작 점검(조회만) → 결과로 PV-M2-03 기록 | 사용자 로컬 키 입력 |
-| 3 | PV-11 주말 장시간 run(10-16 금 저녁 시작) | A-097 ④, 절차 초안 pv11-weekend-run.md v0.1 승인·Q-1~Q-3 |
+| 3 | PV-11 주말 장시간 run(10-16 금 저녁 ~ 10-18 일 밤) | A-097 ④·A-099, 절차 v0.2 |
 | 4 | 외부 수동 매매 감지 확인(10-14 미실행 → 날짜 다시 정함) | 사용자 |
 | 5 | **실제 전략 결정(전략실)** → T-018 공식 판정(CP-030) → T-019 PAPER-1 | 사용자 |
 | 6 | CP-033 승인 → 수급 데이터 판정 입력(T-035·T-036) | 사용자 |

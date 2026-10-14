@@ -135,6 +135,31 @@ def watched_threads(io_threads: Sequence[threading.Thread], rt: object | None) -
     return halting, k11, alert_only
 
 
+def token_issue_recorder(engine_of, account: str):  # type: ignore[no-untyped-def]
+    """토큰 발급 성공 → 감사 기록 TOKEN_ISSUED (PV-11 관찰, A-099). 토큰 값은 남기지 않는다.
+
+    시세 스레드 등에서 불리므로 판정·실행 스레드로 넘긴다(call_soon — 저장소 연결은 스레드마다 따로).
+    만료 전 갱신(REFRESH)만 INFO 알림 — 매일 아침 첫 발급까지 알리면 소음이다. 엔진 전 발급은 기록하지 않는다.
+    """
+    def on_issued(ev) -> None:  # type: ignore[no-untyped-def]
+        e = engine_of()
+        if e is None:
+            return
+        summary = {"reason": ev.reason, "expires_at": ev.expires_at.isoformat() if ev.expires_at else None,
+                   "previous_expires_at": ev.previous_expires_at.isoformat() if ev.previous_expires_at else None,
+                   "count": ev.count}
+
+        def write() -> None:
+            try:
+                e.repo.audit(ev.issued_at, "TOKEN_ISSUED", "broker", account, summary)
+                if ev.reason == "REFRESH":
+                    e.alerts.alert("INFO", f"토큰 갱신 (만료 {summary['expires_at']})", None)
+            except Exception as exc:  # noqa: BLE001 — 관찰 기록 실패가 엔진 단계 오류(K8)로 번지지 않게
+                log_exception(getattr(e, "log_dir", None), "token.audit", exc)
+        e.call_soon(write)
+    return on_issued
+
+
 def ws_state_handler(engine: Engine, account: str):  # type: ignore[no-untyped-def]
     """실시간 연결 상태 → K5 재개 조건 broker_connected (RV-02, 01 K5). 판정·실행 스레드로 넘긴다(QueuedHalts).
 
@@ -385,7 +410,8 @@ def _paper_broker(startup, app: AppSettings, clock, store: MarketDataStore):  # 
 
     adapter = KiwoomAdapter(KiwoomConfig(app.account, s.get("KIWOOM_PAPER_ACCOUNT_NO").reveal,
                                          s.get("KIWOOM_PAPER_APP_KEY").reveal, s.get("KIWOOM_PAPER_SECRET_KEY").reveal),
-                            clock, on_critical=critical)
+                            clock, on_critical=critical,
+                            on_token_issued=token_issue_recorder(lambda: holder.get("engine"), app.account))
 
     def extra(engine: Engine, stop: threading.Event, closers: list) -> list[threading.Thread]:
         holder["engine"], holder["stop"] = engine, stop

@@ -37,7 +37,7 @@ from trading_system.domain.models import (
 from . import parse
 from .errors import CRITICAL, ErrorClass, classify, normalize_code, specific_code
 from .http import AfterSendError, HttpReply, KiwoomHttp, PreSendError
-from .token import TokenError, TokenManager
+from .token import TokenError, TokenIssue, TokenManager
 
 MOCK_REST = "https://mockapi.kiwoom.com"
 MOCK_WS = "wss://mockapi.kiwoom.com:10000"
@@ -82,7 +82,8 @@ class KiwoomAdapter:
     query_fills_trusted = False
 
     def __init__(self, cfg: KiwoomConfig, clock: Clock, *, http: KiwoomHttp | None = None,
-                 limiter: RateLimiter | None = None, on_critical: Callable[[str, str], None] | None = None) -> None:
+                 limiter: RateLimiter | None = None, on_critical: Callable[[str, str], None] | None = None,
+                 on_token_issued: Callable[[TokenIssue], None] | None = None) -> None:
         self.cfg = cfg
         self._clock = clock
         self.http = http or KiwoomHttp(check_endpoint(cfg.rest_url, MOCK_REST))
@@ -91,7 +92,8 @@ class KiwoomAdapter:
         self.critical: list[tuple[str, str]] = []
         self._on_critical = on_critical
         self.tokens = TokenManager(self.http, cfg.app_key, cfg.secret_key, clock, self._raise_critical,
-                                   limiter=self.limiter)   # 발급도 호출 제한기 경유 (RV-19)
+                                   limiter=self.limiter,   # 발급도 호출 제한기 경유 (RV-19)
+                                   on_issued=on_token_issued)   # 발급 관찰 기록 (PV-11, A-099)
         self._events: queue.Queue[OrderEvent] = queue.Queue()
         self._lock = threading.Lock()
 
