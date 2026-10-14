@@ -56,7 +56,9 @@ from trading_system.gate.gate import Gate
 from trading_system.gate.ports import GateInputs, GatePolicy
 from trading_system.halt.manager import Channel, HaltManager
 from trading_system.marketdata.calendar import KrxCalendar
+from trading_system.domain.investor_flow import CAPABILITY as FLOW_CAPABILITY
 from trading_system.marketdata.index_feed import IndexBarStore, store_from_bars
+from trading_system.marketdata.investor_flow import InvestorFlowBook, flow_days_of
 from trading_system.marketdata.quality import RawDaily, preprocess_daily
 from trading_system.marketdata.store import MarketDataStore
 from trading_system.marketdata.ticks import TickTable
@@ -114,6 +116,10 @@ class BacktestConfig:
     allocation: object | None = None
     allocation_params: dict[str, object] = field(default_factory=dict)
     index_bars: tuple[RawDaily, ...] | list[RawDaily] | None = None
+    # [CP-033 D-193] CAP-DAT-05a 투자자별 순매수 (저장 데이터 — marketdata.investor_flow.InvestorFlowBook). 선언 전략만 쓴다:
+    # 판정일 d에는 일자 < d·확정값만(관측 = 다음 거래일 저녁 수집 가정, DP-46), 제공 범위 밖 기간은 거부, 창이 불완전한
+    # 판정은 "05a 데이터 없음"으로 집계. 미선언 전략은 주어도 읽지 않는다(V-266)
+    investor_flows: InvestorFlowBook | None = None
 
 
 @dataclass(frozen=True)
@@ -144,6 +150,7 @@ class BacktestResult:
     signals_by_eval: dict[str, list[tuple]] = field(default_factory=dict)  # "YYYY-MM-DDTHH:MM" → 신호 요약
     universe_point_in_time: bool | None = None   # [CP-034] U-B만: 목록 이력으로 재현했으면 True, 없으면 False(C-7)
     allocation: dict | None = None               # [CP-034 D-199] 배분 규칙 판정 집계 (규칙이 있을 때만)
+    investor_flow: dict | None = None            # [CP-033 D-193] 05a 선언 전략만: 창·제공 범위·"05a 데이터 없음" 집계
 
 
 def segment_days(days: list[date], segment: str) -> list[date]:
@@ -278,6 +285,7 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
     if cfg.allocation is not None and spec.strategy_id not in cfg.allocation.spec.allocation_targets:  # type: ignore[attr-defined]
         raise BacktestError(f"배분 규칙 대상(allocation_targets)에 이 전략({spec.strategy_id})이 없음 (D-199)")
     _guard_final_period(cfg, days)
+    flow_book, flow_n, flow_stats = _flow_setup(cfg, days)
     _claim_final(cfg)
 
     repo = Repository(run_dir / "trading.db", Mode.BACKTEST)
@@ -437,9 +445,18 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
                 insts = sorted((set(codes) | owned) & set(cfg.data))
                 ub_extra = {"listed_at": listed.get}
                 ub_entry = {"entry_universe": frozenset(codes)}
+            flow_extra: dict = {}
+            flow_gaps: list[str] = []
+            if flow_book is not None:   # [CP-033 D-193] 05a 선언 전략만
+                flow_extra = {"investor_flows": _flow_source(flow_book, clock.now(), cfg.calendar, flow_n, flow_gaps)}
             snap = store.snapshot(ev_id, "M1", ACCOUNT, clock.now(), base, insts, pos_view, pending,
                                   next_eval, history=lambda inst: repo.strategy_history(ACCOUNT, spec.owner, inst),
-                                  **ub_extra)
+                                  **ub_extra, **flow_extra)
+            if flow_stats is not None:
+                flow_stats["evaluations"] += 1
+                if flow_gaps:
+                    flow_stats["no_data_evaluations"] += 1
+                    flow_stats["first_no_data"] = flow_stats["first_no_data"] or day.isoformat()
             block: dict[str, str] = {}
             if alloc is not None:   # [CP-034 D-199] 전략 판정 전에 배분 규칙 평가 (판정 시각 기준 전 거래일까지 확정값)
                 reason = _allocation_reason(alloc, alloc_params, index_store, clock.now(), alloc_stats)  # type: ignore[arg-type]
@@ -508,10 +525,42 @@ def run_backtest(cfg: BacktestConfig) -> BacktestResult:
                             run_dir / "trading.db", signals, fills_log, k2_resumes, costs_total, quality_failures,
                             signals_by_eval,
                             universe_point_in_time=(cfg.universe_history is not None) if is_ub else None,
-                            allocation=alloc_stats)
+                            allocation=alloc_stats, investor_flow=flow_stats)
     if cfg.write_exports:
         _write_exports(cfg, result, fill_details, daily_split, times)
     return result
+
+
+def _flow_setup(cfg: BacktestConfig, days: list[date]) -> tuple[InvestorFlowBook | None, int, dict | None]:
+    """[CP-033 D-193] 05a 선언 전략: 데이터 필수·실행 기간이 제공 범위 안이어야 한다(K-U42). 미선언이면 (None, 0, None)."""
+    if FLOW_CAPABILITY not in cfg.strategy.spec.capabilities:
+        return None, 0, None
+    book = cfg.investor_flows
+    if book is None:
+        raise BacktestError(f"{FLOW_CAPABILITY} 선언 전략: 투자자별 순매수 데이터(--investor-dir)가 필요 (D-193)")
+    if book.first_day is None or book.last_day is None or days[0] < book.first_day or days[-1] > book.last_day:
+        raise BacktestError(f"{FLOW_CAPABILITY} 제공 범위 {book.first_day}~{book.last_day} 밖의 기간 "
+                            f"{days[0]}~{days[-1]} — 제공 범위 안에서만 실행 (D-193, K-U42)")
+    try:
+        n = flow_days_of(cfg.strategy)
+    except ValueError as exc:
+        raise BacktestError(str(exc)) from None
+    stats = {"days": n, "range": [book.first_day.isoformat(), book.last_day.isoformat()], "evaluations": 0,
+             "no_data_evaluations": 0, "first_no_data": None,
+             "instruments_without_data": sorted(set(cfg.data) - set(book.revisions)),
+             "invalid_days": sum(len(v) for v in book.invalid.values())}
+    return book, n, stats
+
+
+def _flow_source(book: InvestorFlowBook, as_of: datetime, calendar: KrxCalendar | None, n: int,
+                 gaps: list[str]):  # type: ignore[no-untyped-def]
+    """종목 → (확정값, 창 완전 여부). 불완전하면 gaps에 종목을 남긴다("05a 데이터 없음" 집계)."""
+    def source(instrument: str):  # type: ignore[no-untyped-def]
+        flows, ok = book.window(instrument, as_of, calendar, n)
+        if not ok:
+            gaps.append(instrument)
+        return flows, ok
+    return source
 
 
 def _allocation_reason(rule: object, params: dict, index_store: IndexBarStore, at: datetime,
@@ -678,8 +727,11 @@ def perturbation_check(cfg: BacktestConfig, check_days: list[date], *, flat: boo
     """
     times = eval_times_of(cfg)
     spec = cfg.strategy.spec
+    flow_on = FLOW_CAPABILITY in spec.capabilities and cfg.investor_flows is not None
+    flow_n = flow_days_of(cfg.strategy) if flow_on else 0
 
-    def signals_at(data: dict[str, list[RawDaily]], day: date, et: time) -> list[tuple]:
+    def signals_at(data: dict[str, list[RawDaily]], day: date, et: time,
+                   book: InvestorFlowBook | None = cfg.investor_flows) -> list[tuple]:
         store = MarketDataStore(cfg.calendar, cfg.ticks)
         for inst, raw in data.items():
             store.register(cfg.infos[inst])
@@ -687,8 +739,10 @@ def perturbation_check(cfg: BacktestConfig, check_days: list[date], *, flat: boo
             store.update_daily(inst, raw, cfg.data_version)
         as_of = datetime.combine(day, et, tzinfo=KST)
         ev = evaluation_id_of(spec.strategy_id, spec.version, "M1", f"{day.isoformat()}T{et:%H:%M}")
+        extra = {"investor_flows": _flow_source(book, as_of, cfg.calendar, flow_n, [])} \
+            if flow_on and book is not None else {}
         snap = store.snapshot(ev, "M1", ACCOUNT, as_of, cfg.initial_cash, sorted(data), lambda i: None,
-                              lambda i: False)
+                              lambda i: False, **extra)
         r = run_evaluation(cfg.strategy, snap, cfg.params)
         return [(s.signal_id, s.kind.value, s.instrument, str(s.quantity), str(s.price)) for s in r.signals]
 
@@ -716,9 +770,13 @@ def perturbation_check(cfg: BacktestConfig, check_days: list[date], *, flat: boo
                         else r for r in raw] for inst, raw in cfg.data.items()},                  # 봉마다 다른 배율
                 {inst: [r for r in raw if r.day < day] for inst, raw in cfg.data.items()},       # 미래 봉 제거
             )
+            # [CP-033 V-259] 05a: 판정일 이후(당일 포함) 값 ×(-3) / 제거 — 봉은 그대로
+            books = (cfg.investor_flows.perturbed(day, Decimal(-3)), cfg.investor_flows.perturbed(day, None)) \
+                if flow_on and cfg.investor_flows is not None else ()
             for et in times:
                 base = signals_at(cfg.data, day, et)
-                if any(signals_at(v, day, et) != base for v in variants):
+                if any(signals_at(v, day, et) != base for v in variants) or \
+                        any(signals_at(cfg.data, day, et, b) != base for b in books):
                     bad.add(day.isoformat())
                     break
 
@@ -746,6 +804,11 @@ def perturbation_check(cfg: BacktestConfig, check_days: list[date], *, flat: boo
                         if [got.signals_by_eval.get(k) for k in keys] != want:
                             bad.add(day.isoformat())
                             break
+                    if flow_on and cfg.investor_flows is not None and day.isoformat() not in bad:
+                        got = run_backtest(replace(probe, run_id=f"d{n}f", end=day,
+                                                   investor_flows=cfg.investor_flows.perturbed(day, Decimal(-3))))
+                        if [got.signals_by_eval.get(k) for k in keys] != want:
+                            bad.add(day.isoformat())
     return sorted(bad)
 
 
@@ -805,6 +868,7 @@ def render_report(cfg: BacktestConfig, result: BacktestResult, *, settings_hash:
         "## 한계",
         "- 생존편향: 상장폐지 종목 데이터 확보 여부 미확인(04 §2.1). U-A 고정 목록은 목록 작성 시점 이전 구간이 사후 선택.",
         *([f"- {UB_NO_HISTORY_NOTE}"] if result.universe_point_in_time is False else []),
+        *([_flow_report_line(result.investor_flow)] if result.investor_flow is not None else []),
         "- 거래 상태(VI·거래정지) 이력 미반영: 그날 봉이 없으면 체결 없음으로만 처리.",
         "- 모의·실전 체결 차이는 PAPER에서 확인.",
         "- 일일 손실(K2)은 판정 시각에 한 번만 평가: 장중 손실로 K2가 걸려 이후 주문이 막히는 경우는 재현하지 않음(DP-6).",
@@ -830,3 +894,14 @@ def render_report(cfg: BacktestConfig, result: BacktestResult, *, settings_hash:
         f"- 결과 지문: `{result.digest}`",
     ]
     return "\n".join(lines) + "\n"
+
+
+def _flow_report_line(stats: dict) -> str:
+    """[CP-033 D-193] 05a 공급 규칙과 "05a 데이터 없음" 집계 (보고서 한계 절)."""
+    gap = (f"05a 데이터 없음 {stats['no_data_evaluations']}회 판정(첫 {stats['first_no_data']}) — 그 판정의 해당 종목은 "
+           "데이터 품질 실패로 신호 없음" if stats["no_data_evaluations"] else "05a 데이터 없음 0회 판정")
+    missing = stats.get("instruments_without_data") or []
+    return (f"- 투자자별 순매수(CAP-DAT-05a, D-189·D-193): 판정일 d에는 일자 < d·확정값만, 관측 = 다음 거래일 저녁 수집 "
+            f"가정(DP-46), 창 {stats['days']}거래일, 제공 범위 {stats['range'][0]}~{stats['range'][1]}. {gap}"
+            + (f". 데이터 없는 종목 {len(missing)}개" if missing else "")
+            + (f". 품질 무효 일자 {stats['invalid_days']}건" if stats.get("invalid_days") else ""))

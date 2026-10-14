@@ -46,7 +46,8 @@ from trading_system.domain.clock import KST, Clock
 from trading_system.domain.enums import Mode
 from trading_system.marketdata.calendar import KrxCalendar
 from trading_system.marketdata.fin_snapshot import FinParseError, parse_ka10001_fin
-from trading_system.marketdata.investor_flow import SOURCE as FLOW_SOURCE, is_trading_day, parse_ka10060_rows
+from trading_system.marketdata.investor_flow import (
+    AFTER_CLOSE, EVENING_EARLIEST, SOURCE as FLOW_SOURCE, is_trading_day, parse_ka10060_rows)
 from trading_system.storage.repository import Repository
 
 from .instance_lock import instance_running
@@ -59,8 +60,8 @@ CONFIG_REL = Path("config") / "collect.paper.toml"
 EVENING_REST_APIS = frozenset({"au10001", "au10002", "ka10060"})   # HTTP 경계 허용 목록 (D-192·V-262)
 FIN_REST_APIS = EVENING_REST_APIS | {"ka10001"}                     # [T-037] financials = true일 때 (D-194)
 INFO_PATH = "/api/dostk/stkinfo"
-EVENING_EARLIEST = time(15, 45)            # 자동 운영 Schedule.stop_at과 같은 값 (시험이 같음을 확인)
-AFTER_CLOSE = timedelta(minutes=15)        # 자동 운영 Schedule.stop_after_close와 같은 값
+# EVENING_EARLIEST·AFTER_CLOSE: marketdata.investor_flow (판정 입력의 수집 주기 가정과 같은 값 — 자동 운영 Schedule과
+# 같음을 시험이 확인)
 DEADLINE_DEFAULT = time(17, 30)
 DEADLINE_MAX = time(17, 30)                # 작업 스케줄러 실행 시간 상한(06:45 + 11시간 = 17:45) 전 15분 여유
 WINDOW_DEFAULT, WINDOW_MAX = 5, 120        # 확인 구간(거래일). ka10060 1쪽 = 100행(K-U42 실측)

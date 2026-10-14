@@ -14,6 +14,7 @@ from enum import StrEnum
 
 from .clock import require_aware
 from .enums import RequestType
+from .investor_flow import InvestorFlow
 from .market import TradingStatus
 
 # 같은 판정·같은 종목에서 규칙 종류 간 순서. 위험 축소가 항상 앞선다 (00 D-006, 전략이 바꿀 수 없음)
@@ -183,6 +184,8 @@ class InstrumentView:
     entries_recent: int = 0
     data_ok: bool = True     # 품질 실패면 False → 전략은 신호를 내지 않음
     listed_at: datetime | None = None   # [CP-034 D-198] U-B 목록 연속 등재 시작 버전의 제출 시각(KST). U-A는 None
+    # [CP-033 D-189·D-193] CAP-DAT-05a 선언 전략만: 일자 < 판정일·확정값만, 일자 오름차순. 미선언 전략은 언제나 ()
+    investor_flows: tuple[InvestorFlow, ...] = ()
 
 
 @dataclass(frozen=True)

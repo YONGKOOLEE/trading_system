@@ -31,7 +31,7 @@ from trading_system.domain.allocation import (
 from trading_system.domain.universe import valid_list_id
 from trading_system.storage.repository import Repository
 
-from .capabilities import NOT_IMPLEMENTED, CapabilityTable, capability_row, required_parts, uses_unfilled_cancel
+from .capabilities import NOT_DECLARABLE, NOT_IMPLEMENTED, CapabilityTable, capability_row, required_parts, uses_unfilled_cancel
 from .strategy_params import PARAM_TYPES, params_hash, validate_params
 from .errors import ConfigError
 
@@ -125,7 +125,10 @@ def validate_spec(spec: StrategySpec, caps: CapabilityTable, account_limits: Acc
     allowed = {"지원", "검증 중"} if target_mode is Mode.BACKTEST or (paper0 and target_mode is Mode.PAPER) \
         else {"지원"}
     for cap in spec.capabilities:
-        for part in required_parts(cap):          # [CP-032 D-175] "CAP-ORD-03" = 03a·03b 모두 요구
+        for part in required_parts(cap):          # [CP-032 D-175] "CAP-ORD-03" = 03a·03b 모두 요구 (CP-033 D-187 05도 같음)
+            if part in NOT_DECLARABLE:
+                p.append(f"{part}: {NOT_DECLARABLE[part]}" + (f" ({cap} 선언)" if part != cap else ""))
+                continue
             if part in NOT_IMPLEMENTED:
                 p.append(f"{part}: {NOT_IMPLEMENTED[part]}" + (f" ({cap} 선언)" if part != cap else ""))
                 continue
