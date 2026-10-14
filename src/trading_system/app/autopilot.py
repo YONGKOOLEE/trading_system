@@ -506,8 +506,8 @@ class Autopilot:
         assert self.d.evening is not None
         try:
             if run.alive():
-                self.d.log("저녁 수집 건너뜀 — run 종료가 확인되지 않음")
-                self._notify("WARNING", "저녁 수집 건너뜀 — run이 아직 실행 중(종료 확인 안 됨). 다음 날 운영 영향 없음")
+                # run이 안 끝난 날은 이미 긴급 "정상 종료 안 됨"이 나갔다. 스위치를 읽기 전이라 꺼진 날에도 새 기록·알림을
+                # 만들지 않도록 조용히 건너뛴다(재검토 2026-10-15 #2). 수집 함수도 run.lock을 다시 본다
                 return
             result = self.d.evening()
         except Exception as exc:  # noqa: BLE001 — 수집 결함이 자동 운영 종료 코드를 바꾸지 않게

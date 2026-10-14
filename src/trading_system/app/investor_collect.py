@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import json
+import time as time_mod
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -58,6 +59,7 @@ from .probe_tool import (MAX_CONSECUTIVE_FAILURES, PROBE_INTERVAL, UNSUPPORTED_M
 
 CONFIG_REL = Path("config") / "collect.paper.toml"
 EVENING_REST_APIS = frozenset({"au10001", "au10002", "ka10060"})   # HTTP 경계 허용 목록 (D-192·V-262)
+HEARTBEAT_SETTLE_MAX = 45.0   # run 종료 직후 남은 하트비트(30초 기준)가 오래될 때까지 최대 대기(초)
 FIN_REST_APIS = EVENING_REST_APIS | {"ka10001"}                     # [T-037] financials = true일 때 (D-194)
 INFO_PATH = "/api/dostk/stkinfo"
 # EVENING_EARLIEST·AFTER_CLOSE: marketdata.investor_flow (판정 입력의 수집 주기 가정과 같은 값 — 자동 운영 Schedule과
@@ -292,11 +294,24 @@ def _stop_reason(base: Path, clock: Clock, deadline: time) -> str | None:
     return None
 
 
+def settle_heartbeat(base: Path, clock: Clock, sleep: Callable[[float], None],
+                     max_wait: float = HEARTBEAT_SETTLE_MAX) -> None:
+    """run.lock이 풀렸는데 하트비트가 아직 HEARTBEAT_STALE(30초) 이내면 — 방금 끝난 run의 마지막 기록 — 오래될 때까지
+    1초씩 최대 max_wait초 기다린다(재검토 2026-10-15 #1: 자동 운영은 run 종료 직후 이 단계를 부른다). run.lock이 다시
+    잡히거나 하트비트가 계속 새로 쓰이면(살아 있는 엔진) 기다림이 끝난 뒤 evening_refusal이 거부한다."""
+    waited = 0.0
+    while waited < max_wait and not instance_running(base) and engine_alive(base / "heartbeat", clock.now()):
+        sleep(1.0)
+        waited += 1.0
+
+
 def evening_collect(root: Path, environ: Mapping[str, str] | None, clock: Clock, settings: CollectSettings, *,
-                    connect: Connect | None = None, log: Callable[[str], None] = print) -> int:
+                    connect: Connect | None = None, log: Callable[[str], None] = print,
+                    sleep: Callable[[float], None] = time_mod.sleep) -> int:
     """저녁 수집 한 번. 마지막 기록 줄이 요약("저녁 수집(05a): …")이다."""
     base = root / "var" / "paper"
     calendar = _load_calendar(root)
+    settle_heartbeat(base, clock, sleep)
     now = clock.now()
 
     def refuse(why: str) -> int:
@@ -353,7 +368,13 @@ def evening_collect(root: Path, environ: Mapping[str, str] | None, clock: Clock,
                 meta["financials"] = {"codes": len(codes), "ok": 0, "unchanged": 0, "duplicate_day": 0, "failed": [],
                                       "not_queried": list(codes), "stopped": inv["stopped"], "first_day": None}
     finally:
-        revoked = adapter.close()   # 토큰 폐기 au10002
+        if _running(base, clock.now()) is None:
+            revoked: bool | None = adapter.close()   # 토큰 폐기 au10002
+        else:
+            # 수집 중 run이 시작됨 — 키움이 같은 토큰을 돌려줄 수 있어 폐기가 엔진 토큰을 무효화할 수 있다(preflight
+            # engine_alive와 같은 규칙, 재검토 M-2·2026-10-15 #4). 폐기하지 않고 만료(약 24시간)로 정리한다
+            revoked = None
+            log("엔진 감지 — 토큰 폐기 생략(만료로 정리)")
         repo.close()
         if meta["token"]["issued"]:
             meta["token"]["revoked"] = revoked
@@ -383,13 +404,30 @@ def evening_collect(root: Path, environ: Mapping[str, str] | None, clock: Clock,
     return 1 if bad else 0
 
 
+def switch_off(path: Path) -> bool:
+    """파일이 없거나 `enabled = false`(또는 키 없음)로 읽히면 True. 읽기·형식 오류나 bool 아닌 값이면 False(판단 불가)."""
+    if not path.exists():
+        return True
+    try:
+        with path.open("rb") as f:
+            raw = tomllib.load(f)
+    except (OSError, ValueError):
+        return False
+    return raw.get("enabled", False) is False
+
+
 def evening_from_autopilot(root: Path, environ: Mapping[str, str] | None, clock: Clock, *,
                            connect: Connect | None = None, settings_path: Path | None = None) -> tuple[int, str] | None:
     """자동 운영 종료 절차 뒤 단계 (A-100 Q-6 (a)). 꺼짐·설정 없음 → None(아무것도 하지 않음).
 
     (종료 코드, 기록 — 첫 줄이 요약)을 돌려준다. 예외는 호출자(자동 운영)가 잡는다."""
+    path = settings_path or root / CONFIG_REL
+    if switch_off(path):
+        # 스위치가 분명히 꺼져 있으면 나머지 키는 검사하지 않는다 — 꺼진 스위치가 매일 경고를 만들지 않게
+        # (재검토 2026-10-15 #3). 스위치를 읽을 수 없으면(형식 오류) 아래에서 설정 오류로 알린다
+        return None
     try:
-        settings = load_collect_settings(settings_path or root / CONFIG_REL, root)
+        settings = load_collect_settings(path, root)
     except ConfigError as exc:
         return 2, f"저녁 수집 설정 오류(config/collect.paper.toml): {exc} — 수집 안 함"
     if not settings.enabled:

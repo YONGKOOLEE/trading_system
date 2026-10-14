@@ -131,14 +131,20 @@ class World:
         self.settings = CollectSettings(enabled=True, codes_file=self.codes_file, window_days=window_days,
                                         deadline=deadline, financials=False)
         self.out: list[str] = []
+        self.on_sleep: list[Callable[[], None]] = []
 
     def connect(self, root: Path, environ: Any, clock: Any) -> Any:
         self.connects += 1
         return make_conn(self.inner, self.clock, allow=EVENING_REST_APIS)  # type: ignore[arg-type]
 
+    def sleep(self, seconds: float) -> None:     # settle_heartbeat 대기 — 가상 시계만 진행
+        self.clock.advance(timedelta(seconds=seconds))
+        for fn in self.on_sleep:
+            fn()
+
     def run(self) -> int:
         return evening_collect(self.root, {"TRADE_MODE": "PAPER"}, self.clock, self.settings, connect=self.connect,
-                               log=self.out.append)
+                               log=self.out.append, sleep=self.sleep)
 
     def repo(self) -> Repository:
         return Repository(self.base / "trading.db", Mode.PAPER)
@@ -356,9 +362,25 @@ def test_v262_refuses_while_run_lock_or_heartbeat(tmp_path: Path) -> None:
     finally:
         lock.release()
     assert w.connects == 0 and any("run.lock" in line for line in w.out)
+    # 하트비트가 계속 새로 쓰이면(잠금 없이 살아 있는 엔진 — 비정상) 최대 대기 뒤에도 거부
     w2 = World(tmp_path / "b")
-    (w2.base / "heartbeat").write_text((EVENING - timedelta(seconds=5)).astimezone(UTC).isoformat(), encoding="utf-8")
+    hb = w2.base / "heartbeat"
+
+    def beat() -> None:
+        hb.write_text(w2.clock.now().isoformat(), encoding="utf-8")
+
+    beat()
+    w2.on_sleep.append(beat)
     assert w2.run() == 2 and w2.connects == 0
+
+
+def test_heartbeat_left_by_just_finished_run_is_waited_out(tmp_path: Path) -> None:
+    """재검토 2026-10-15 #1: 자동 운영은 run 종료 직후(하트비트 0~10초 전) 이 단계를 부른다. run.lock이 풀렸으면 하트비트가
+    오래될 때까지 기다린 뒤 수집한다 — 기다리지 않으면 매일 거부된다."""
+    w = World(tmp_path)
+    (w.base / "heartbeat").write_text((EVENING - timedelta(seconds=6)).astimezone(UTC).isoformat(), encoding="utf-8")
+    assert w.run() == 0 and w.connects == 1
+    assert w.clock.now() - EVENING.astimezone(UTC) <= timedelta(seconds=investor_collect.HEARTBEAT_SETTLE_MAX)
 
 
 def test_v262_refusal_function_ignores_autopilot_lock_but_not_run_lock(tmp_path: Path) -> None:
@@ -460,9 +482,11 @@ def test_evening_collect_stops_when_run_starts_midway(tmp_path: Path) -> None:
     finally:
         held[0].release()
     codes = [b["stk_cd"] for _, a, b in w.inner.log if a == "ka10060"]
-    assert codes == ["005930"] and w.inner.log[-1][1] == "au10002"
+    # 재검토 2026-10-15 #4: 수집 중 run이 시작되면 토큰을 폐기하지 않는다(엔진이 같은 토큰을 받았을 수 있음 — preflight M-2)
+    assert codes == ["005930"] and not any(a == "au10002" for _, a, _ in w.inner.log)
     meta = json.loads(sorted((w.base / "collect").glob("evening-*.json"))[0].read_text(encoding="utf-8"))
     assert meta["investor"]["not_queried"] == ["000660", "035420"] and "run.lock" in meta["stopped"]
+    assert meta["token"]["revoked"] is None and any("토큰 폐기 생략" in line for line in w.out)
 
 
 def test_collect_function_requires_known_window(tmp_path: Path) -> None:
@@ -504,6 +528,19 @@ def test_settings_schema_rejects(tmp_path: Path, text: str, word: str) -> None:
     p.write_text(text, encoding="utf-8")
     with pytest.raises(ConfigError, match=word):
         load_collect_settings(p, tmp_path)
+
+
+def test_autopilot_entry_switch_off_ignores_other_keys(tmp_path: Path) -> None:
+    """재검토 2026-10-15 #3: 자동 운영 진입점은 꺼진 스위치면 다른 키가 틀려도 아무것도 안 함 — 매일 경고를 만들지 않는다.
+    (설정 읽기 자체는 엄격 — test_settings_schema_rejects. 스위치를 읽을 수 없는 형식 오류는 경고 유지.)"""
+    root = repo_root(tmp_path)
+    clock = FixedClock(EVENING.astimezone(UTC))
+    cfg = root / "config" / "collect.paper.toml"
+    cfg.write_text('enabled = false\nbogus = 1\ndeadline = "99:99"\n', encoding="utf-8")
+    assert evening_from_autopilot(root, {"TRADE_MODE": "PAPER"}, clock) is None
+    cfg.write_text("enabled = false\n[[[", encoding="utf-8")
+    result = evening_from_autopilot(root, {"TRADE_MODE": "PAPER"}, clock)
+    assert result is not None and result[0] == 2
 
 
 # --- 자동 운영 연결 (A-100 Q-6 (a)) ----------------------------------------------------------------------------
@@ -563,6 +600,18 @@ def test_autopilot_evening_skipped_when_run_died(tmp_path: Path) -> None:
     r.hooks.append((ap_kst(11, 0), lambda: kill_now(r)))
     assert r.ap.run() == 3
     assert calls == []
+
+
+def test_autopilot_evening_silent_when_run_does_not_stop(tmp_path: Path) -> None:
+    """재검토 2026-10-15 #2: run이 정지 요청을 따르지 않은 날(긴급 알림은 기존대로) 저녁 단계는 스위치를 읽지 않고 조용히
+    건너뛴다 — 꺼진 스위치로 새 알림·기록이 생기지 않게."""
+    r = Rig(tmp_path)
+    calls: list[int] = []
+    r.ap.d.evening = lambda: calls.append(1) or (0, "x")  # type: ignore[func-returns-value]
+    r.hooks.append((ap_kst(15, 40), lambda: setattr(r.runs[-1], "frozen", True)))
+    r.ap.run()
+    assert calls == []
+    assert not any("저녁 수집" in t for _, t in r.notes) and not any("저녁 수집" in x for x in r.logs)
 
 
 def test_evening_from_autopilot_respects_switch(tmp_path: Path) -> None:
