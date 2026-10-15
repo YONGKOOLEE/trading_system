@@ -68,6 +68,8 @@ class SpotReconciler(Reconciler):
         self._balances: dict[str, dict[str, tuple[Decimal, Decimal]]] = {}
         self._open_alerted: set[str] = set()
         self._scope_alerted: dict[str, dict[str, str]] = {}
+        # [CP-036 D-201 (6)] 잔고 조회 결과를 받을 곳 (계좌, 자산 → (free, locked)) — 엔진 조립이 M2 계좌 사실(현금)을 연결
+        self.balance_listeners: list[Callable[[str, Mapping[str, tuple[Decimal, Decimal]]], None]] = []
 
     # --- 조회 ---------------------------------------------------------------------------
     def _query(self, account: str) -> tuple[list, list, list]:  # type: ignore[type-arg]
@@ -77,6 +79,8 @@ class SpotReconciler(Reconciler):
             orders = self._broker.query_orders(account)
             fills = self._broker.query_fills(account)
         self._balances[account] = balances
+        for fn in list(self.balance_listeners):
+            fn(account, balances)
         positions = [BrokerPosition(inst, self._total(balances, base), _ZERO)
                      for inst, (base, _q) in sorted(self._universe.items())]
         return positions, orders, fills

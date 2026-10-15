@@ -20,6 +20,7 @@ from decimal import Decimal
 from trading_system.broker.base import BrokerQueryError, LookupKind, OrderLookup
 from trading_system.domain.enums import SubmitOutcome
 from trading_system.domain.models import BrokerOrderRecord, FillRecord, OrderRequest, SubmitResult
+from trading_system.domain.trading_rules import SymbolRules
 
 from .broker import FakeBehavior, FakeBroker
 
@@ -55,6 +56,18 @@ REPLY_TABLE: dict[str, ReplySpec] = {
     "-1022": ReplySpec(401, {"code": -1022, "msg": "Signature for this request is not valid."},
                        SubmitOutcome.UNKNOWN, -1022),
 }
+
+
+def virtual_symbol_rules(symbol: str) -> SymbolRules:
+    """BACKTEST 연습 실행(run --market M2, fake)의 가상 거래 규칙 (CP-036 T-045, D-209 "규칙 적재 뒤 시작").
+
+    형태만 테스트넷 BTCUSDT 공개 규칙값(binance-spot §12, 2026-10-14 관찰)을 따른 가상값이다 — 실제 심볼 규칙이 아니다:
+    tickSize 0.01, LOT_SIZE 0.00001~9000 step 0.00001, MARKET_LOT_SIZE 0~100 step 0(시장가 별도 단위 없음), minNotional 5."""
+    return SymbolRules(instrument=symbol, tick_size=Decimal("0.01"), min_price=Decimal("0.01"),
+                       max_price=Decimal("1000000"), lot_min_qty=Decimal("0.00001"), lot_max_qty=Decimal("9000"),
+                       lot_step=Decimal("0.00001"), market_min_qty=_ZERO, market_max_qty=Decimal("100"),
+                       market_step=_ZERO, min_notional=Decimal("5"), max_notional=Decimal("9000000"),
+                       apply_min_to_market=True, apply_max_to_market=False)
 
 
 class FakeSpotBroker(FakeBroker):

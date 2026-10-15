@@ -14,6 +14,8 @@
 
 시작(start): 오늘 판정 완료 표시 복원(감사 기록, T-044) → 실행기 재시작 정리(recover_on_start) → K8 발동 → 예수금 조회
 → 복구 판정(대조 포함).
+[CP-036 D-201] 시장 프로파일(app/market_profile): 시장 시각·세션·대조 일정·판정 입력·게이트 전 요청 변환·계좌 사실·
+판정 ID 시장 코드만 시장마다 다르다. 기본 = M1 프로파일(변경 전 동작 그대로, V-152). M2는 SpotProfile(UTC·24/7).
 K8 해제는 사용자 재개(운영 명령)로만 한다 (01 §2.11, CLAUDE.md §8-9).
 """
 
@@ -34,13 +36,13 @@ from trading_system.broker.base import BrokerAdapter, BrokerQueryError
 from trading_system.broker.ratelimit import Priority, call_priority
 from trading_system.config.strategy_registry import StrategyRegistry
 from trading_system.domain.allocation import INDEX_KOSPI, AllocationDecision, IndexView
-from trading_system.domain.clock import KST, Clock, from_iso, last_kst_time_at_or_before, to_iso
+from trading_system.domain.clock import KST, Clock, from_iso, to_iso
 from trading_system.domain.enums import GateResult, HaltType, IntentState, RequestSource, RequestType, Side
 from trading_system.domain.limits import AccountLimits
 from trading_system.domain.market import CashView
 from trading_system.domain.models import GateRequest, OrderEvent
 from trading_system.domain.sinks import AlertSink
-from trading_system.domain.strategy import PositionView, evaluation_id_of
+from trading_system.domain.strategy import EvaluationSnapshot, PositionView, evaluation_id_of
 from trading_system.domain.universe import listed_since, select_version
 from trading_system.evaluation.runner import run_evaluation
 from trading_system.execution.executor import ExecutionBlocked, Executor
@@ -60,6 +62,8 @@ from trading_system.reporting.daily import DailyReporter
 from trading_system.storage.oplog import log_exception
 from trading_system.storage.repository import new_id, BrokerOrderRow, Repository
 from trading_system.strategy.base import Strategy
+
+from .market_profile import MarketProfile
 
 EVAL_GRACE = timedelta(minutes=5)       # 예정 시각을 이만큼 넘기면 그 판정은 건너뛴다(늦은 판정 금지, DP-21)
 GLOBAL_BLOCKS = {"K1", "K5", "K6", "K7", "K8"}   # 전역 정지 중에는 판정 자체를 하지 않는다(어차피 위험 확대 거부)
@@ -176,8 +180,11 @@ class Engine:
     # [CP-034 D-199] 배분 규칙과 지수 일봉 공급자(CAP-DAT-05d). 없으면(기본) 기존 동작 그대로
     allocations: list[LoadedAllocation] = field(default_factory=list)
     index_source: Callable[[str, datetime], IndexView] | None = None
+    # [CP-036 D-201] 시장 프로파일. 기본 M1 = 변경 전 동작 그대로
+    profile: MarketProfile = field(default_factory=MarketProfile)
 
     def __post_init__(self) -> None:
+        self.profile.attach(self)
         self.last_progress = self.mono()
         # 대조 뒤 실행 중 K8 복구 판정 (3차 검토 #1) — 주기·요청·마감 후·운영 명령(MANUAL) 대조 모두
         self.reconciler.listeners.append(self._after_reconcile)
@@ -210,11 +217,12 @@ class Engine:
         # reconciled 조건도 이번 시작 대조로 판정된다. 해제 후에도 K8은 사용자 재개 전까지 유지
         self.halts.report_condition(HaltType.K5, self.account, K5_LINK_THREAD, True, "프로세스 시작 — 스레드 새로 시작")
         self.last_progress = self.mono()   # 시작 단계마다 진행 표시 — 긴 시작이 멈춤으로 보이지 않게 (재검토 F9)
-        self._refresh_cash()
+        self.profile.refresh_cash()
         self.last_progress = self.mono()
         rep = self.recovery.check(self.account)
         self.last_progress = self.mono()
         self._last_reconcile = self.clock.now()
+        self.profile.after_start(self._last_reconcile)
         self.alerts.alert("WARNING" if not rep.ok else "INFO",
                           f"시작: 결과 불명 {len(unknown)}건, 복구 판정 {'통과' if rep.ok else '실패'} — "
                           f"K8 재개는 사용자 명령으로 ({'; '.join(rep.failures) or '조건 충족'})", None)
@@ -225,14 +233,15 @@ class Engine:
         (T-044, CP-035 Q-3, A-105, DP-21). 표시는 메모리뿐이라, 판정 시각 + 유예(eval_grace) 안에 재시작·K8 재개하면
         이미 판정(EVALUATION, 참조 = 판정 ID)했거나 건너뛴(EVALUATION_SKIPPED, 참조 = 판정 키) 판정 시각을 다시 판정해
         두 번째 신호를 낼 수 있었다. 한 번 실행 안에서는 판정·건너뜀 모두 다시 판정하지 않으므로 같은 규칙이다.
-        오늘(KST) 판정 시각만 본다 — 판정 키에 날짜가 들어 있다. 기록을 읽지 못하면 오늘 이미 지난 판정 시각을 모두
+        오늘(시장 시각 — M1 KST, M2 UTC) 판정 시각만 본다 — 판정 키에 날짜가 들어 있다. 기록을 읽지 못하면 오늘 이미 지난 판정 시각을 모두
         판정 완료로 보고(판정하지 않음, 불확실하면 주문하지 않는다) 알린다. 앞으로 올 판정 시각은 그대로 판정한다."""
-        today = now.astimezone(KST).date()
+        tz = self.profile.tz   # [CP-036 D-201] M1 = KST, M2 = UTC
+        today = now.astimezone(tz).date()
         refs: dict[str, str] = {}      # 감사 참조 → 판정 키
         past: dict[str, str] = {}      # 지난 판정 키 → "HH:MM"
         for ls in self.strategies:
             for t in ls.eval_times:
-                at = datetime.combine(today, t, tzinfo=KST)
+                at = datetime.combine(today, t, tzinfo=tz)
                 key = self._eval_key(ls, at)
                 refs[self._eval_id(ls, at)] = key
                 refs[key] = key
@@ -257,10 +266,9 @@ class Engine:
     def _eval_key(ls: LoadedStrategy, at: datetime) -> str:
         return f"{ls.owner}|{at.isoformat()}"
 
-    @staticmethod
-    def _eval_id(ls: LoadedStrategy, at: datetime) -> str:
+    def _eval_id(self, ls: LoadedStrategy, at: datetime) -> str:
         spec = ls.strategy.spec
-        return evaluation_id_of(spec.strategy_id, spec.version, "M1", at.isoformat())
+        return evaluation_id_of(spec.strategy_id, spec.version, self.profile.market.value, at.isoformat())
 
     def call_soon(self, fn: Callable[[], object]) -> None:
         """다른 스레드가 판정·실행 스레드에서 실행할 일을 맡긴다(정지 발동·조건 보고 등). 저장소 연결은 스레드마다 따로."""
@@ -318,7 +326,7 @@ class Engine:
         steps: list[tuple[str, Callable[[], object]]] = [
             ("calls", self._drain_calls), ("ops", self._ops), ("events", self.executor.process_events),
             ("resolve", lambda: self._resolve_step(now)), ("daily", lambda: self._daily(now)),
-            ("reconcile", lambda: self._reconcile_if_due(now)), ("evaluate", lambda: self._evaluate_due(now)),
+            ("reconcile", lambda: self.profile.reconcile_step(now)), ("evaluate", lambda: self._evaluate_due(now)),
             ("exec_policy", lambda: self._exec_policy(now))]
         for name, step in steps:
             self.last_progress = self.mono()
@@ -405,7 +413,7 @@ class Engine:
         lim = self.limits()
         if lim is None:
             return
-        start = last_kst_time_at_or_before(now, lim.daily_reference_time)
+        start = self.profile.last_at_or_before(now, lim.daily_reference_time)
         if self._day_start is None or start > self._day_start:
             first = self._day_start is None
             self._day_start = start
@@ -417,7 +425,7 @@ class Engine:
             else:
                 self._base_retry_until = None   # 새 기준 시각에 확정되면 전날 재시도 상태는 끝
             if not first:
-                self.reporter.generate(self.account, now, lim.daily_reference_time, lim.version_hash())
+                self.profile.day_report(now, lim)
         elif self._base_retry_until is not None and now >= self._base_next_try:
             # 기준 금액 실패 재시도 (재검토 F5): 시작 직후 첫 tick엔 아직 시세가 없을 수 있다. 처음 10분은 tick마다,
             # 그 뒤엔 5분마다 다음 기준 시각까지 계속(재검토2 #3 — 일시 장애로 하루 전체가 막히지 않게)
@@ -435,6 +443,10 @@ class Engine:
             self.watcher.scan(self.account, now)
 
     def _start_day_base(self) -> bool:
+        return self.profile.start_day_base()
+
+    def _cash_day_base(self) -> bool:
+        """M1: 조회한 예수금 + 보유 평가액으로 일일 기준 금액 (DailyRiskTracker)."""
         cash = self.account_state.cash(self.account)
         if cash is None:
             return False
@@ -443,7 +455,7 @@ class Engine:
     def _report_if_due(self, now: datetime, lim: AccountLimits) -> None:
         """일일 보고 시각(report_time, 예 16:00) 경과 시 그날 보고서 (RV-21). 시작 직후 이미 지난 시각은 건너뛴다.
         기준 시각(08:30) 경계의 보고서는 그대로 둔다(같은 거래일의 다음 판, 저장소가 판 번호를 올림)."""
-        at = last_kst_time_at_or_before(now, lim.report_time)
+        at = self.profile.last_at_or_before(now, lim.report_time)
         if self._report_at is None:
             self._report_at = at
             return
@@ -548,13 +560,14 @@ class Engine:
         return bool(GLOBAL_BLOCKS & set(self.repo.active_halts(self.account)))
 
     def _evaluate_due(self, now: datetime) -> None:
-        today = now.astimezone(KST).date()
-        session = self.store.session(today)
+        tz = self.profile.tz
+        today = now.astimezone(tz).date()
+        session = self.profile.session(today)
         if session is None or not session.is_open:
             return
         for ls in self.strategies:
             for t in ls.eval_times:
-                at = datetime.combine(today, t, tzinfo=KST)
+                at = datetime.combine(today, t, tzinfo=tz)
                 key = self._eval_key(ls, at)   # 시작 때 감사 기록으로도 채운다 (_seed_evaluated, T-044)
                 if key in self.evaluated or now < at:
                     continue
@@ -573,7 +586,8 @@ class Engine:
                 self._evaluate(ls, at, now)
 
     def _next_eval(self, ls: LoadedStrategy, at: datetime) -> datetime | None:
-        later = [datetime.combine(at.astimezone(KST).date(), t, tzinfo=KST) for t in ls.eval_times]
+        tz = self.profile.tz
+        later = [datetime.combine(at.astimezone(tz).date(), t, tzinfo=tz) for t in ls.eval_times]
         later = [x for x in later if x > at]
         return min(later) if later else None
 
@@ -581,37 +595,12 @@ class Engine:
         spec = ls.strategy.spec
         ev_id = self._eval_id(ls, at)
         owner = ls.owner
-
-        def pos_view(inst: str) -> PositionView | None:
-            p = self.repo.position(self.account, inst)
-            if p.quantity <= 0:
-                return None
-            own = self.repo.active_ownership(self.account, inst)
-            return PositionView(p.quantity, p.avg_price, 0, own is not None and own.owner == owner)
-
-        def pending(inst: str) -> bool:
-            return bool(self.repo.active_new_intents(self.account, inst, Side.BUY.value)
-                        or self.repo.active_new_intents(self.account, inst, Side.SELL.value))
-
         daily = self.account_state.daily_risk(self.account)
         base = daily.base_amount if daily is not None else Decimal("0")
         # 배분 규칙: 판정 직렬화 안에서 전략 판정 전에 평가 (D-199). 지정되지 않은 전략은 영향 없음
         block, alloc = self._allocation_block(ls, at) if self.allocations else (None, None)
         ub = self._universe_b(ls, at) if spec.universe_method == "U-B" else None
-        if ub is not None:
-            insts = ub.instruments
-        else:
-            insts = sorted(set(spec.universe) & set(self._known_instruments())) if spec.universe_method == "U-A" \
-                else sorted(self._known_instruments())
-        # [CP-033 D-193] CAP-DAT-05a 선언 전략만 투자자별 순매수 입력(일자 < d·확정값만). 미선언 전략은 기존 그대로
-        flows = ({"investor_flows": investor_flow_source(self.repo, self.store.calendar, now,
-                                                         flow_days_of(ls.strategy))}
-                 if FLOW_CAPABILITY in spec.capabilities else {})
-        snap = self.store.snapshot(ev_id, "M1", self.account, now, base, insts, pos_view, pending,
-                                   self._next_eval(ls, at),
-                                   history=lambda inst: self.repo.strategy_history(self.account, owner, inst),
-                                   **({"listed_at": ub.listed_at.get} if ub is not None else {}), **flows)
-        lots = {i: info.lot_size for i in insts if (info := self.store.instrument(i)) is not None}
+        snap, lots = self.profile.evaluation_input(ls, ev_id, at, now, base, ub)   # [CP-036 D-201 (4)]
         result = run_evaluation(ls.strategy, snap, ls.params, lots,
                                 **({"entry_universe": ub.entry} if ub is not None else {}),
                                 **({"entry_block": block} if block is not None else {}))
@@ -625,9 +614,45 @@ class Engine:
         if result.error:
             self.alerts.alert("WARNING", f"전략 판정 오류 {owner}: {result.error}", ev_id)
         for s in result.signals:
-            d = self.gate.decide(GateRequest.from_signal(s))
+            req = self.profile.prepare(GateRequest.from_signal(s))   # [CP-036 D-201 (5)] M1 = 항등
+            if req is None:
+                continue
+            d = self.gate.decide(req)
             if d.result is GateResult.APPROVED and d.approved is not None:
                 self.executor.submit(d.approved)
+
+    def _store_input(self, ls: LoadedStrategy, ev_id: str, at: datetime, now: datetime, base: Decimal,
+                     ub: _UbInput | None) -> tuple[EvaluationSnapshot, dict[str, Decimal]]:
+        """M1 판정 입력: MarketDataStore 스냅샷(KRX 일봉·시세) + 종목별 수량 단위."""
+        spec = ls.strategy.spec
+        owner = ls.owner
+
+        def pos_view(inst: str) -> PositionView | None:
+            p = self.repo.position(self.account, inst)
+            if p.quantity <= 0:
+                return None
+            own = self.repo.active_ownership(self.account, inst)
+            return PositionView(p.quantity, p.avg_price, 0, own is not None and own.owner == owner)
+
+        def pending(inst: str) -> bool:
+            return bool(self.repo.active_new_intents(self.account, inst, Side.BUY.value)
+                        or self.repo.active_new_intents(self.account, inst, Side.SELL.value))
+
+        if ub is not None:
+            insts = ub.instruments
+        else:
+            insts = sorted(set(spec.universe) & set(self._known_instruments())) if spec.universe_method == "U-A" \
+                else sorted(self._known_instruments())
+        # [CP-033 D-193] CAP-DAT-05a 선언 전략만 투자자별 순매수 입력(일자 < d·확정값만). 미선언 전략은 기존 그대로
+        flows = ({"investor_flows": investor_flow_source(self.repo, self.store.calendar, now,
+                                                         flow_days_of(ls.strategy))}
+                 if FLOW_CAPABILITY in spec.capabilities else {})
+        snap = self.store.snapshot(ev_id, self.profile.market.value, self.account, now, base, insts, pos_view, pending,
+                                   self._next_eval(ls, at),
+                                   history=lambda inst: self.repo.strategy_history(self.account, owner, inst),
+                                   **({"listed_at": ub.listed_at.get} if ub is not None else {}), **flows)
+        lots = {i: info.lot_size for i in insts if (info := self.store.instrument(i)) is not None}
+        return snap, lots
 
     def _allocation_block(self, ls: LoadedStrategy, at: datetime) -> tuple[str | None, dict | None]:
         """이 전략을 지정한 배분 규칙을 평가한다 (CP-034 D-199). 하나라도 불허·판정 실패면 신규 진입·증액 거부 사유.

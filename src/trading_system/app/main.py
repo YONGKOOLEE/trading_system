@@ -224,8 +224,8 @@ def _m1_hosts(mode: Mode) -> frozenset[str]:
 def run_main(root: Path, environ: dict[str, str] | None = None, max_seconds: float | None = None,
              market: str = "M1") -> int:
     """market: 실행할 시장 (CP-024 D-097). 기본 M1 = 기존 경로(config/*.<mode>.toml) 그대로.
-    M2는 config/m2/ 검사(설정·시작 일치 표·DB 메타)까지만 하고 거부한다 — M2 엔진 조립·바이낸스 연결은 아직 없다
-    (테스트넷 연결은 T-M2-14 별도 승인)."""
+    M2는 run_m2_main (CP-036 T-045): BACKTEST = fake 현물 브로커로 엔진을 돌린다. PAPER(바이낸스 테스트넷)는 어댑터
+    (T-047)·연결 승인(T-050) 전이라 config/m2/ 검사 뒤 거부한다."""
     env = os.environ if environ is None else environ
     try:
         mode = read_trade_mode(env, root / ".env")
@@ -235,14 +235,7 @@ def run_main(root: Path, environ: dict[str, str] | None = None, max_seconds: flo
         return 2
     base = root / "var" / mode.value.lower()
     if mkt is Market.M2:
-        try:
-            env_file = None if mode is Mode.BACKTEST else root / f".env.{mode.value.lower()}"
-            check_m2_startup(mode, root, base / "trading.db", env_file)
-            raise ConfigError("M2 시작 검사 통과 — M2 실행 경로(엔진 조립·바이낸스 연결)는 아직 없다. "
-                              "테스트넷 연결은 T-M2-14 별도 승인 뒤")
-        except (LiveNotAvailable, ConfigError) as exc:
-            print(f"시작 거부(브로커 연결 없음): {exc}")
-            return 2
+        return run_m2_main(root, mode, base, max_seconds)
     try:
         env_file = None if mode is Mode.BACKTEST else root / f".env.{mode.value.lower()}"
         startup = check_startup(mode, root, base / "trading.db", env_file)
@@ -377,6 +370,148 @@ def _run(root: Path, mode: Mode, base: Path, startup, app: AppSettings, gate_set
                 c()
             except Exception:  # noqa: BLE001 — 종료 중 오류는 무시
                 pass
+        repo.close()
+
+
+def _m2_inputs(root: Path, mode: Mode, base: Path):  # type: ignore[no-untyped-def]
+    """M2 시작 검사·설정 (CP-036 D-209 앞부분). 브로커 연결·DB 생성 없음. 실패하면 ConfigError."""
+    from datetime import timedelta
+
+    from trading_system.config.capabilities import load_capabilities
+    from trading_system.domain.market import CostRates, GateSettings
+    from trading_system.domain.trading_rules import SpotOrderPolicy
+    env_file = None if mode is Mode.BACKTEST else root / f".env.{mode.value.lower()}"
+    cfg = check_m2_startup(mode, root, base / "trading.db", env_file)
+    if mode is not Mode.BACKTEST:
+        raise ConfigError("M2 PAPER 실행 경로(바이낸스 어댑터·사용자 스트림·시세 공급)는 아직 없다 (CP-036 T-047·T-048) — "
+                          "테스트넷 연결은 T-M2-14(조회만) 승인과 별도로 T-050 연결 승인 뒤")
+    check_strategy_slots(cfg.app.strategies, cfg.limits.l6_max_positions)   # [CP-034 D-197] 연결 전
+    caps = load_capabilities(root / "docs" / "capabilities.md")
+    strategies = _strategies(cfg.app)
+    ms = cfg.market_settings
+    pairs = {s: (cfg.universe.base_asset(s) or "", cfg.universe.quote_asset) for s in cfg.universe.symbols}
+    # 비용 추정 올림 단위 = 호가 자산 자릿수(D-118). fake는 가상값(테스트넷 USDT quoteAssetPrecision 8과 같은 형태)
+    gate_settings = GateSettings(ms.quote_max_age_seconds, M2_PRICE_LIMIT_PLACEHOLDER,
+                                 CostRates(ms.commission_rate, Decimal("0"), M2_FAKE_QUOTE_QUANTUM))
+    policy = SpotOrderPolicy(ms.buy_buffer, ms.sell_buffer, timedelta(seconds=ms.quote_max_age_seconds))
+    return cfg, caps, strategies, pairs, gate_settings, policy
+
+
+# M2에는 가격제한폭·시장가 매수가 없다(D-104) — 게이트 정책의 자리 값(시장가 매도는 예약 가격 계산 대상 아님, m2_fakes와 같음)
+M2_PRICE_LIMIT_PLACEHOLDER = Decimal("0.05")
+M2_FAKE_QUOTE_QUANTUM = Decimal("0.00000001")
+
+
+def run_m2_main(root: Path, mode: Mode, base: Path, max_seconds: float | None) -> int:
+    """`run --market M2` (CP-036 D-202·D-209). 시작 순서: check_m2_startup(설정·시작 일치 표·DB 메타) → PAPER는 거부
+    (어댑터 T-047 전) → 실행 잠금 → 거래 규칙 적재(실패하면 시작 거부) → DB(SYMBOL 식별·M2 메타) → build_engine(M2)
+    (등록) → engine.start(): 판정 기록 복원 → 결과 불명 재시작 정리 → K8 → 잔고 조회 → 시작 대조. K8은 사용자 재개로만.
+    BACKTEST = fake 현물 브로커 연습 실행(시세 없음 → 위험 확대 거부, 기준선 없음 → 대조 불일치 K4 — 기준선 도구 T-049)."""
+    try:
+        cfg, caps, strategies, pairs, gate_settings, policy = _m2_inputs(root, mode, base)
+    except (LiveNotAvailable, ConfigError) as exc:
+        print(f"시작 거부(브로커 연결 없음): {exc}")
+        return 2
+    try:
+        lock = acquire_instance_lock(base)
+    except InstanceLocked as exc:
+        print(f"시작 거부(브로커 연결 없음): {exc}")
+        return 2
+    if take_stop_request(base):
+        print(f"이전 정지 요청 파일을 지움: {base / STOP_REQUEST}")
+    fatal_log = base / "logs" / "fatal.log"
+    prev_hook = threading.excepthook
+
+    def thread_died(args: threading.ExceptHookArgs) -> None:
+        if args.exc_value is not None:
+            record_fatal(fatal_log, args.exc_value)
+        prev_hook(args)
+
+    threading.excepthook = thread_died
+    try:
+        return _run_m2(mode, base, cfg, caps, strategies, pairs, gate_settings, policy, max_seconds)
+    except BaseException as exc:
+        record_fatal(fatal_log, exc)
+        raise
+    finally:
+        threading.excepthook = prev_hook
+        lock.release()
+
+
+def _run_m2(mode: Mode, base: Path, cfg, caps, strategies: list[StrategyInput], pairs, gate_settings,  # type: ignore[no-untyped-def]
+            policy, max_seconds: float | None) -> int:
+    from trading_system.app.wiring import SpotInputs
+    from trading_system.broker.fake.broker import FakeSpotFees
+    from trading_system.broker.fake.spot import FakeSpotBroker, virtual_symbol_rules
+    from trading_system.marketdata.spot_facts import SpotFactsStore
+    from trading_system.monitoring.sntp import ClockMonitor
+    from trading_system.storage.repository import OrderIdentity
+    app = cfg.app
+    clock = SystemClock()
+    facts = SpotFactsStore(now=clock.now, universe=tuple(pairs))
+    # 거래 규칙 적재 (D-209): fake = 가상 규칙. 유니버스 심볼 하나라도 규칙이 없으면 시작 거부 (DB·주문 없음)
+    missing = facts.load_rules({s: virtual_symbol_rules(s) for s in pairs})
+    if missing:
+        print(f"시작 거부(주문 없음): 거래 규칙 적재 실패 — 규칙 없는 심볼 {', '.join(missing)} (D-209)")
+        return 2
+    existed = cfg.storage_path.exists()
+    repo = Repository(cfg.storage_path, mode, order_identity=OrderIdentity.SYMBOL)   # M2 주문 식별 (D-110)
+    try:
+        bind_market(repo.connection, Market.M2, cfg.broker, created=not existed)
+    except ModeMismatch as exc:
+        repo.close()
+        print(f"시작 거부(브로커 연결 없음): {exc}")
+        return 2
+    stop = threading.Event()
+    threads: list[threading.Thread] = []
+    try:
+        broker = FakeSpotBroker(now=clock.now)
+        broker.spot_fees = FakeSpotFees(rate=gate_settings.cost_rates.commission_rate, pairs=pairs)
+        broker.ioc_limit = True   # 매수 = IOC 지정가 (D-104)
+        clock_monitor = ClockMonitor(repo, clock, list(app.sntp_servers), None, None)
+        try:
+            engine = build_engine(mode=mode, repo=repo, clock=clock, broker=broker, store=None, account=app.account,
+                                  account_limits=cfg.limits, gate_settings=gate_settings, caps=caps,
+                                  strategies=strategies, kill_file=base / "KILL", clock_health=clock_monitor,
+                                  alert_thresholds=cfg.market_settings.alerts,
+                                  fallback_log=base / "logs" / "alerts-fallback.log",
+                                  reconcile_every=_minutes(app.reconcile_minutes),
+                                  requery_wait=lambda: time.sleep(REQUERY_WAIT_SECONDS), market=Market.M2.value,
+                                  spot=SpotInputs(facts, pairs, cfg.universe.quote_asset, policy))
+        except ConfigError as exc:
+            print(f"시작 거부(주문 없음): {exc}")
+            return 2
+        engine.fallback_file = base / "logs" / "engine-fallback.log"
+        engine.log_dir = base / "logs"
+        clock_monitor._halts, clock_monitor._alerts = engine.halts, engine.alerts  # noqa: SLF001 — 조립 지점
+        clock_monitor.check()
+        clock_monitor._halts = QueuedHalts(engine)    # noqa: SLF001 — 이후 점검은 감시 스레드 → 정지는 큐로 (D-215)
+        facts.halts = QueuedHalts(engine)              # 공급 품질 실패(K10)는 큐 경유 (D-215, RV-22)
+        sup = Supervisor(engine, heartbeat=base / "heartbeat", fallback=engine.fallback_file,
+                         clock_monitor=clock_monitor, watched=[], watched_k11=[], watched_alert_only=[])
+        sup_thread = threading.Thread(target=sup.run, args=(stop,), name="supervisor", daemon=True)
+        sup_thread.start()
+        threads.append(sup_thread)
+        rep = engine.start()
+        print(f"시작: 시장 M2, 모드 {mode.value}, 계좌 {app.account}, 복구 판정 {'통과' if rep.ok else '실패'} "
+              f"— K8 재개: scripts/resume.py --mode {mode.value} --market M2 K8")
+        print(start_summary(engine, rep))
+        signal.signal(signal.SIGINT, lambda *_: stop.set())
+        started = time.monotonic()
+        while not stop.is_set():
+            engine.tick()
+            if take_stop_request(base):
+                print("정지 요청 파일 확인 — 정상 종료 (Ctrl+C와 같은 순서)")
+                stop.set()
+                break
+            if max_seconds is not None and time.monotonic() - started > max_seconds:
+                break
+            stop.wait(float(app.loop_seconds))
+        return 0
+    finally:
+        stop.set()
+        for t in threads:
+            t.join(10)
         repo.close()
 
 
