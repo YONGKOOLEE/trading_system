@@ -364,7 +364,12 @@ class StrategyRegistry:
         배포되지 않은 전략은 판정하지 않으므로 그 보유에 감액·청산 신호가 나오지 않는다(고아 보유). 교체 전이 검사
         (transition)를 거치지 않고 배포 설정만 바꾼 경우를 시작에서 막는다. 사용자 판단 중지·폐기 전략은 예외(운영 요청만,
         01 K9). 외부 수동 보유(manual)는 전략이 아니라 등록 상태가 없으므로 보지 않는다. 상태는 바꾸지 않는다."""
-        out: list[str] = []
+        return [problem for _, problem in self.undeployed_holdings(account, deployed)]
+
+    def undeployed_holdings(self, account: str, deployed: set[str]) -> list[tuple[str, str]]:
+        """undeployed_holding_problems와 같은 검사, (전략 owner, 사유) 쌍으로. 읽기만 한다 — 시작 점검(preflight)이
+        run 시작 전에 같은 검사로 거부하고 고치는 명령을 붙이는 데 쓴다 (A-105)."""
+        out: list[tuple[str, str]] = []
         for row in self._repo.strategy_states():
             if row["market"] != self._market:
                 continue
@@ -376,9 +381,10 @@ class StrategyRegistry:
             held = [o for o in self._repo.active_ownerships_of(owner) if o["account"] == account]
             if held:
                 reason = f", 중지 사유 {row['stop_reason']}" if row["stop_reason"] else ""
-                out.append(f"배포 설정에 없는 전략 {owner}(상태 {state.value}{reason})이 보유·예약 {_held_summary(held)}을 "
-                           f"소유 — 판정하지 않는 전략의 보유는 청산 신호가 없다({REPLACE_REFUSAL}). 그 전략을 배포 설정에 "
-                           "되돌려 청산한 뒤 교체하거나, 사용자 판단 중지(USER)로 바꿔 운영 요청으로 정리")
+                out.append((owner,
+                            f"배포 설정에 없는 전략 {owner}(상태 {state.value}{reason})이 보유·예약 {_held_summary(held)}을 "
+                            f"소유 — 판정하지 않는 전략의 보유는 청산 신호가 없다({REPLACE_REFUSAL}). 그 전략을 배포 설정에 "
+                            "되돌려 청산한 뒤 교체하거나, 사용자 판단 중지(USER)로 바꿔 운영 요청으로 정리"))
         return out
 
     def sync_k9_from_state(self, owner: str, actor: str) -> str:

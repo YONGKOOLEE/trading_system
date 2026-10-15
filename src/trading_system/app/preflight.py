@@ -11,6 +11,9 @@
 - 달력: 올해 달력이 없으면 경고. 오늘+30일이 달력 없는 다음 해로 넘어가면 경고(실패 아님, A-084·X-U3).
 - 본 프로세스(run)가 살아 있으면(하트비트 30초 이내) 연결 전에 거부한다. 점검 끝의 토큰 폐기가 실행 중인
   엔진의 토큰을 무효화할 수 있기 때문이다 (검토 RV-15·RV-17).
+- 배포 설정에서 빠진 전략이 보유·예약을 소유하면(CP-035 D-200, DP-49) 연결 전에 거부한다 — run(build_engine)이 같은
+  검사로 시작을 거부하는데 그 사유는 run 콘솔에만 남으므로, 여기서 먼저 고치는 방법과 함께 알린다(A-105, 자동 운영은
+  "거부"·"실패" 줄을 텔레그램으로 보낸다). 저장소는 읽기만 한다. build_engine 검사는 그대로 둔다(최종 방어).
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ from trading_system.broker.kiwoom.token import TokenError
 from trading_system.config.app_file import AppSettings, load_app_settings
 from trading_system.config.errors import ConfigError
 from trading_system.config.modes import read_trade_mode
+from trading_system.config.strategy_registry import StrategyRegistry
 from trading_system.domain.clock import KST, Clock, SystemClock
 from trading_system.domain.enums import Mode
 from trading_system.domain.heartbeat import HEARTBEAT_STALE, watchdog_check
@@ -47,6 +51,7 @@ from trading_system.storage.jsonlog import Masker
 from trading_system.storage.repository import Repository
 
 from .startup import check_startup
+from .wiring import load_strategy
 
 ORDER_API_IDS = frozenset({"kt10000", "kt10001", "kt10002", "kt10003"})
 # 이 시스템이 쓰는 조회 API (adapter: 예수금·잔고·주문·미체결, kiwoom_feed: 일봉·시세·종목 정보·VI)
@@ -369,6 +374,24 @@ def check_clock(rep: PreflightReport, repo: Repository, clock: Clock, servers: l
         rep.failures.append(f"시계 오차 {res.offset}초 > 허용 {TOLERANCE_SECONDS}초 ({res.detail}) — PC 시간 동기화 후 재점검")
 
 
+def undeployed_holding_refusals(repo: Repository, clock: Clock, app: AppSettings) -> list[str]:
+    """run 시작 거부 사유(CP-035 D-200, DP-49)를 연결 전에 찾는다 — build_engine과 같은 검사(StrategyRegistry.
+    undeployed_holdings), 읽기만. 한 줄에 사유와 고치는 방법을 함께 담는다(자동 운영은 "거부"·"실패" 줄만 보낸다, A-105).
+    배포 전략을 불러올 수 없으면 run도 시작을 거부하므로 그 사유를 돌려준다."""
+    try:
+        deployed = {load_strategy(dep)[0].spec.owner for dep in app.strategies}
+    except ConfigError as exc:
+        return [f"배포 전략을 불러올 수 없음 — run도 시작 거부: {exc}"]
+    out: list[str] = []
+    for owner, problem in StrategyRegistry(repo, clock, None).undeployed_holdings(app.account, deployed):
+        sid, _, ver = owner.rpartition(":")
+        out.append(f"run 시작 거부 예정 — {problem}. 조치(둘 중 하나): ① config/app.paper.toml [[strategies]]에 {owner}을 "
+                   f"되돌려 배포 → 그 전략의 청산 신호로 보유가 없어진 뒤 교체 ② 바로 멈추려면 사용자 판단 중지: "
+                   rf".venv\Scripts\python scripts\strategy.py transition --mode PAPER {sid} {ver} STOPPED "
+                   f"--stop-reason USER --approval A-번호 → 보유는 운영 요청(청산)으로 정리")
+    return out
+
+
 def preflight_main(root: Path, environ: Mapping[str, str] | None = None, *, rest_url: str = MOCK_REST,
                    ws_url: str = MOCK_WS, clock: Clock | None = None, probe_code: str | None = None,
                    per_tr_interval: float = 1.1,
@@ -392,6 +415,12 @@ def preflight_main(root: Path, environ: Mapping[str, str] | None = None, *, rest
     code = probe_code or next(iter(app.instruments), PROBE_DEFAULT)
     repo = Repository(conn.storage_path, Mode.PAPER)
     try:
+        refusals = undeployed_holding_refusals(repo, clock, app)   # 토큰 발급(첫 네트워크) 전 — CP-035 D-200, A-105
+        if refusals:
+            adapter.close()   # 토큰 없음 → 전송 없음
+            for msg in refusals:
+                _refuse(msg)
+            return 2
         rep = run_preflight(adapter, guard, MarketDataStore(calendar, None), repo, clock, app.account, code,
                             app.instruments)
         check_clock(rep, repo, clock, list(app.sntp_servers), sntp_query)
