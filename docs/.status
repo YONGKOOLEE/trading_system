@@ -14,4 +14,4 @@ implementation_start: authorized   # A-022 (2026-10-01). M2 구현 시작 A-071 
 live_order_code: not-authorized
 live_run: not-authorized    # 시장별: M1/M2/M3 모두 없음. PAPER 자동 운영(CP-029)은 PAPER 전용
 commit_policy: D-082 (A-017) + A-030   # 작업 완료·테스트 통과 시 로컬 커밋(문서 포함, A-030), push·main 병합은 지시 시
-last_updated: 2026-10-14   # 세션 46 밤. A-098~A-103: 재부팅 대책, PV-11 절차·토큰 감사 기록(main 병합), CP-033·CP-025 승인, 계획 문서 묶음 재승인(A-102), R-9 정정. M2 테스트넷 시작 점검 통과(PV-M2-03). 실전 주문 코드·LIVE 승인 없음
+last_updated: 2026-10-15   # 세션 46~47. A-104·A-105(CP-035), CP-033·CP-035·T-044 main 병합(12c4d36, 2951 passed/1 skipped). K4 활성(10-15 직접 매수 감지 시험) — 사용자 정리 대기. 실전 주문 코드·LIVE 승인 없음
