@@ -1,7 +1,7 @@
 """가짜 바이낸스 WS API (CP-036 T-048 시험용, 네트워크 없음).
 
 - FakeWsApi: 메모리 연결 공장(connect(url) → 연결). 서명 구독 요청에 응답하고, 합성 거래소(ExchangeSim)의 사용자 스트림
-  이벤트를 `{"subscriptionId": n, "event": {...}}`로 흘린다. 끊김·구독 거부·serverShutdown·연결 실패를 주입한다.
+  이벤트를 `{"subscriptionId": n, "event": {...}}`로 흘린다. 끊김·구독 거부·serverShutdown(구독 직후 포함)·연결 실패를 주입한다.
 - LoopbackWsServer: websockets(고정 버전) 동기 서버를 127.0.0.1 임의 포트에 띄운다 — 실제 WS 프레임·ping/pong 확인용.
   외부 연결 없음.
 """
@@ -38,6 +38,8 @@ class FakeConn:
             elif not self.api.silent:
                 self.subscribed = True
                 self.inbox.put(json.dumps({"id": msg["id"], "status": 200, "result": {"subscriptionId": 0}}))
+                if self.api.terminate_on_subscribe:   # 구독 직후 서버 종료 통보 (재검토: 연속 종료 백오프, DP-68)
+                    self.inbox.put(json.dumps({"subscriptionId": 0, "event": {"e": "serverShutdown", "E": 0}}))
 
     def recv(self, timeout: float | None = None) -> str:
         if self.closed:
@@ -72,6 +74,7 @@ class FakeWsApi:
         self.refuse = False
         self.silent = False
         self.fail_connects = 0
+        self.terminate_on_subscribe = False
         self._lock = threading.Lock()
         self._cursor = 0
 

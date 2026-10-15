@@ -137,29 +137,34 @@ def _app(paper: str, market: str = "M2"):  # type: ignore[no-untyped-def]
     return parse_app_settings(tomllib.loads(raw), Mode.PAPER, REPO)
 
 
+APPROVALS = REPO / "docs" / "approvals.md"   # 재검토 DP-66: 스위치가 켜지면 A-ID가 승인 기록 표에 행으로 있어야 한다
+
+
 def test_order_switch_keys_default_off() -> None:
     app = _app("[paper]\nconnection_approved = true\n")
     assert (app.paper_orders_approved, app.paper_orders_approval) == (False, None)
-    sw = check_order_switch(app, deployed_strategies=0)
+    sw = check_order_switch(app, deployed_strategies=0, approvals_file=APPROVALS)
     assert sw.enabled is False and "주문 차단" in sw.describe()
 
 
 def test_v285a_switch_off_with_strategy_refuses_start() -> None:
     app = _app("[paper]\nconnection_approved = true\n")
     with pytest.raises(ConfigError, match="orders_approved"):
-        check_order_switch(app, deployed_strategies=1)
+        check_order_switch(app, deployed_strategies=1, approvals_file=APPROVALS)
 
 
 @pytest.mark.parametrize("extra", ["", 'orders_approval = "A1"\n', 'orders_approval = "approved"\n'])
 def test_v285c_switch_on_without_valid_approval_refuses(extra: str) -> None:
     app = _app("[paper]\nconnection_approved = true\norders_approved = true\n" + extra)
     with pytest.raises(ConfigError, match="orders_approval"):
-        check_order_switch(app, deployed_strategies=1)
+        check_order_switch(app, deployed_strategies=1, approvals_file=APPROVALS)
 
 
-def test_v285d_switch_on_with_approval_id() -> None:
+def test_v285d_switch_on_with_approval_id(tmp_path: Path) -> None:
     app = _app('[paper]\nconnection_approved = true\norders_approved = true\norders_approval = "A-123"\n')
-    sw = check_order_switch(app, deployed_strategies=1)
+    table = tmp_path / "approvals.md"                                     # 재검토 DP-66: 표에 행이 있는 A-ID
+    table.write_text("| A-ID | 일자 |\n|---|---|\n| A-123 | 2026-10-16 |\n", encoding="utf-8")
+    sw = check_order_switch(app, deployed_strategies=1, approvals_file=table)
     assert (sw.enabled, sw.approval) == (True, "A-123") and "A-123" in sw.describe()
 
 

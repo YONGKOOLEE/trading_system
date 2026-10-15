@@ -143,6 +143,18 @@ def check_m2_startup(mode: Mode, repo_root: Path, storage_path: Path, env_file: 
 
 BINANCE_SECRET_KEYS = ("BINANCE_TESTNET_API_KEY", "BINANCE_TESTNET_SECRET_KEY")
 _APPROVAL_ID = re.compile(r"A-\d{3,}")
+_APPROVAL_ROW = re.compile(r"^\|\s*(A-\d{3,})\s*\|")
+APPROVALS_FILE = Path("docs") / "approvals.md"
+
+
+def recorded_approval_ids(path: Path) -> frozenset[str]:
+    """승인 기록 표(docs/approvals.md)의 A-ID 열 — 표 행의 첫 칸만 읽는다(읽기 전용, 본문 언급은 세지 않음).
+    파일이 없거나 읽을 수 없으면 빈 집합(= 어떤 A-ID도 확인되지 않음)."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return frozenset()
+    return frozenset(m.group(1) for line in text.splitlines() if (m := _APPROVAL_ROW.match(line)))
 
 
 @dataclass(frozen=True)
@@ -158,9 +170,11 @@ class OrderSwitch:
         return "주문 차단 run — 주문 계열 요청은 보내기 전에 막는다 (orders_approved 꺼짐, D-204)"
 
 
-def check_order_switch(app: AppSettings, *, deployed_strategies: int) -> OrderSwitch:
+def check_order_switch(app: AppSettings, *, deployed_strategies: int, approvals_file: Path) -> OrderSwitch:
     """D-204: (a) 꺼짐 + 전략 배포 → 시작 거부 (b) 꺼짐 + 전략 없음 → 주문 차단 run (c) 켜짐 + 승인 A-ID 없음·형식 오류
-    → 시작 거부 (d) 켜짐 + A-ID → 주문 허용. 스위치·A-ID는 사용자가 config/m2/app.paper.toml [paper]에 직접 쓴다."""
+    → 시작 거부 (d) 켜짐 + A-ID → 주문 허용. 스위치·A-ID는 사용자가 config/m2/app.paper.toml [paper]에 직접 쓴다.
+    [DP-66, D-204 보수 해석] (d)의 A-ID는 그 체크아웃 승인 기록 표(approvals_file = <root>/docs/approvals.md)에 행으로
+    있어야 한다 — 형식만 맞는 임의 문자열로 주문 전송을 켜지 못하게. 행의 내용(승인 범위)까지 판정하지는 않는다."""
     if not app.paper_orders_approved:
         if deployed_strategies:
             raise ConfigError("주문 전송 스위치 꺼짐(config/m2/app.paper.toml [paper] orders_approved = true 아님)인데 "
@@ -170,6 +184,9 @@ def check_order_switch(app: AppSettings, *, deployed_strategies: int) -> OrderSw
     if a is None or not _APPROVAL_ID.fullmatch(a):
         raise ConfigError("orders_approved = true인데 orders_approval(주문 전송 승인 A-ID, 예 \"A-123\")이 없거나 "
                           "형식이 아니다 (D-204)")
+    if a not in recorded_approval_ids(approvals_file):
+        raise ConfigError(f"orders_approval {a}가 승인 기록 표({approvals_file})의 A-ID 행에 없다 — 사용자 승인이 기록된 "
+                          "A-ID만 주문 전송을 켠다 (D-204, DP-66)")
     return OrderSwitch(True, a)
 
 
@@ -186,7 +203,8 @@ def m2_paper_problems(cfg: M2StartupConfig) -> tuple[list[str], OrderSwitch | No
         out.append(f".env.paper에 없거나 빈 키: {', '.join(missing)}")
     switch = None
     try:
-        switch = check_order_switch(cfg.app, deployed_strategies=len(cfg.app.strategies))
+        switch = check_order_switch(cfg.app, deployed_strategies=len(cfg.app.strategies),
+                                    approvals_file=cfg.repo_root / APPROVALS_FILE)
     except ConfigError as exc:
         out.extend(exc.problems if getattr(exc, "problems", None) else [str(exc)])
     return out, switch

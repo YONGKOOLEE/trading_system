@@ -160,7 +160,9 @@ def test_v286_bad_message_warns_and_continues() -> None:
         assert wait_until(lambda: r.kinds() == ["ONLINE"])
         r.api.current.push({"subscriptionId": 0, "event": {"e": "executionReport", "s": SYM}})
         r.api.current.push("not json")
-        assert wait_until(lambda: r.kinds().count("BAD_MESSAGE") == 2)
+        # 재검토 DP-67: 둘 다 해석 불가로 세되, 같은 조건의 반복 경보는 묶어 상태 알림은 1건 (이전 기대값 2건)
+        assert wait_until(lambda: r.stream.bad_messages == 2)
+        assert r.kinds().count("BAD_MESSAGE") == 1
         assert r.stream.state is StreamState.ONLINE and len(r.api.conns) == 1
     finally:
         r.close()

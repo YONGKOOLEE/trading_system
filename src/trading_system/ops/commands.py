@@ -205,7 +205,11 @@ class OpsProcessor:
             return "DONE", self._registry.sync_k9_from_state(str(args["owner"]), f"{channel}:{actor}")
         req = self._request(cid, name, args)
         if self.prepare is not None:
-            req = self.prepare(req)
+            try:
+                req = self.prepare(req)
+            except ValueError as exc:   # 게이트 전 시장별 거부(M2 D-211)도 게이트 거부와 같은 긴급 알림 (재검토)
+                self._executor.alert("EMERGENCY", f"운영 요청 거부 ({name}): {exc}", cid)
+                raise
         d = self._gate.decide(req)
         if d.result is not GateResult.APPROVED or d.approved is None:
             self._executor.alert("EMERGENCY", f"운영 요청 거부 ({name}): {d.reason}", cid)  # 위험 축소 거부는 알림

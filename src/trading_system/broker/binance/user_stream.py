@@ -11,7 +11,9 @@ broker/ws_transport(websockets 고정 버전)를 app·scripts가 주입한다. �
    끝낸다** [DP-58] — 사람이 키를 확인한 뒤 재시작(PV-M2-06, A-063⑨ 키 유형 재결정 입력).
    응답 없음(시간 초과)·연결 실패 → OFFLINE, 대기 후 재연결.
 3. 수신: executionReport → 어댑터 ingest_stream(큐에만 넣음 — 반영은 판정·실행 스레드, D-215). 해석 불가 메시지 →
-   BAD_MESSAGE(경고, 원문 없음). serverShutdown·eventStreamTerminated → 즉시 교체 대상.
+   BAD_MESSAGE(경고, 원문 없음 — 반복은 시작 1건·30분마다 요약·정상 메시지 5분 뒤 회복 1건으로 묶는다, DP-67).
+   serverShutdown·eventStreamTerminated → 교체 대상: 첫 통보는 바로 새 연결, 안정 구간(STABLE_MS 60초) 없이 연속되면
+   재연결 대기(아래 5와 같은 1·2·4…30초)를 둔다 — 구독 직후 종료가 반복돼도 바로 다시 두드리지 않는다 [DP-68].
 4. 끊김(수신 예외) → OFFLINE(app: K5 실시간 경로 끊김), 대기 후 재연결. 연결 23시간 경과(SessionPolicy, 24시간 유효 전)
    → 닫고 바로 새 연결(교체) → RECONNECTED → 대조.
 5. 재연결 대기: 1·2·4·8·16·30초, 이후 30초 반복(03 D-050과 같은 계속 시도) [제안]. 성공하면 처음부터.
@@ -28,6 +30,7 @@ from enum import StrEnum
 from typing import Protocol
 
 from .adapter import BinanceSpotAdapter
+from .alert_throttle import ConditionAlerts
 from .numbers import BinanceParseError
 from .signing import Credentials, ws_signed_request
 from .stream import ROTATE_AFTER_MS, ServerShutdown, SessionPolicy, StreamTerminated, parse_event
@@ -37,6 +40,7 @@ TESTNET_WS_API = f"wss://{WS_API_HOST}/ws-api/v3"
 SUBSCRIBE = "userDataStream.subscribe.signature"
 BACKOFF_S = (1.0, 2.0, 4.0, 8.0, 16.0, 30.0)
 REPLY_TIMEOUT_S = 10.0
+STABLE_MS = 60_000      # 구독 뒤 이만큼 살아 있던 연결의 종료 통보는 "연속"으로 세지 않는다 [제안, DP-68]
 
 
 class WsConn(Protocol):
@@ -76,7 +80,11 @@ class UserStream:
         self._backoff = tuple(backoff_s)
         self._wait = wait or (lambda stop, s: stop.wait(s))
         self._seq = 0
+        self._terminated = False          # 이번 연결이 서버 종료 통보로 끝났는가
+        self._subscribed_at: int | None = None
+        self._bad = ConditionAlerts(lambda _k, m: self._state(StreamState.BAD_MESSAGE, m), lambda: self._now() / 1000)
         self.subscriptions = 0
+        self.bad_messages = 0
         self.state: StreamState | None = None
 
     def __repr__(self) -> str:
@@ -92,12 +100,24 @@ class UserStream:
 
     def run(self, stop: threading.Event) -> None:
         failures = 0
+        terminations = 0      # 안정 구간 없이 이어진 서버 종료 통보 수 (DP-68)
         while not stop.is_set():
             out = self._session(stop)
             if out in ("REFUSED", "STOPPED"):
                 return
+            if out == "TERMINATED":
+                failures = 0
+                lived = None if self._subscribed_at is None else self._now() - self._subscribed_at
+                if lived is not None and lived >= STABLE_MS:
+                    terminations = 0
+                terminations += 1
+                if terminations == 1:
+                    continue                  # 첫 통보는 바로 교체 (V-286)
+                self._wait(stop, self._backoff[min(terminations - 2, len(self._backoff) - 1)])
+                continue
             if out == "ROTATE":
                 failures = 0
+                terminations = 0
                 continue
             if out == "LOST":
                 failures = 0
@@ -139,11 +159,13 @@ class UserStream:
                                              "자동 재시도 없음")
             return "REFUSED"
         self.subscriptions += 1
+        self._subscribed_at = self._now()
+        self._terminated = False
         self._state(StreamState.ONLINE if self.subscriptions == 1 else StreamState.RECONNECTED, "구독 성공")
         policy = SessionPolicy(self._now(), self._rotate)
         while not stop.is_set():
             if policy.should_rotate(self._now()):
-                return "ROTATE"
+                return "TERMINATED" if self._terminated else "ROTATE"
             try:
                 text = conn.recv(timeout=self._recv_timeout)
             except TimeoutError:
@@ -174,10 +196,13 @@ class UserStream:
         try:
             ev = parse_event(msg)
         except BinanceParseError as exc:
-            self._state(StreamState.BAD_MESSAGE, f"해석 불가 메시지 ({exc})")
+            self.bad_messages += 1
+            self._bad.fail("BAD_MESSAGE", StreamState.BAD_MESSAGE.value, f"해석 불가 메시지 ({exc})")
             return
+        self._bad.ok("BAD_MESSAGE", "해석 불가 메시지")
         policy.note(ev)
         if isinstance(ev, (ServerShutdown, StreamTerminated)):
+            self._terminated = True
             return
         self._adapter.ingest_stream(ev)
 

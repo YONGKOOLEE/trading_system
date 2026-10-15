@@ -3,6 +3,9 @@
 `scripts/reconcile-resolve.py --mode PAPER --market M2 initial-baseline` / `... reset-confirm`
 - 로컬 전용: 원격(텔레그램) 명령은 없다 — 운영 명령 표(ops_command)를 거치지 않고 이 프로세스가 직접 쓴다.
 - **엔진 정지 중에만**: 실행 잠금(var/<mode>/run.lock)이 잡혀 있거나 하트비트가 살아 있으면 거부(아무것도 쓰지 않음).
+  DB를 열기 직전 실행 잠금을 **잡고 도구가 끝날 때까지 쥔다**(재검토) — 쓰는 사이 엔진이 시작하지 못한다(엔진은 이중 실행
+  거부). 그때 잠금을 못 잡으면(그 사이 엔진 시작) 거부.
+- 잔고 조회 실패(리셋 확인 안의 두 번째 조회 포함)는 분명한 거부(종료 코드 2) — 기준선·감사는 쓰지 않는다.
 - 연결은 조회만(A-096 범위): PAPER = 바이낸스 테스트넷 계좌 잔고 조회(주문 스위치 꺼짐 전송 계층, scripts가 주입).
   BACKTEST(fake 연습) = 거래소가 없으므로 사람이 --quote-amount로 USDT 가상 잔고를 적는다.
 - initial-baseline: 기준선이 이미 있으면 거부. reset-confirm: 리셋 확인(confirm_reset). 둘 다 활성 의도·열린 주문 있으면 거부.
@@ -33,7 +36,7 @@ from trading_system.reconciliation.spot import ResetError, confirm_reset, initia
 from trading_system.storage.market_meta import bind_market
 from trading_system.storage.repository import ModeMismatch, OrderIdentity, Repository, StorageFailure
 
-from .instance_lock import instance_running
+from .instance_lock import InstanceLocked, acquire_instance_lock, instance_running
 from .preflight import engine_alive
 from .startup import BINANCE_SECRET_KEYS, LiveNotAvailable, check_m2_startup
 
@@ -116,6 +119,19 @@ def m2_baseline_main(argv: Sequence[str], root: Path, *, open_balances: BalanceS
                                now_ms=lambda: int(clock.now().timestamp() * 1000))
         if isinstance(source, str):
             return _refuse(source)
+    try:
+        lock = acquire_instance_lock(base)     # 쓰는 동안 엔진 시작을 막는다 (끝날 때 해제)
+    except InstanceLocked:
+        return _refuse("엔진 실행 중(실행 잠금 보유) — 엔진을 멈춘 뒤 실행 (D-210)")
+    try:
+        return _write(ns, cfg, mode, clock, source, pairs, quote)
+    finally:
+        lock.release()
+
+
+def _write(ns: argparse.Namespace, cfg: Any, mode: Mode, clock: Clock, source: Any,  # noqa: PLR0913
+           pairs: dict[str, tuple[str, str]], quote: str) -> int:
+    """실행 잠금을 쥔 채로: DB(M2 메타) → 잔고 조회 → 기준선 확정 또는 리셋 확인."""
     existed = cfg.storage_path.exists()
     cfg.storage_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -147,6 +163,8 @@ def m2_baseline_main(argv: Sequence[str], root: Path, *, open_balances: BalanceS
                                     set_baseline=facts.set_baseline, operator=operator)
         except ResetError as exc:
             return _refuse(str(exc))
+        except BrokerQueryError as exc:     # 리셋 확인의 두 번째 잔고 조회 — 쓰기 전(저장 단위 밖)에 실패
+            return _refuse(f"잔고 조회 실패(리셋 확인): {exc}")
     finally:
         repo.close()
     print(f"{ns.command} 완료: USDT 기준선 {rep.quote_baseline}, 유니버스 보유 {rep.positions} (수동 보유로 기록), "

@@ -6,6 +6,7 @@ M2 하위 명령 (CP-036 D-210, 로컬 전용·엔진 정지 중에만·조회�
         .venv/Scripts/python scripts/reconcile-resolve.py initial-baseline --mode PAPER --market M2
         .venv/Scripts/python scripts/reconcile-resolve.py reset-confirm --mode PAPER --market M2
   PAPER는 바이낸스 테스트넷 계좌 잔고를 조회한다(주문 전송 차단 전송 계층). BACKTEST(fake 연습)는 --quote-amount로 가상 USDT.
+M2 모듈은 M2 하위 명령일 때만 import한다(재검토) — M2 쪽 import 오류가 M1 reconcile-resolve를 막지 않게.
 """
 
 import sys
@@ -15,8 +16,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from trading_system.app.m2_baseline import SUBCOMMANDS, m2_baseline_main  # noqa: E402
 from trading_system.ops.cli import reconcile_resolve_main  # noqa: E402
+
+M2_SUBCOMMANDS = ("initial-baseline", "reset-confirm")      # = app.m2_baseline.SUBCOMMANDS (시험으로 고정)
+REST_HOSTS = frozenset({"testnet.binance.vision"})          # 테스트넷 REST만 (= broker/binance/preflight.TESTNET_HOST, 시험으로 고정)
 
 
 def _balances(**kw):  # type: ignore[no-untyped-def]
@@ -25,11 +28,16 @@ def _balances(**kw):  # type: ignore[no-untyped-def]
     from trading_system.broker.rest_transport import RestTransport
 
     def make_transport(pre, after):  # type: ignore[no-untyped-def]
-        return RestTransport(frozenset({"testnet.binance.vision"}), pre_send_error=pre, after_send_error=after)
+        return RestTransport(REST_HOSTS, pre_send_error=pre, after_send_error=after)
     return open_balance_queries(make_transport, sleep=time.sleep, **kw)
 
 
+def main(argv: list[str]) -> int:
+    if any(a in M2_SUBCOMMANDS for a in argv):
+        from trading_system.app.m2_baseline import m2_baseline_main
+        return m2_baseline_main(argv, ROOT, open_balances=_balances)
+    return reconcile_resolve_main(argv)
+
+
 if __name__ == "__main__":
-    if any(a in SUBCOMMANDS for a in sys.argv[1:]):
-        sys.exit(m2_baseline_main(sys.argv[1:], ROOT, open_balances=_balances))
-    sys.exit(reconcile_resolve_main())
+    sys.exit(main(sys.argv[1:]))

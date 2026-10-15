@@ -15,7 +15,8 @@ BN §3·§6·§8 확인값, ticker/price(심볼 지정) 2는 **미확인(추정)
 - 서버 시각: 10분마다(D-115). 0.5초 이상 오차는 클라이언트가 CLOCK 경고.
 - 호출 우선순위: 시세·평균가·klines = MARKET(최하위, 예산 70% 상한) — 예산이 부족하면 시세가 먼저 보류된다(D-113).
   보류·조회 실패는 그 단계만 건너뛴다(조회 재시도는 클라이언트 규칙: 최대 3회).
-오류: 조회 실패(BinanceQueryError)는 단계별로 삼키고 경고만. 그 밖의 예외는 스레드를 끝낸다 — 감시 스레드가 죽은
+오류: 조회 실패(BinanceQueryError)·응답 해석 불가는 단계별로 삼키고 경고만 — 같은 조회(키 "ticker BTCUSDT" 등)의 반복은
+alert_throttle.ConditionAlerts로 묶는다(시작 1건·30분마다 요약·회복 1건, DP-67). 그 밖의 예외는 스레드를 끝낸다 — 감시 스레드가 죽은
 binance-feed를 보고 긴급 알림 + K5(D-215).
 """
 
@@ -33,9 +34,14 @@ from trading_system.domain.sinks import HaltControl
 from trading_system.domain.strategy import Bar
 from trading_system.domain.trading_rules import SymbolRules as DomainRules
 
+from .alert_throttle import ConditionAlerts
 from .client import BinanceQueryError, BinanceSpotClient
 from .facts import BinanceMarketFacts
 from .market import KlineDataError, parse_avg_price
+
+
+class _FeedProblem(Exception):
+    """조회는 됐으나 쓸 수 없는 응답 — 조회 실패와 같은 경보 묶음으로."""
 
 
 class SpotSink(Protocol):
@@ -68,6 +74,7 @@ class BinanceFeed:
         self._symbols = tuple(symbols)
         self._now = now
         self._alert = alert
+        self._conds = ConditionAlerts(alert, lambda: now().timestamp())
         self._plan = plan
         self._facts = BinanceMarketFacts(now=now, universe=list(symbols), halts=halts, account=account)
         self._day: date | None = None
@@ -120,7 +127,12 @@ class BinanceFeed:
         try:
             fn()
         except BinanceQueryError as exc:
-            self._alert("FEED", f"{what} 실패·보류: {exc}")
+            self._conds.fail(what, "FEED", f"{what} 실패·보류: {exc}")
+            return
+        except _FeedProblem as exc:
+            self._conds.fail(what, "FEED", str(exc))
+            return
+        self._conds.ok(what, what)
 
     def _ticker(self, s: str) -> None:
         body = self._client.ticker_price(s)
@@ -129,7 +141,7 @@ class BinanceFeed:
             if q is not None:
                 self._sink.update_quote(q)
         else:
-            self._alert("FEED", f"ticker {s}: 응답 해석 불가 — 시세 갱신 안 함")
+            raise _FeedProblem(f"ticker {s}: 응답 해석 불가 — 시세 갱신 안 함")
 
     def _avg(self, s: str) -> None:
         body = self._client.avg_price(s)
