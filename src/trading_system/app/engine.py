@@ -12,7 +12,8 @@
 입출력·감시 스레드(실시간 수신·텔레그램·시세 조회·감시)는 큐·저장소에만 쓰고 주문하지 않는다.
 단계·훅 오류는 루프 밖으로 내보내지 않는다(기록 실패 시 로컬 파일, RV-06). last_progress = 감시 스레드의 멈춤 판정 근거.
 
-시작(start): 실행기 재시작 정리(recover_on_start) → K8 발동 → 예수금 조회 → 복구 판정(대조 포함).
+시작(start): 오늘 판정 완료 표시 복원(감사 기록, T-044) → 실행기 재시작 정리(recover_on_start) → K8 발동 → 예수금 조회
+→ 복구 판정(대조 포함).
 K8 해제는 사용자 재개(운영 명령)로만 한다 (01 §2.11, CLAUDE.md §8-9).
 """
 
@@ -198,6 +199,7 @@ class Engine:
     # --- 시작 -------------------------------------------------------------------------
     def start(self) -> RecoveryReport:
         self.halts.send_thread = threading.get_ident()   # 이 스레드가 판정·실행 스레드 — 정지 취소 재시도는 여기서만 (4차 검토 F-B)
+        self._seed_evaluated(self.clock.now())           # 재시작 뒤 같은 판정 시각 재판정 방지 (T-044)
         unknown = self.executor.recover_on_start()
         self.start_unknown = len(unknown)
         self.halts.on_start()
@@ -214,6 +216,48 @@ class Engine:
                           f"시작: 결과 불명 {len(unknown)}건, 복구 판정 {'통과' if rep.ok else '실패'} — "
                           f"K8 재개는 사용자 명령으로 ({'; '.join(rep.failures) or '조건 충족'})", None)
         return rep
+
+    def _seed_evaluated(self, now: datetime) -> None:
+        """재시작 뒤 같은 판정 시각을 다시 판정하지 않게 판정 완료 표시(evaluated)를 저장된 감사 기록으로 채운다
+        (T-044, CP-035 Q-3, A-105, DP-21). 표시는 메모리뿐이라, 판정 시각 + 유예(eval_grace) 안에 재시작·K8 재개하면
+        이미 판정(EVALUATION, 참조 = 판정 ID)했거나 건너뛴(EVALUATION_SKIPPED, 참조 = 판정 키) 판정 시각을 다시 판정해
+        두 번째 신호를 낼 수 있었다. 한 번 실행 안에서는 판정·건너뜀 모두 다시 판정하지 않으므로 같은 규칙이다.
+        오늘(KST) 판정 시각만 본다 — 판정 키에 날짜가 들어 있다. 기록을 읽지 못하면 오늘 이미 지난 판정 시각을 모두
+        판정 완료로 보고(판정하지 않음, 불확실하면 주문하지 않는다) 알린다. 앞으로 올 판정 시각은 그대로 판정한다."""
+        today = now.astimezone(KST).date()
+        refs: dict[str, str] = {}      # 감사 참조 → 판정 키
+        past: dict[str, str] = {}      # 지난 판정 키 → "HH:MM"
+        for ls in self.strategies:
+            for t in ls.eval_times:
+                at = datetime.combine(today, t, tzinfo=KST)
+                key = self._eval_key(ls, at)
+                refs[self._eval_id(ls, at)] = key
+                refs[key] = key
+                if at <= now:
+                    past[key] = t.strftime("%H:%M")
+        if not refs:
+            return
+        try:
+            done = self.repo.audited_refs(("EVALUATION", "EVALUATION_SKIPPED"), list(refs))
+        except Exception as exc:  # noqa: BLE001 — 읽기 실패 = 판정 여부 불명 → 지난 판정 시각은 판정하지 않는다
+            self.evaluated.update(past)
+            log_exception(self.log_dir, "engine.seed_evaluated", exc)
+            kind = type(exc).__name__
+            slots = ", ".join(sorted(set(past.values()))) or "없음"
+            self._best_effort(lambda: self.alerts.alert(
+                "WARNING", f"재시작 판정 기록 확인 실패({kind}) — 오늘 이미 지난 판정 시각({slots})은 판정하지 않음"
+                           f"(재판정 방지, T-044). 이후 판정 시각은 정상", None), "알림", f"{kind}: {exc}")
+            return
+        self.evaluated.update(refs[r] for r in done if r in refs)
+
+    @staticmethod
+    def _eval_key(ls: LoadedStrategy, at: datetime) -> str:
+        return f"{ls.owner}|{at.isoformat()}"
+
+    @staticmethod
+    def _eval_id(ls: LoadedStrategy, at: datetime) -> str:
+        spec = ls.strategy.spec
+        return evaluation_id_of(spec.strategy_id, spec.version, "M1", at.isoformat())
 
     def call_soon(self, fn: Callable[[], object]) -> None:
         """다른 스레드가 판정·실행 스레드에서 실행할 일을 맡긴다(정지 발동·조건 보고 등). 저장소 연결은 스레드마다 따로."""
@@ -508,7 +552,7 @@ class Engine:
         for ls in self.strategies:
             for t in ls.eval_times:
                 at = datetime.combine(today, t, tzinfo=KST)
-                key = f"{ls.owner}|{at.isoformat()}"
+                key = self._eval_key(ls, at)   # 시작 때 감사 기록으로도 채운다 (_seed_evaluated, T-044)
                 if key in self.evaluated or now < at:
                     continue
                 self.evaluated.add(key)
@@ -532,7 +576,7 @@ class Engine:
 
     def _evaluate(self, ls: LoadedStrategy, at: datetime, now: datetime) -> None:
         spec = ls.strategy.spec
-        ev_id = evaluation_id_of(spec.strategy_id, spec.version, "M1", at.isoformat())
+        ev_id = self._eval_id(ls, at)
         owner = ls.owner
 
         def pos_view(inst: str) -> PositionView | None:

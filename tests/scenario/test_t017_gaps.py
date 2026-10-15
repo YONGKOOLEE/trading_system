@@ -316,10 +316,10 @@ def test_v180_switch_while_v1_holds_is_refused(tmp_path: Path, capsys: pytest.Ca
         w.repo.close()
         app = w.root / "config" / "app.paper.toml"
         app.write_text(v1_app, encoding="utf-8")
-        # 설정을 되돌리는 데 걸린 시간. 09:30 판정 유예(5분) 안에 재시작하면 같은 판정을 다시 하므로(판정 완료 기록은
-        # 메모리뿐 — 이 작업 범위 밖, 보고 항목) 유예 밖에서 재시작한다
-        w.clock.advance(timedelta(minutes=10))
+        # 시험 변경 사유(A-105 / T-044): 09:30 판정 유예(5분) 안(09:31)에 재시작·재개한다. 이전에는 판정 완료 표시가
+        # 메모리뿐이라 같은 09:30 판정을 다시 해서(v1 청산 신호) 시계를 10분 앞당겨 우회했다. 이제 재판정하지 않는다
         _restart_and_resume(w)
+        assert buy_sell_of_day(w, DAYS[0]) == [("ENTRY", "FILLED")]      # 같은 09:30 판정 재판정 없음 (T-044)
         w.run_until(kst(DAYS[0], 14, 31))
         assert w.position() == 0 and w.repo.active_ownership(PAPER_ACCOUNT, CODE) is None
         assert buy_sell_of_day(w, DAYS[0]) == [("ENTRY", "FILLED"), ("EXIT", "FILLED")]   # v1 신호로 청산
