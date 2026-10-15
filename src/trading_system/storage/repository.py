@@ -683,6 +683,14 @@ class Repository:
     def audit_events(self) -> list[dict]:
         return [dict(r) for r in self._x("SELECT * FROM audit_event ORDER BY seq")]
 
+    def audited_refs(self, kinds: tuple[str, ...], refs: list[str]) -> set[str]:
+        """주어진 종류의 감사 기록이 있는 참조(ref)들 (색인 ix_audit_kind_ref). 읽기만 한다 (T-044 재판정 방지)."""
+        if not kinds or not refs:
+            return set()
+        sql = (f"SELECT DISTINCT ref FROM audit_event WHERE kind IN ({','.join('?' * len(kinds))}) "
+               f"AND ref IN ({','.join('?' * len(refs))})")
+        return {str(r["ref"]) for r in self._x(sql, (*kinds, *refs))}
+
     def daily_base(self, account: str, trade_date: str) -> DailyBase | None:
         """거래일의 마지막 DAILY_BASE 감사 기록 (A-084 ①: 일일 손실 추적·요약·보고가 같은 기준 금액을 읽는다).
 

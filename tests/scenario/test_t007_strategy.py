@@ -248,6 +248,9 @@ def test_v113_paper_mode_rejects_draft_and_backtest_passed(tmp_path: Path) -> No
 # --- V-84 버전 교체 ------------------------------------------------------------------------
 
 def test_v84_version_replacement(env: Env) -> None:
+    """시험 변경 사유(A-104 / CP-035 D-200, V-84 개정 제안): 보유 중 교체 중지는 거부되므로 v1 청산은 교체 전(v1 PAPER)
+    v1 신호로 하고, 무보유가 된 뒤 교체한다. v2의 v1 소유 종목 진입 거부(D-008)·교체 뒤 v1 진입 거부·소유권 풀린 뒤 v2
+    진입 단언은 그대로."""
     reg = wire(env)
     v1 = register(reg, env)
     to_paper(reg, v1)
@@ -255,12 +258,14 @@ def test_v84_version_replacement(env: Env) -> None:
     v2 = register(reg, env, cross_spec(version=2))
     reg.transition("t-cross", 2, StrategyState.BACKTEST_PASSED, "A-911", evidence="bt2.md")
     reg.transition("t-cross", 2, StrategyState.PAPER, "A-912")
-    reg.transition("t-cross", 1, StrategyState.STOPPED, "A-913", stop_reason=StopReason.REPLACE)
+    with pytest.raises(ValueError, match="보유 중 교체 금지"):           # A-104: 보유 중 교체 거부
+        reg.transition("t-cross", 1, StrategyState.STOPPED, "A-913", stop_reason=StopReason.REPLACE)
     blocked = env.gate.decide(sig(v2, RequestType.ENTRY, "TST-A", ev="b"))
     assert blocked.result is GateResult.REJECTED and blocked.failed_check is Check.G6  # v1 소유 종목
-    assert env.gate.decide(sig(v1, RequestType.ENTRY, "TST-C", ev="c")).result is GateResult.REJECTED
-    assert run(env, sig(v1, RequestType.EXIT, "TST-A", ev="d")).result is GateResult.APPROVED  # 교체: 청산 허용
+    assert run(env, sig(v1, RequestType.EXIT, "TST-A", ev="d")).result is GateResult.APPROVED  # 교체 전 v1 청산
     assert env.repo.position(ACCOUNT, "TST-A").quantity == 0
+    reg.transition("t-cross", 1, StrategyState.STOPPED, "A-913", stop_reason=StopReason.REPLACE)   # 무보유 → 허용
+    assert env.gate.decide(sig(v1, RequestType.ENTRY, "TST-C", ev="c")).result is GateResult.REJECTED
     assert run(env, sig(v2, RequestType.ENTRY, "TST-A", ev="e")).result is GateResult.APPROVED  # 소유권 풀림
 
 

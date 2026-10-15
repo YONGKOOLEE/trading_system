@@ -4,7 +4,8 @@
 - V-173: 429 retry_after 없음(·형식 오류) → 5초 대기, 그동안 전송 0, 연속 실패 수 불변, K11 없음  (03 D-129)
 - V-177(c): 저장 실패가 아닌 예외 → 건너뜀(offset 진행), 기록  (03 D-131)
 - V-179: app/main 시작 경로에서 배포 검사·파라미터 로드 거부 → 시작 거부(설정 오류), 사유 표시  (03 D-134)
-- V-180: v1 → v2 교체 — 보유 중이면 소유권 승계 없음(00 D-011), 무보유면 v2 등록·판정 정상  (03 D-135)
+- V-180: v1 → v2 교체 — 보유 중이면 교체 전이 거부·v1만 뺀 배포는 시작 거부(A-104 / CP-035 D-200, 소유권 승계 없음
+  00 D-011), 무보유면 v2 등록·판정 정상  (03 D-135)
 
 네트워크 없음: 로컬 가짜 텔레그램 서버(test_t013_telegram.FakeTelegram)·fake 브로커·가짜 시계만 쓴다.
 토큰·채팅·계좌 별칭·승인 A-ID는 기존 시험의 가상값이다(A-9xx는 가상 승인).
@@ -29,6 +30,7 @@ from tests.scenario.test_t017_telegram import alert, halts, notifier
 from trading_system.app.main import run_main
 from trading_system.app.strategy_tool import strategy_main
 from trading_system.app.telegram_run import _guarded
+from trading_system.config.errors import ConfigError
 from trading_system.domain.enums import Mode
 from trading_system.ops.telegram import Notifier
 from trading_system.storage.repository import Repository, StorageFailure
@@ -233,9 +235,9 @@ verification_approval = "A-067"
 """
 
 
-def _switch_to_v2(w: PaperWorld) -> None:
-    """00 §2.11 교체 절차를 사용자 명령 순서대로 (D-135): 프로세스 정지 → 배포 설정 v2로 → v2 등록 → v2 백테스트 통과·PAPER
-    → v1 중지(교체) → 재시작 → K8 재개. 승인 A-ID는 가상(A-9xx), 검증 승인은 배포 설정의 A-067."""
+def _prepare_v2(w: PaperWorld) -> str:
+    """교체 절차 앞부분 (00 §2.11 1): 프로세스 정지 → 배포 설정 v2로 → v2 등록 → v2 백테스트 통과·PAPER.
+    승인 A-ID는 가상(A-9xx), 검증 승인은 배포 설정의 A-067. 바꾸기 전 배포 설정 원문을 돌려준다."""
     root = w.root
     w.repo.close()
     (root / "config" / "strategies" / "paper0-verify-v2.toml").write_text(
@@ -251,8 +253,16 @@ def _switch_to_v2(w: PaperWorld) -> None:
     assert strategy_main(["transition", *base, "paper0-verify", "2", "BACKTEST_PASSED", "--approval", "A-921",
                           "--evidence", "var/backtest/paper0-verify-v2/report.md"]) == 0
     assert strategy_main(["transition", *base, "paper0-verify", "2", "PAPER", "--approval", "A-922"]) == 0
-    assert strategy_main(["transition", *base, "paper0-verify", "1", "STOPPED", "--approval", "A-923",
-                          "--stop-reason", "REPLACE"]) == 0
+    return text
+
+
+def _stop_v1_replace(w: PaperWorld) -> int:
+    """v1 중지(교체) — 사용자 명령 (00 §2.11 2). 저장소가 닫힌 상태에서 부른다."""
+    return strategy_main(["transition", "--mode", "PAPER", "--root", str(w.root), "paper0-verify", "1", "STOPPED",
+                          "--approval", "A-923", "--stop-reason", "REPLACE"])
+
+
+def _restart_and_resume(w: PaperWorld) -> None:
     w.build()
     assert w.engine.start().ok
     w.command("RESUME", {"account": None, "halt_type": "K8"})
@@ -260,47 +270,82 @@ def _switch_to_v2(w: PaperWorld) -> None:
     assert "K8" not in w.active(), w.active()
 
 
+def _switch_to_v2(w: PaperWorld) -> None:
+    """00 §2.11 교체 절차를 사용자 명령 순서대로 (D-135): 프로세스 정지 → 배포 설정 v2로 → v2 등록 → v2 백테스트 통과·PAPER
+    → v1 중지(교체) → 재시작 → K8 재개. 승인 A-ID는 가상(A-9xx), 검증 승인은 배포 설정의 A-067."""
+    _prepare_v2(w)
+    assert _stop_v1_replace(w) == 0
+    _restart_and_resume(w)
+
+
 def _owners_of_intents(w: PaperWorld) -> list[tuple[str, str]]:
     return [(r["owner"], r["request_type"]) for r in w.repo.select(
         "SELECT owner, request_type FROM intent ORDER BY created_seq")]
 
 
-def test_v180_switch_while_v1_holds_does_not_transfer_ownership(tmp_path: Path) -> None:
-    """보유 중 교체: v1 소유 1주는 v2로 넘어가지 않는다(00 D-011). v2는 그 보유를 청산하지도, 그 종목에 진입하지도 않는다
-    → 보유가 v1 소유로 남는다(교체 절차 미충족 — 사람이 정리해야 하는 상태).
-    교체 뒤 v1 판정이 돌지 않는 것은 배포 설정에서 v1이 빠졌기 때문이며(01 K9 "교체"는 v1 감액·청산 신호 허용), 이 상태를
-    시스템이 거부·경고해야 하는지는 결정 필요(재검토 #4) — 그래서 "교체 뒤 주문 0"은 단언하지 않는다."""
+def test_v180_switch_while_v1_holds_is_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """보유 중 교체 금지 (A-104 / CP-035 D-200, V-180 개정·V-278·V-279).
+
+    시험 변경 사유(A-104 / CP-035): 이전 시험 `test_v180_switch_while_v1_holds_does_not_transfer_ownership`은 보유 중
+    교체가 통과하고 v1 보유가 판정 없는 v1 소유로 남는 상태(결정 대기, 재검토 #4)를 기록했다. A-104 "(가)"로 기대 결과가
+    "v1 교체 중지 전이 거부 + v1만 뺀 배포 설정은 시작 거부(DP-49)"로 바뀌었다. 소유권 승계 없음(00 D-011)·v2 의도 0건
+    단언은 유지한다. 정리 경로: v1 배포로 되돌림 → v1 청산 신호로 무보유 → 교체 허용 → v2 정상 매매."""
     w = PaperWorld(tmp_path)
     try:
         start_and_resume(w)
         w.run_until(kst(DAYS[0], 9, 31))
         assert w.position() == 1
         assert w.repo.active_ownership(PAPER_ACCOUNT, CODE).owner == "paper0-verify:1"
-        _switch_to_v2(w)
-        w.run_until(kst(DAYS[0], 14, 31))                      # v2 오후 판정: v1 소유 → 청산 없음
-        w.run_until(kst(DAYS[1], 14, 31))                      # 다음 날 오전(보유라 진입 없음)·오후(소유 아님 → 청산 없음)
-        assert w.position() == 1
-        own = w.repo.active_ownership(PAPER_ACCOUNT, CODE)
-        assert own is not None and own.owner == "paper0-verify:1"   # 소유권 승계 없음
-        assert [o for o, _ in _owners_of_intents(w)] == ["paper0-verify:1"]   # v2 의도 0건
-        v2_evals = [e for e in w.evaluations() if e["kind"] == "EVALUATION" and
-                    e["s"].get("strategy") == "paper0-verify:2"]
-        assert v2_evals and all(e["s"]["signals"] == 0 for e in v2_evals)
+        v1_app = _prepare_v2(w)
+        capsys.readouterr()
+        assert _stop_v1_replace(w) == 1                                 # 교체 전이 거부
+        out = capsys.readouterr().out
+        assert "전이 거부" in out and "보유 중 교체 금지" in out and "A-104" in out and CODE in out, out
+        with pytest.raises(ConfigError) as exc:                         # v1만 뺀 배포 설정 → 시작 거부 (DP-49)
+            w.build()
+        msg = str(exc.value)
+        assert "배포 설정에 없는 전략" in msg and "paper0-verify:1" in msg and "보유 중 교체 금지" in msg, msg
         rows = {(r["strategy_id"], r["version"]): r for r in w.repo.strategy_states()}
-        assert rows[("paper0-verify", 1)]["state"] == "STOPPED" and rows[("paper0-verify", 2)]["state"] == "PAPER"
+        assert rows[("paper0-verify", 1)]["state"] == "PAPER"          # 전이 기록 없음
+        assert rows[("paper0-verify", 2)]["state"] == "PAPER"
+        assert not [h for h in w.repo.halt_rows(None) if h["halt_type"] == "K9"]
+        own = w.repo.active_ownership(PAPER_ACCOUNT, CODE)
+        assert own is not None and own.owner == "paper0-verify:1"     # 소유권 승계 없음 (00 D-011)
+        assert [o for o, _ in _owners_of_intents(w)] == ["paper0-verify:1"]   # v2 의도 0건
+        # 정리: v1 배포로 되돌려 v1 청산 신호(14:30)로 무보유 → 교체 허용 → 다음 거래일 v2 정상
+        w.repo.close()
+        app = w.root / "config" / "app.paper.toml"
+        app.write_text(v1_app, encoding="utf-8")
+        # 시험 변경 사유(A-105 / T-044): 09:30 판정 유예(5분) 안(09:31)에 재시작·재개한다. 이전에는 판정 완료 표시가
+        # 메모리뿐이라 같은 09:30 판정을 다시 해서(v1 청산 신호) 시계를 10분 앞당겨 우회했다. 이제 재판정하지 않는다
+        _restart_and_resume(w)
+        assert buy_sell_of_day(w, DAYS[0]) == [("ENTRY", "FILLED")]      # 같은 09:30 판정 재판정 없음 (T-044)
+        w.run_until(kst(DAYS[0], 14, 31))
+        assert w.position() == 0 and w.repo.active_ownership(PAPER_ACCOUNT, CODE) is None
+        assert buy_sell_of_day(w, DAYS[0]) == [("ENTRY", "FILLED"), ("EXIT", "FILLED")]   # v1 신호로 청산
+        w.run_until(kst(DAYS[1], 8, 30))
+        w.repo.close()
+        assert _stop_v1_replace(w) == 0
+        app.write_text(v1_app[:v1_app.index("[[strategies]]")] + V2_PAPER_STRATEGY, encoding="utf-8")
+        _restart_and_resume(w)
+        w.run_until(kst(DAYS[1], 9, 31))
+        assert buy_sell_of_day(w, DAYS[1]) == [("ENTRY", "FILLED")]
+        assert w.repo.active_ownership(PAPER_ACCOUNT, CODE).owner == "paper0-verify:2"
     finally:
         w.close()
 
 
 def test_v180_v1_cannot_be_retired_while_it_still_owns_the_holding(tmp_path: Path,
                                                                    capsys: pytest.CaptureFixture[str]) -> None:
-    """보유 중 교체의 정리 경로: v1 소유 보유가 남아 있으면 v1 폐기도 거부된다(00 §2.11 4, 사람 정리 필요)."""
+    """보유 중 정리 경로: v1 소유 보유가 남아 있으면 v1 폐기도 거부된다(00 §2.11 4, 사람 정리 필요).
+
+    시험 변경 사유(A-104 / CP-035): 보유 중 교체가 거부되므로 교체를 거치지 않고 PAPER 상태의 v1 폐기를 시도한다
+    (이전: 교체 뒤 폐기 시도). 거부 단언은 그대로."""
     w = PaperWorld(tmp_path)
     try:
         start_and_resume(w)
         w.run_until(kst(DAYS[0], 9, 31))
         assert w.position() == 1
-        _switch_to_v2(w)
         w.repo.close()
         rc = strategy_main(["transition", "--mode", "PAPER", "--root", str(w.root), "paper0-verify", "1", "RETIRED",
                             "--approval", "A-924"])
