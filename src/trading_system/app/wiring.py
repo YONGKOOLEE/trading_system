@@ -239,6 +239,27 @@ def _spot_strategy_problems(strategies: list[StrategyInput], pairs: Mapping[str,
     return out
 
 
+def spot_rule_problems(strategies: list[StrategyInput], rules: Mapping[str, SymbolRules],
+                       pairs: Mapping[str, tuple[str, str]]) -> list[str]:
+    """시작 시 전략 규칙 검사 (CP-036 D-209, B-8): 거래소 규칙 적재 뒤, 등록 전에 부른다. 전략이 validate_rules(params,
+    LOT_SIZE stepSize, minNotional)를 가지면 그 전략 유니버스(U-A, 없으면 전체 유니버스)의 심볼마다 부른다.
+    규칙이 없는 심볼은 불일치로 본다(불확실하면 시작하지 않음). 문제 목록이 비어 있지 않으면 호출자가 시작을 거부한다."""
+    out: list[str] = []
+    for si in strategies:
+        check = getattr(si.strategy, "validate_rules", None)
+        if check is None:
+            continue
+        spec = si.strategy.spec
+        symbols = sorted(set(spec.universe) & set(pairs)) if spec.universe_method == "U-A" else sorted(pairs)
+        for sym in symbols:
+            r = rules.get(sym)
+            if r is None:
+                out.append(f"{spec.owner} {sym}: 거래 규칙 없음")
+                continue
+            out.extend(f"{spec.owner} {sym}: {p}" for p in check(si.params, r.lot_step, r.min_notional))
+    return out
+
+
 def _build_spot_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: BrokerAdapter, account: str,
                        account_limits: AccountLimits, gate_settings: GateSettings, caps: CapabilityTable,
                        strategies: list[StrategyInput], kill_file: Path, clock_health: ClockHealth,

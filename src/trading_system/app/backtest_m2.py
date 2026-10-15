@@ -24,7 +24,7 @@ import json
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
-from decimal import ROUND_FLOOR, Decimal
+from decimal import Decimal
 from pathlib import Path
 
 from trading_system.app.backtest import BacktestError, BacktestResult, Trade
@@ -38,7 +38,7 @@ from trading_system.domain.market import (
 from trading_system.domain.market_time import M2_TIME, daily_bar_is_final, session_247
 from trading_system.domain.models import Account, GateRequest
 from trading_system.domain.strategy import Bar, EvaluationSnapshot, InstrumentView, PositionView, evaluation_id_of
-from trading_system.domain.trading_rules import SpotOrderPolicy, SymbolRules, apply_spot_terms
+from trading_system.domain.trading_rules import SpotOrderPolicy, SymbolRules, apply_spot_terms, sellable_quantity
 from trading_system.evaluation.runner import run_evaluation
 from trading_system.execution.executor import Executor
 from trading_system.gate.gate import Gate
@@ -157,8 +157,8 @@ def final_bars(bars: list[Bar], as_of: datetime) -> tuple[Bar, ...]:
 
 
 def sellable(quantity: Decimal, r: SymbolRules) -> Decimal:
-    step = r.market_step if r.market_step > 0 else r.lot_step
-    q = (quantity / step).to_integral_value(rounding=ROUND_FLOOR) * step if quantity > 0 else _ZERO
+    """청산 가능 수량 — 실행 경로와 같은 규칙(trading_rules.sellable_quantity, CP-036 D-208). minQty 미만이면 0."""
+    q = sellable_quantity(quantity, r, stale=False)
     return q if q >= max(r.market_min_qty, r.lot_min_qty) else _ZERO
 
 

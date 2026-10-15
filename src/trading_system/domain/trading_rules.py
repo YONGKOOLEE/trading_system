@@ -52,7 +52,7 @@ class SymbolRules:
     lot_step: Decimal           # LOT_SIZE stepSize (> 0)
     market_min_qty: Decimal     # MARKET_LOT_SIZE minQty
     market_max_qty: Decimal     # MARKET_LOT_SIZE maxQty (0 = 비활성)
-    market_step: Decimal        # MARKET_LOT_SIZE stepSize (0 = 단위 검사 안 함 — 의미 [미확인], 위험 축소라 막지 않음)
+    market_step: Decimal        # MARKET_LOT_SIZE stepSize (0이면 시장가 수량 단위 = LOT_SIZE stepSize, CP-036 D-208)
     min_notional: Decimal       # NOTIONAL/MIN_NOTIONAL minNotional
     max_notional: Decimal | None  # NOTIONAL maxNotional (없으면 None)
     apply_min_to_market: bool
@@ -90,7 +90,8 @@ def filter_violation(rules: SymbolRules, side: Side, order_type: OrderType, quan
     if order_type is OrderType.MARKET:
         if buying:
             return "M2 매수는 IOC 지정가만 허용 (시장가 매수 없음, D-104)"
-        p = _range_problem("MARKET_LOT_SIZE", quantity, rules.market_min_qty, rules.market_max_qty, rules.market_step)
+        p = _range_problem("MARKET_LOT_SIZE", quantity, rules.market_min_qty, rules.market_max_qty,
+                           market_qty_step(rules))   # step 0 → LOT_SIZE 단위 (D-208, 어댑터와 같은 규칙)
         if p:
             return p
         prices = [x for x in market_prices if x > 0]
@@ -198,15 +199,22 @@ class DustCheck:
     notional_boundary: bool    # 금액 경계(가장 낮은 참조가로는 미만이거나 참조가 모름) — 전송 뒤 -1013이면 dust 확정
 
 
+def market_qty_step(rules: SymbolRules) -> Decimal:
+    """시장가 매도 수량 단위 (CP-036 D-208, A-106 Q-4 (가)): MARKET_LOT_SIZE stepSize, 0이면 LOT_SIZE stepSize.
+
+    어댑터 주문 문자열(broker/binance/rules.SymbolRules.market_qty_step)·G10·청산 가능 수량·dust 판정·M2 백테스트가
+    같은 규칙을 쓴다. 내림 잔량은 dust(D-102). step 0의 거래소 의미는 미확인(B-6) — PV-M2-08 실측이 다르면 CP."""
+    return rules.market_step if rules.market_step > 0 else rules.lot_step
+
+
 def sellable_quantity(held: Decimal, rules: SymbolRules, *, stale: bool) -> Decimal:
     """청산 가능 수량 = 보유를 실제로 보낼 매도 경로의 stepSize로 내림 (D-102 (가), D-118 수량 내림).
 
-    평상시 = 시장가 → MARKET_LOT_SIZE stepSize(0이면 의미 미확인 — 위험 축소라 깎지 않음), 시세 지연 = IOC 지정가 → LOT_SIZE."""
-    step = rules.lot_step if stale else rules.market_step
+    평상시 = 시장가 → market_qty_step(MARKET_LOT_SIZE stepSize, 0이면 LOT_SIZE stepSize — CP-036 D-208, A-106 Q-4 (가)),
+    시세 지연 = IOC 지정가 → LOT_SIZE. 내림 잔량은 dust(D-102)."""
+    step = rules.lot_step if stale else market_qty_step(rules)
     if held <= 0:
         return _ZERO
-    if step == 0:
-        return held
     return (held / step).to_integral_value(rounding=ROUND_FLOOR) * step
 
 

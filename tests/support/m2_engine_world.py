@@ -24,6 +24,7 @@ from trading_system.domain.enums import Mode, OrderType, RequestType
 from trading_system.domain.limits import AccountLimits
 from trading_system.domain.market import CostRates, GateSettings, Quote
 from trading_system.domain.models import Signal
+from trading_system.domain.trading_rules import SymbolRules
 from trading_system.domain.strategy import (
     Bar, EvaluationSnapshot, ParamSpec, RuleSpec, StrategyLimits, StrategySpec,
 )
@@ -93,6 +94,31 @@ class FixedM2Strategy:
         return out
 
 
+def rules_checked_spec() -> StrategySpec:
+    return fixed_spec(strategy_id="t-m2rules", universe=("TSTAUSDT",), params=(
+        ParamSpec("qty", "decimal", "기초 자산", "진입 수량(소수)", Decimal("0.00001"), Decimal("100")),
+        ParamSpec("qty_step", "decimal", "기초 자산", "수량 단위 (거래소 LOT_SIZE stepSize와 같아야 함)",
+                  Decimal("0.00000001"), Decimal("1")),
+        ParamSpec("notional", "decimal", "USDT", "1회 매수 금액 (2 × minNotional 이상)", Decimal("1"),
+                  Decimal("100000"))))
+
+
+class RulesCheckedStrategy(FixedM2Strategy):
+    """시작 규칙 검사(D-209 B-8) 시험용 — m2-verify 초안의 validate_rules 형식(파라미터, LOT step, minNotional)."""
+
+    def __init__(self) -> None:
+        super().__init__(rules_checked_spec())
+
+    @staticmethod
+    def validate_rules(params: ParamValues, lot_step: Decimal, min_notional: Decimal) -> list[str]:
+        problems = []
+        if Decimal(str(params["qty_step"])) != lot_step:
+            problems.append(f"qty_step {params['qty_step']} ≠ 거래소 LOT_SIZE stepSize {lot_step}")
+        if Decimal(str(params["notional"])) < 2 * min_notional:
+            problems.append(f"notional {params['notional']} < 2 × minNotional {min_notional}")
+        return problems
+
+
 class ClockOk:
     def clock_ok(self) -> bool | None:
         return True
@@ -104,7 +130,8 @@ class M2World:
     def __init__(self, tmp: Path, *, eval_times: tuple[time, ...] = (time(1, 0), time(4, 0)), qty: str = "0.0100",
                  day: date = DAY, limits: AccountLimits | None = None, rules: bool = True,
                  behavior: FakeBehavior = FakeBehavior.FILL,
-                 strategies: Sequence[StrategyInput] | None = None) -> None:
+                 strategies: Sequence[StrategyInput] | None = None, symbol_rule: SymbolRules | None = None,
+                 price: str = "10000.00") -> None:
         self.tmp = tmp
         self.db = tmp / "trading.db"
         self.day = day
@@ -115,9 +142,9 @@ class M2World:
         self.broker.ioc_limit = True
         self.facts = SpotFactsStore(now=self.clock.now, universe=(SYM,))
         if rules:
-            self.facts.load_rules({SYM: symbol_rules(SYM)})
+            self.facts.load_rules({SYM: symbol_rule or symbol_rules(SYM)})
         self.facts.set_daily_bars(SYM, m2_bars(day - timedelta(days=60), day + timedelta(days=10)))
-        self.price = Decimal("10000.00")
+        self.price = Decimal(price)
         self.limits = limits or m2_limits()
         self.strategies = list(strategies) if strategies is not None else [
             StrategyInput(FixedM2Strategy(), {"qty": qty}, eval_times)]

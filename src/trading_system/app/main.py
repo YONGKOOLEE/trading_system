@@ -402,6 +402,15 @@ M2_PRICE_LIMIT_PLACEHOLDER = Decimal("0.05")
 M2_FAKE_QUOTE_QUANTUM = Decimal("0.00000001")
 
 
+def _m2_exchange_rules(mode: Mode, symbols: tuple[str, ...]):  # type: ignore[no-untyped-def]
+    """거래 규칙 적재원 (D-209) → (심볼 → SymbolRules, 실패 사유 또는 None). BACKTEST(fake) = 가상 규칙.
+    PAPER(테스트넷 exchangeInfo·rateLimits 예산)는 어댑터와 함께 T-047에서 연결한다."""
+    from trading_system.broker.fake.spot import virtual_symbol_rules
+    if mode is not Mode.BACKTEST:
+        return {}, "테스트넷 exchangeInfo 적재 경로 없음 (CP-036 T-047)"
+    return {s: virtual_symbol_rules(s) for s in symbols}, None
+
+
 def run_m2_main(root: Path, mode: Mode, base: Path, max_seconds: float | None) -> int:
     """`run --market M2` (CP-036 D-202·D-209). 시작 순서: check_m2_startup(설정·시작 일치 표·DB 메타) → PAPER는 거부
     (어댑터 T-047 전) → 실행 잠금 → 거래 규칙 적재(실패하면 시작 거부) → DB(SYMBOL 식별·M2 메타) → build_engine(M2)
@@ -440,19 +449,25 @@ def run_m2_main(root: Path, mode: Mode, base: Path, max_seconds: float | None) -
 
 def _run_m2(mode: Mode, base: Path, cfg, caps, strategies: list[StrategyInput], pairs, gate_settings,  # type: ignore[no-untyped-def]
             policy, max_seconds: float | None) -> int:
-    from trading_system.app.wiring import SpotInputs
+    from trading_system.app.wiring import SpotInputs, spot_rule_problems
     from trading_system.broker.fake.broker import FakeSpotFees
-    from trading_system.broker.fake.spot import FakeSpotBroker, virtual_symbol_rules
+    from trading_system.broker.fake.spot import FakeSpotBroker
     from trading_system.marketdata.spot_facts import SpotFactsStore
     from trading_system.monitoring.sntp import ClockMonitor
     from trading_system.storage.repository import OrderIdentity
     app = cfg.app
     clock = SystemClock()
     facts = SpotFactsStore(now=clock.now, universe=tuple(pairs))
-    # 거래 규칙 적재 (D-209): fake = 가상 규칙. 유니버스 심볼 하나라도 규칙이 없으면 시작 거부 (DB·주문 없음)
-    missing = facts.load_rules({s: virtual_symbol_rules(s) for s in pairs})
-    if missing:
-        print(f"시작 거부(주문 없음): 거래 규칙 적재 실패 — 규칙 없는 심볼 {', '.join(missing)} (D-209)")
+    # 거래 규칙 적재 (D-209): 실패하거나 유니버스 심볼 하나라도 규칙이 없으면 시작 거부 (DB·주문 없음)
+    rules, error = _m2_exchange_rules(mode, tuple(pairs))
+    missing = facts.load_rules(rules) if error is None else list(pairs)
+    if error is not None or missing:
+        print(f"시작 거부(주문 없음): 거래 규칙 적재 실패 — {error or '규칙 없는 심볼 ' + ', '.join(missing)} (D-209)")
+        return 2
+    # 전략 규칙 검사 (D-209, B-8): 거래소 규칙과 전략 파라미터(수량 단위·최소 주문 금액)가 맞지 않으면 시작 거부
+    problems = spot_rule_problems(strategies, rules, pairs)
+    if problems:
+        print("시작 거부(주문 없음): 전략·거래소 규칙 불일치 (D-209) — " + "; ".join(problems))
         return 2
     existed = cfg.storage_path.exists()
     repo = Repository(cfg.storage_path, mode, order_identity=OrderIdentity.SYMBOL)   # M2 주문 식별 (D-110)
