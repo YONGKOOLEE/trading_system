@@ -390,6 +390,9 @@ def _m2_inputs(root: Path, mode: Mode, base: Path, connector=None):  # type: ign
         problems, switch = m2_paper_problems(cfg)
         if problems:
             raise ConfigError(problems)
+        if cfg.app.telegram_enabled:   # [CP-036 D-213] M2 전용 봇 키 — 브로커 접속 전에 확인
+            from .telegram_run import M2_CHAT_KEY, M2_TOKEN_KEY, check_telegram_secrets
+            check_telegram_secrets(cfg.secrets, (M2_TOKEN_KEY, M2_CHAT_KEY))
         if connector is None:
             raise ConfigError("M2 PAPER는 바이낸스 연결 묶음이 필요하다 — scripts/run-m2.py로 실행 "
                               "(app은 바이낸스 패키지를 import하지 않는다, D-119)")
@@ -544,14 +547,20 @@ def _run_m2(mode: Mode, base: Path, cfg, caps, strategies: list[StrategyInput], 
         clock_monitor._halts = QueuedHalts(engine)    # noqa: SLF001 — 이후 점검은 감시 스레드 → 정지는 큐로 (D-215)
         facts.halts = QueuedHalts(engine)              # 공급 품질 실패(K10)는 큐 경유 (D-215, RV-22)
         io_threads = run.threads(stop) if run is not None else []
+        from .telegram_run import M2_CHAT_KEY, M2_TOKEN_KEY, telegram_threads
+        io_threads += telegram_threads(engine, repo, mode is Mode.PAPER and app.telegram_enabled, cfg.secrets, clock,
+                                       base / "KILL", stop, log_dir=base / "logs", market=Market.M2.value,
+                                       keys=(M2_TOKEN_KEY, M2_CHAT_KEY))   # D-213: M2 전용 봇, 기본 꺼짐
         if switch is not None:
             _record_order_switch(engine, switch)
             print(f"주문 전송 스위치: {switch.describe()}")
         if run is not None:
             print(f"바이낸스 서버 시각 오차 {run.server_offset_ms}ms (경고 기준 {cfg.market_settings.server_time_warn_ms}ms)")
         halting = [(t, M2_THREAD_LABELS[t.name]) for t in io_threads if t.name in M2_THREAD_LABELS]
+        _h, watched_k11, watched_alert_only = watched_threads(io_threads, None)   # 텔레그램: 알림 K11·수신 알림만
         sup = Supervisor(engine, heartbeat=base / "heartbeat", fallback=engine.fallback_file,
-                         clock_monitor=clock_monitor, watched=halting, watched_k11=[], watched_alert_only=[])
+                         clock_monitor=clock_monitor, watched=halting, watched_k11=watched_k11,
+                         watched_alert_only=watched_alert_only)
         sup_thread = threading.Thread(target=sup.run, args=(stop,), name="supervisor", daemon=True)
         sup_thread.start()
         threads.append(sup_thread)

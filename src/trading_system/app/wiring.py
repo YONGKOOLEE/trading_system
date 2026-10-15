@@ -339,6 +339,7 @@ def _build_spot_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: Br
     profile = SpotProfile(facts=facts, pairs=spot.pairs, quote_asset=spot.quote_asset, account_facts=acct,
                           order_policy=spot.order_policy, dust=dust, schedule=schedule)
     reconciler.balance_listeners.append(profile.observe_balances)
+    ops.prepare = profile.prepare_ops   # [CP-036 D-211] 운영 요청도 M2 주문 조건(유형·가격·dust·수량 단위)을 탄다
     profile.cycle = SpotReconcileCycle(reconciler, account, schedule, on_day_close=profile.day_closed)
     return Engine(repo=repo, clock=clock, broker=broker, store=facts, gate=gate,  # type: ignore[arg-type]
                   executor=executor, halts=halts, resolver=resolver, reconciler=reconciler, recovery=recovery,

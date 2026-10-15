@@ -19,13 +19,15 @@ from typing import TYPE_CHECKING, Protocol
 from trading_system.broker.base import BrokerQueryError
 from trading_system.broker.ratelimit import Priority, call_priority
 from trading_system.domain.clock import KST, last_kst_time_at_or_before
-from trading_system.domain.enums import Side
+from trading_system.domain.enums import OrderType, Side
 from trading_system.domain.limits import AccountLimits
 from trading_system.domain.market import SessionInfo
 from trading_system.domain.market_time import M2_TIME, Market, daily_bar_is_final, session_247
 from trading_system.domain.models import GateRequest
 from trading_system.domain.strategy import Bar, EvaluationSnapshot, InstrumentView, PositionView
-from trading_system.domain.trading_rules import DustVerdict, SpotOrderPolicy, SymbolRules, apply_spot_terms
+from trading_system.domain.trading_rules import (
+    DustVerdict, SpotOrderPolicy, SymbolRules, apply_spot_terms, market_qty_step,
+)
 from trading_system.execution.dust import DustHandler
 from trading_system.gate.ports import MarketFacts, SymbolRulesSource
 from trading_system.monitoring.spot_cash import QuoteBalance, SpotAccountFacts
@@ -225,6 +227,31 @@ class SpotProfile(MarketProfile):
         if self.dust.screen_exit(terms):
             return None
         return terms
+
+    def prepare_ops(self, req: GateRequest) -> GateRequest:
+        """운영 요청(/exit·/reduce, CP-036 D-211)의 게이트 전 M2 주문 조건 — 전략 신호와 같은 훅(prepare): 시세 정상 = 시장가,
+        지연 = IOC 지정가(D-120), 청산이면 dust 선별. 사람이 정한 수량은 바꾸지 않는다: 보낼 경로의 수량 단위(시장가 =
+        MARKET_LOT_SIZE, 0이면 LOT_SIZE — D-208 / 지정가 = LOT_SIZE)의 배수가 아니면 거부(자동 반올림 없음).
+        정할 수 없거나(시세·규칙 없음) 확실한 dust면 거부. 거부는 ValueError(운영 처리기가 REJECTED로 기록)."""
+        if not req.request_type.is_new_order:
+            return req
+        units = getattr(self.facts, "units", self.facts.rules)(req.instrument)
+        if units is None:
+            raise ValueError(f"{req.instrument}: 거래 규칙(수량 단위) 모름 — 운영 요청을 보내지 않음 (D-106)")
+        self._check_units(req.quantity, units.lot_step)   # dust 선별(소유권 정리) 전에 먼저
+        terms = self.prepare(req)
+        if terms is None:
+            raise ValueError(f"{req.instrument}: 주문 유형·가격을 정할 수 없음(시세·거래 규칙 없음) 또는 확실한 dust — "
+                             "보내지 않음 (D-102·D-104·D-211)")
+        if terms.order_type is OrderType.MARKET:
+            self._check_units(terms.quantity, market_qty_step(units))
+        return terms
+
+    @staticmethod
+    def _check_units(quantity: Decimal, step: Decimal) -> None:
+        if step <= 0 or quantity % step != 0:
+            raise ValueError(f"수량 {quantity}이 LOT_SIZE 단위 {step}의 배수가 아님 — 자동 반올림 없음, "
+                             "사람이 수량을 다시 정한다 (D-211)")
 
 
 def final_daily_bars(bars: tuple[Bar, ...], as_of: datetime) -> tuple[Bar, ...]:

@@ -207,3 +207,17 @@ class M2RunConnector:
                             on_state=lambda st, m: on_stream_state(st.value, m), url=self._ws_url)
         return M2Run(session, feed, stream)
 
+
+
+def open_balance_queries(make_transport: MakeTransport, *, api_key: SecretLike, secret: SecretLike,
+                         symbols: Sequence[str], account: str, now_ms: Callable[[], int],
+                         sleep: Callable[[float], None]) -> BinanceSpotAdapter | str:
+    """기준선 확정·리셋 확인 도구(CP-036 D-210)의 **조회만** 연결: 주문 전송 스위치 꺼짐 전송 계층(RunGuard) + 같은 시작 준비
+    (서버 시각·exchangeInfo·rateLimits). 돌려주는 어댑터로는 주문이 나가지 않는다. 준비 실패면 거부 사유."""
+    try:
+        session = start_spot_session(TESTNET_REST, api_key, secret, make_transport, symbols=symbols, account=account,
+                                     now_ms=now_ms, sleep=sleep, orders_enabled=False, units=None,
+                                     on_alert=lambda kind, msg: None)
+    except SpotStartRefused as exc:
+        return str(exc)
+    return session.adapter

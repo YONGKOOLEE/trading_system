@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Callable
 from typing import Protocol
 from decimal import Decimal, InvalidOperation
 
@@ -69,6 +70,9 @@ class OpsProcessor:
         self._executor = executor
         self._halts = halts
         self._clock = clock
+        # [CP-036 D-211] 운영 요청의 게이트 전 시장별 주문 조건 훅(M2: 유형·가격·dust·수량 단위). 거부는 ValueError.
+        # M1은 None — 기존 동작 그대로
+        self.prepare: Callable[[GateRequest], GateRequest] | None = None
 
     def process_pending(self) -> list[CommandOutcome]:
         """대기 명령을 처리한다. 킬 스위치를 먼저 처리하고, 명령 하나의 실패가 나머지를 막지 않게 한다 (CP-018 R-4)."""
@@ -200,6 +204,8 @@ class OpsProcessor:
                 raise CommandError("전략 등록부가 연결되지 않음")
             return "DONE", self._registry.sync_k9_from_state(str(args["owner"]), f"{channel}:{actor}")
         req = self._request(cid, name, args)
+        if self.prepare is not None:
+            req = self.prepare(req)
         d = self._gate.decide(req)
         if d.result is not GateResult.APPROVED or d.approved is None:
             self._executor.alert("EMERGENCY", f"운영 요청 거부 ({name}): {d.reason}", cid)  # 위험 축소 거부는 알림
