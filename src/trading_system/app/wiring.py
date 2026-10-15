@@ -137,6 +137,10 @@ def build_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: BrokerAd
         if uses_unfilled_cancel(si.strategy.spec.capabilities) and "unfilled_max_minutes" in parsed:
             unfilled = int(str(parsed["unfilled_max_minutes"]))
         loaded.append(LoadedStrategy(si.strategy, parsed, si.eval_times, unfilled))
+    # [CP-035 D-200, DP-49] 보유·예약을 가진 전략을 배포 설정에서 빼면(교체 전이 없이 설정만 바꿈) 시작 거부
+    orphans = registry.undeployed_holding_problems(account, {si.strategy.spec.owner for si in strategies})
+    if orphans:
+        raise ConfigError(orphans)
 
     watcher = None
     if alert_thresholds is not None:

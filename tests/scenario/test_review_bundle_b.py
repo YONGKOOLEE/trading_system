@@ -233,6 +233,8 @@ def test_b9_reconciler_query_error_text_is_masked(env: Env) -> None:
 # --- B-10 ----------------------------------------------------------------------------------------
 
 def test_b10_retire_after_replace_stop_becomes_user_and_requires_no_holdings(env: Env) -> None:
+    """시험 변경 사유(A-104 / CP-035 D-200): 보유 중 교체 중지는 거부되므로, 보유가 남은 상태의 폐기 거부는 PAPER에서
+    시험하고 교체 중지는 청산 뒤에 한다. "보유가 남으면 폐기 불가"·"교체 중지 뒤 폐기 → K9 변형 USER" 단언은 그대로."""
     reg = StrategyRegistry(env.repo, env.clock, env.halts)
     spec = cross_spec("t-cross")
     reg.register(spec, dict(PARAMS), CAPS_ALL_SUPPORTED, scenario_limits(), Mode.PAPER)
@@ -245,13 +247,15 @@ def test_b10_retire_after_replace_stop_becomes_user_and_requires_no_holdings(env
     d = env.gate.decide(GateRequest.from_signal(s))
     env.executor.submit(d.approved)
     env.executor.process_events()
-    reg.transition("t-cross", 1, StrategyState.STOPPED, "A-903", stop_reason=StopReason.REPLACE)
+    with pytest.raises(ValueError, match="보유 중 교체 금지"):
+        reg.transition("t-cross", 1, StrategyState.STOPPED, "A-903", stop_reason=StopReason.REPLACE)
     with pytest.raises(ValueError, match="소유"):
         reg.transition("t-cross", 1, StrategyState.RETIRED, "A-904")   # 보유가 남아 있으면 폐기 불가
     ex = replace(s, evaluation_id="x", kind=RequestType.EXIT)
     d2 = env.gate.decide(GateRequest.from_signal(ex))
     env.executor.submit(d2.approved)
     env.executor.process_events()
+    reg.transition("t-cross", 1, StrategyState.STOPPED, "A-903", stop_reason=StopReason.REPLACE)
     reg.transition("t-cross", 1, StrategyState.RETIRED, "A-904")
     [k9] = [h for h in env.repo.halt_rows(None) if h["halt_type"] == "K9"]
     assert k9["variant"] == "USER"

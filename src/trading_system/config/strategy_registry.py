@@ -47,6 +47,20 @@ _RISK_UP = (RequestType.ENTRY, RequestType.INCREASE)
 PAPER0_CAPABILITIES = frozenset({"CAP-TRG-01", "CAP-DAT-01", "CAP-ORD-01", "CAP-INS-01"})
 
 
+REPLACE_REFUSAL = "보유 중 교체 금지 (A-104, CP-035 D-200)"
+# 배포 설정에서 빠져도 보유가 고아가 되지 않는 상태 (DP-49): 사용자 판단 중지·폐기는 K9 USER — 그 보유는 운영 요청만
+# 처리하며(01 K9), 배포해도 전략 신호는 거부되므로 배포 여부와 무관하다. 사용자 판단 중지는 사유까지 봐야 해서
+# undeployed_holding_problems 안에서 따로 검사한다
+_UNDEPLOYED_OK = frozenset({StrategyState.RETIRED})
+
+
+def _held_summary(held: list[dict]) -> str:
+    """보유·예약 건수와 종목 코드(최대 5개). 계좌 별칭·수량은 넣지 않는다."""
+    codes = sorted({str(o["instrument"]) for o in held})
+    more = f" 외 {len(codes) - 5}종목" if len(codes) > 5 else ""
+    return f"{len(held)}건 ({', '.join(codes[:5])}{more})"
+
+
 @dataclass(frozen=True)
 class RegistrationResult:
     ok: bool
@@ -305,6 +319,13 @@ class StrategyRegistry:
         if to_state is StrategyState.RETIRED and self._repo.active_ownerships_of(owner):
             # 폐기된 전략은 신호를 못 내므로 보유가 고아가 된다. 청산(또는 사람 정리) 후 폐기 (D-011 소유권 미승계)
             raise ValueError("이 전략 소유 보유·예약이 남아 있음 — 청산 후 폐기")
+        if to_state is StrategyState.STOPPED and stop_reason is StopReason.REPLACE:
+            held = self._repo.active_ownerships_of(owner)
+            if held:
+                # [CP-035 D-200, A-104 (가)] 교체는 무보유일 때만. 교체 뒤 v1은 배포 설정에서 빠져 판정하지 않으므로
+                # 보유가 고아가 된다(소유권 미승계 00 D-011). 상태·전이 기록·K9는 바꾸지 않는다
+                raise ValueError(f"{REPLACE_REFUSAL}: 이 전략 소유 보유·예약 {_held_summary(held)} — 교체는 무보유일 때만. "
+                                 "이 전략의 감액·청산 신호 또는 운영 요청으로 정리한 뒤 다시 교체")
         prev = row["prev_state"]
         if to_state is StrategyState.STOPPED:
             prev = current.value
@@ -336,6 +357,29 @@ class StrategyRegistry:
             self._halts.report_condition(HaltType.K9, None, "strategy_resumed", True, f"상태 전이 → {to.value}",
                                          owner=owner)
             self._halts.resume(HaltType.K9, None, "LOCAL", actor, owner=owner)
+
+    def undeployed_holding_problems(self, account: str, deployed: set[str]) -> list[str]:
+        """배포 설정에서 빠진 전략이 이 계좌의 보유·예약을 소유하면 시작 거부 사유 (CP-035 D-200, DP-49).
+
+        배포되지 않은 전략은 판정하지 않으므로 그 보유에 감액·청산 신호가 나오지 않는다(고아 보유). 교체 전이 검사
+        (transition)를 거치지 않고 배포 설정만 바꾼 경우를 시작에서 막는다. 사용자 판단 중지·폐기 전략은 예외(운영 요청만,
+        01 K9). 외부 수동 보유(manual)는 전략이 아니라 등록 상태가 없으므로 보지 않는다. 상태는 바꾸지 않는다."""
+        out: list[str] = []
+        for row in self._repo.strategy_states():
+            if row["market"] != self._market:
+                continue
+            owner = f"{row['strategy_id']}:{row['version']}"
+            state = StrategyState(row["state"])
+            if owner in deployed or state in _UNDEPLOYED_OK or (
+                    state is StrategyState.STOPPED and row["stop_reason"] == StopReason.USER.value):
+                continue
+            held = [o for o in self._repo.active_ownerships_of(owner) if o["account"] == account]
+            if held:
+                reason = f", 중지 사유 {row['stop_reason']}" if row["stop_reason"] else ""
+                out.append(f"배포 설정에 없는 전략 {owner}(상태 {state.value}{reason})이 보유·예약 {_held_summary(held)}을 "
+                           f"소유 — 판정하지 않는 전략의 보유는 청산 신호가 없다({REPLACE_REFUSAL}). 그 전략을 배포 설정에 "
+                           "되돌려 청산한 뒤 교체하거나, 사용자 판단 중지(USER)로 바꿔 운영 요청으로 정리")
+        return out
 
     def sync_k9_from_state(self, owner: str, actor: str) -> str:
         """저장소의 전략 상태에 K9를 맞춘다 (RV-20). 엔진 밖 도구(scripts/strategy.py)가 전이를 기록하고 운영 명령
