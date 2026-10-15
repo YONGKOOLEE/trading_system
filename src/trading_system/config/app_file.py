@@ -10,6 +10,9 @@
                                 M2는 반드시 적는다(PAPER binance-spot-testnet, BACKTEST fake). 맞는지는 시작 일치 표가 본다
 [paper]                         (PAPER만)
   connection_approved           키움 모의 접속 사용자 승인 여부. 기본 없음 = false. **사용자만 true로 바꾼다** (T-015, D-083)
+                                M2: 바이낸스 테스트넷 접속 스위치(A-096). 주문 전송은 아래 두 키가 따로 정한다
+  orders_approved               (M2만, CP-036 D-204) 테스트넷 주문 전송 스위치. 기본 없음 = false. **사용자만 바꾼다**
+  orders_approval               (M2만) 주문 전송 승인 A-ID("A-숫자"). orders_approved = true면 필수 — 검사는 app/startup
 [telegram]                      (PAPER만, 선택)
   enabled                       텔레그램 알림·원격 명령 연결 (true/false, 기본 false). true면 .env.paper에
                                 TELEGRAM_BOT_TOKEN·TELEGRAM_CHAT_ID가 있어야 시작 (03 D-052, 01 §2.9·§2.10)
@@ -64,6 +67,8 @@ class AppSettings:
     telegram_enabled: bool = False
     market: str = Market.M1.value   # CP-024 D-097: 키가 없으면 M1
     broker: str = ""                # 시작 일치 표로 검사 (config.market_scope)
+    paper_orders_approved: bool = False        # M2 주문 전송 스위치 (CP-036 D-204). M1은 항상 False
+    paper_orders_approval: str | None = None   # M2 주문 전송 승인 A-ID (형식 검사는 app/startup.check_order_switch)
 
 
 def _dec(raw: object, name: str, problems: list[str]) -> Decimal | None:
@@ -117,15 +122,27 @@ def parse_app_settings(raw: dict, mode: Mode, repo_root: Path) -> AppSettings:
                 servers.append((host, int(port)))
 
     approved = False
+    orders_ok, orders_id = False, None
     if mode is Mode.PAPER:
         paper = raw.get("paper", {})
-        if not isinstance(paper, dict) or any(k != "connection_approved" for k in paper):
-            problems.append("[paper]에는 connection_approved만 둔다")
+        keys = {"connection_approved"} | ({"orders_approved", "orders_approval"} if market == Market.M2.value
+                                          else set())
+        if not isinstance(paper, dict) or any(k not in keys for k in paper):
+            problems.append("[paper]에는 connection_approved만 둔다" if market != Market.M2.value else
+                            "[paper]에는 connection_approved·orders_approved·orders_approval만 둔다 (M2, D-204)")
         else:
             ca = paper.get("connection_approved", False)
             if not isinstance(ca, bool):
                 problems.append("paper.connection_approved: true/false")
             approved = ca is True
+            oa = paper.get("orders_approved", False)
+            if not isinstance(oa, bool):
+                problems.append("paper.orders_approved: true/false (D-204)")
+            orders_ok = oa is True
+            oid = paper.get("orders_approval")
+            if oid is not None and not isinstance(oid, str):
+                problems.append("paper.orders_approval: 문자열 A-ID (D-204)")
+            orders_id = oid if isinstance(oid, str) else None
 
     telegram = False
     if mode is Mode.PAPER and "telegram" in raw:
@@ -196,7 +213,7 @@ def parse_app_settings(raw: dict, mode: Mode, repo_root: Path) -> AppSettings:
     if problems:
         raise ConfigError(problems)
     return AppSettings(account, loop, rec, tuple(servers), infos, tuple(strategies), approved,  # type: ignore[arg-type]
-                       telegram, market, broker)
+                       telegram, market, broker, orders_ok, orders_id)
 
 
 def check_strategy_slots(strategies: Iterable[object], l6_max_positions: int) -> None:

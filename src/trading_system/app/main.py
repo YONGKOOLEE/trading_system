@@ -50,7 +50,7 @@ from trading_system.storage.repository import ModeMismatch, Repository
 
 from .engine import Engine
 from .instance_lock import InstanceLocked, acquire_instance_lock
-from .startup import LiveNotAvailable, check_m2_startup, check_startup
+from .startup import LiveNotAvailable, check_m2_startup, check_startup, m2_paper_problems
 from .supervisor import QueuedHalts, Supervisor, write_fallback
 from .wiring import StrategyInput, build_engine, load_strategy
 
@@ -383,8 +383,10 @@ def _m2_inputs(root: Path, mode: Mode, base: Path):  # type: ignore[no-untyped-d
     env_file = None if mode is Mode.BACKTEST else root / f".env.{mode.value.lower()}"
     cfg = check_m2_startup(mode, root, base / "trading.db", env_file)
     if mode is not Mode.BACKTEST:
-        raise ConfigError("M2 PAPER 실행 경로(바이낸스 어댑터·사용자 스트림·시세 공급)는 아직 없다 (CP-036 T-047·T-048) — "
-                          "테스트넷 연결은 T-M2-14(조회만) 승인과 별도로 T-050 연결 승인 뒤")
+        # 연결 전 조건을 모두 모아 보여 준다(D-204·D-209). 실행 경로 자체는 T-048(사용자 스트림·시세 공급) 뒤에 연다
+        problems, _switch = m2_paper_problems(cfg)
+        raise ConfigError(problems + ["M2 PAPER 실행 경로 미완성: 바이낸스 어댑터(T-047)는 있으나 사용자 스트림·시세 공급"
+                                      "(CP-036 T-048) 전 — 테스트넷 연결은 T-M2-14(조회만) 승인과 별도로 T-050 연결 승인 뒤"])
     check_strategy_slots(cfg.app.strategies, cfg.limits.l6_max_positions)   # [CP-034 D-197] 연결 전
     caps = load_capabilities(root / "docs" / "capabilities.md")
     strategies = _strategies(cfg.app)

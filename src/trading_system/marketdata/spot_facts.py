@@ -107,6 +107,11 @@ class SpotFactsStore:
             r = self._last_known.get(instrument)
         return None if r is None or r.tick_size == 0 else r.tick_size
 
+    def units(self, instrument: str) -> SymbolRules | None:
+        """마지막 정상 규칙(수량·호가 단위) — 어댑터 주문 문자열용. 적재 실패 뒤에도 남는다(위험 축소 허용, D-106·D-203)."""
+        with self._lock:
+            return self._last_known.get(instrument)
+
     # --- gate.ports.SymbolRulesSource ---------------------------------------------------------
     def rules(self, instrument: str) -> SymbolRules | None:
         with self._lock:
