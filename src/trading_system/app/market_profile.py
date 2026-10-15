@@ -148,9 +148,11 @@ class SpotProfile(MarketProfile):
         """시작·60초 주기·스트림 재연결(엔진 대조 요청)·UTC 일 경계. 대조 뒤 매도 잔량 dust 점검(D-102)."""
         e = self._engine
         requested = e._reconcile_requested.is_set()   # noqa: SLF001
+        done = self.cycle is not None and self.cycle.tick(stream_reconnected=requested)
         if requested:
+            # 대조가 예외 없이 끝난 뒤에만 지운다 — 대조 중 오류면 재연결 대조 요청이 다음 tick에 남는다(검토 지적, D-109)
             e._reconcile_requested.clear()   # noqa: SLF001
-        if self.cycle is not None and self.cycle.tick(stream_reconnected=requested):
+        if done:
             e._last_reconcile = now   # noqa: SLF001
             self.review_dust(sorted(self.pairs))
 

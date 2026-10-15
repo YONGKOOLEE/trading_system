@@ -17,9 +17,13 @@ app은 바이낸스 패키지를 import하지 않는다(D-119, tests/contract/te
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
+
+from trading_system.domain.sinks import HaltControl
 
 from trading_system.domain.trading_rules import SymbolRules as DomainRules
 
@@ -28,9 +32,11 @@ from .client import (
     TESTNET_REST, AfterSendError, BinanceQueryError, BinanceSpotClient, PreSendError, Transport,
 )
 from .facts import BinanceMarketFacts
-from .preflight import BOOTSTRAP_RATE_LIMITS
+from .feed import BinanceFeed, FeedPlan, SpotSink
+from .preflight import BOOTSTRAP_RATE_LIMITS, TESTNET_HOST
 from .run_guard import RunGuard
 from .signing import Credentials, SecretLike
+from .user_stream import TESTNET_WS_API, WS_API_HOST, UserStream, WsConnect
 from .weights import RateLimits, WeightBudget, parse_rate_limits
 
 MakeTransport = Callable[[type[Exception], type[Exception]], Transport]
@@ -51,6 +57,7 @@ class SpotSession:
     rate_limits: RateLimits
     server_offset_ms: int
     exchange_body: dict = field(repr=False)
+    quote_quantum: Decimal = Decimal("0.00000001")   # 호가 자산 금액 자릿수 = quoteAssetPrecision 최솟값 (D-118)
 
 
 def _merge(bodies: list[object]) -> dict:
@@ -118,7 +125,85 @@ def start_spot_session(base_url: str, api_key: SecretLike, secret: SecretLike, m
     adapter = BinanceSpotAdapter(client, symbols, account=account, now_ms=now_ms,
                                  units=units if units is not None else rules.get, orders_enabled=orders_enabled,
                                  on_alert=on_alert, on_filter_reject=on_filter_reject, budget=budget)
-    return SpotSession(adapter, client, budget, guard, creds, rules, limits, offset, _merge(bodies))
+    precision = min(r.quote_asset_precision for s in symbols if (r := facts._exchange.rules(s)) is not None)  # noqa: SLF001
+    return SpotSession(adapter, client, budget, guard, creds, rules, limits, offset, _merge(bodies),
+                       Decimal(1).scaleb(-precision))
 
 
-__all__ = ["SpotSession", "SpotStartRefused", "start_spot_session"]
+# --- run 연결 묶음 (T-048): 어댑터 + 사용자 스트림 + 시세 공급 ------------------------------------------------------
+
+@dataclass
+class M2Run:
+    """app이 받는 run 연결 묶음. 바이낸스 타입은 속성 안에만 있고 app은 공통 계약(BrokerAdapter·스레드 본체)만 쓴다."""
+
+    session: SpotSession
+    feed: BinanceFeed
+    stream: UserStream
+
+    @property
+    def adapter(self) -> BinanceSpotAdapter:
+        return self.session.adapter
+
+    @property
+    def rules(self) -> dict[str, DomainRules]:
+        return self.session.rules
+
+    @property
+    def server_offset_ms(self) -> int:
+        return self.session.server_offset_ms
+
+    @property
+    def orders_enabled(self) -> bool:
+        return self.session.guard.orders_enabled
+
+    @property
+    def quote_quantum(self) -> Decimal:
+        return self.session.quote_quantum
+
+    def threads(self, stop: threading.Event) -> list[threading.Thread]:
+        """시작은 호출자(시작 대조 뒤). 이름은 감시 스레드 표시에 쓴다(D-215)."""
+        return [threading.Thread(target=self.feed.run, args=(stop,), name="binance-feed", daemon=True),
+                threading.Thread(target=self.stream.run, args=(stop,), name="binance-user-stream", daemon=True)]
+
+    def resume_after_ban(self) -> None:
+        self.session.adapter.resume_after_ban()
+
+
+class M2RunConnector:
+    """scripts/run-m2.py가 실제 전송(REST·WS)을 넣어 만들고 app.main에 주입한다(app은 이 패키지를 import하지 않는다).
+
+    hosts: 시작 일치 표 검사(check_start_scope)에 쓰는 접속 도메인 — REST·WS API 테스트넷 호스트."""
+
+    hosts = frozenset({TESTNET_HOST, WS_API_HOST})
+
+    def __init__(self, make_transport: MakeTransport, ws_connect: WsConnect, *, feed_plan: FeedPlan = FeedPlan(),
+                 ws_url: str = TESTNET_WS_API) -> None:
+        self._make_transport = make_transport
+        self._ws_connect = ws_connect
+        self._plan = feed_plan
+        self._ws_url = ws_url
+
+    def __repr__(self) -> str:
+        return f"M2RunConnector(hosts={sorted(self.hosts)})"
+
+    def __call__(self, *, api_key: SecretLike, secret: SecretLike, symbols: Sequence[str], account: str,
+                 now: Callable[[], datetime], sleep: Callable[[float], None], orders_enabled: bool, sink: SpotSink,
+                 on_alert: Alert, on_stream_state: Callable[[str, str], None], halts: HaltControl) -> M2Run | str:
+        """준비 실패면 거부 사유(문자열) — 호출자는 시작 거부(종료 코드 2)."""
+        def now_ms() -> int:
+            return int(now().timestamp() * 1000)
+        feed_box: list[BinanceFeed] = []
+        try:
+            session = start_spot_session(
+                TESTNET_REST, api_key, secret, self._make_transport, symbols=symbols, account=account, now_ms=now_ms,
+                sleep=sleep, orders_enabled=orders_enabled, units=getattr(sink, "units", None), on_alert=on_alert,
+                on_filter_reject=lambda s: feed_box[0].request_rules_reload(s) if feed_box else None)
+        except SpotStartRefused as exc:
+            return str(exc)
+        feed = BinanceFeed(session.client, sink, symbols, now=now, alert=on_alert, halts=halts, account=account,
+                           plan=self._plan)
+        feed_box.append(feed)
+        stream = UserStream(self._ws_connect, session.credentials, session.adapter, now_ms=now_ms,
+                            on_state=lambda st, m: on_stream_state(st.value, m), url=self._ws_url)
+        return M2Run(session, feed, stream)
+

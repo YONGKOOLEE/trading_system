@@ -179,7 +179,7 @@ def m2_paper_problems(cfg: M2StartupConfig) -> tuple[list[str], OrderSwitch | No
     out: list[str] = []
     if not cfg.app.paper_connection_approved:
         out.append("config/m2/app.paper.toml [paper] connection_approved = true 아님 — 테스트넷 접속은 사용자가 직접 켠다 "
-                   "(T-050 연결 범위 승인 뒤)")
+                   "(run의 사용자 스트림·시세 조회는 T-M2-14 조회 승인과 별도로 T-050 연결 범위 승인 뒤)")
     s = cfg.secrets
     missing = [k for k in BINANCE_SECRET_KEYS if s is None or not s.has(k) or not s.get(k).reveal()]
     if missing:

@@ -379,11 +379,13 @@ def test_run_m2_on_m1_db_refused_before_engine(tmp_path: Path, capsys: pytest.Ca
 
 
 def test_run_m2_paper_still_refused_until_adapter(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """PAPER(바이낸스 테스트넷)는 어댑터(T-047)·연결 승인(T-050) 전 — 검사 뒤 거부, DB·잠금 없음."""
+    """PAPER(바이낸스 테스트넷)는 기본 설정(접속 스위치 꺼짐·키 없음)이면 검사 뒤 거부, DB·잠금 없음.
+    [T-048 기대값 변경] PAPER 실행 경로가 생겨(CP-036 D-209) 거부 문구가 "T-047 전"에서 "빠진 연결 조건 목록"으로 바뀜
+    — 영향 V-283·V-285. 거부·DB 없음은 그대로."""
     root = make_m2_root(tmp_path, Mode.PAPER)
     assert run_main(root, {"TRADE_MODE": "PAPER"}, market="M2") == 2
     out = capsys.readouterr().out
-    assert "시작 거부(브로커 연결 없음)" in out and "T-047" in out and "placeholder" not in out
+    assert "시작 거부(브로커 연결 없음)" in out and "connection_approved" in out and "placeholder" not in out
     assert not (root / "var").exists()
 
 

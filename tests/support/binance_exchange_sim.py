@@ -64,6 +64,8 @@ class ExchangeSim:
         self.hold_open = False
         self.exchange_body = exchange_body
         self.server_offset_ms = 0
+        self.market_down = False      # 시세 조회 5XX (T-048 공급 지연)
+        self.bad_klines = False       # klines OHLC 불일치 (품질 실패 → K10)
         self.sent: list[tuple[str, str, dict[str, str]]] = []
         self.headers: list[dict[str, str]] = []
         self._next_order = 1000
@@ -143,6 +145,32 @@ class ExchangeSim:
         cid = p.get("origClientOrderId")
         return next((o for o in self.orders.values() if o["clientOrderId"] == cid and o["symbol"] == p.get("symbol")),
                     None)
+
+    # --- 시세 (T-048 공급 스레드) ---------------------------------------------------------------------
+    def _get_price(self, p: dict) -> RawReply:      # /api/v3/ticker/price
+        if self.market_down:
+            return _reply(503, None)
+        sym = p.get("symbol")
+        return _reply(200, {"symbol": sym, "price": fmt(self.price[sym])})
+
+    def _get_avgPrice(self, p: dict) -> RawReply:
+        if self.market_down:
+            return _reply(503, None)
+        return _reply(200, {"mins": 5, "price": fmt(self.price[p["symbol"]]), "closeTime": self.now_ms()})
+
+    def _get_klines(self, p: dict) -> RawReply:
+        """1d 봉: 오늘(진행 중) 포함 limit개. bad_klines면 OHLC 불일치 행(품질 실패)."""
+        day = 86_400_000
+        today = self.now_ms() // day * day
+        n = int(p.get("limit", "500"))
+        rows = []
+        for i in range(n - 1, -1, -1):
+            o = today - i * day
+            px = fmt(self.price[p["symbol"]])
+            high = fmt(self.price[p["symbol"]] + 100) if not self.bad_klines else fmt(D("1"))
+            rows.append([o, px, high, fmt(self.price[p["symbol"]] - 100), px, "10.0", o + day - 1, "1000", 10,
+                         "5.0", "500", "0"])
+        return _reply(200, rows)
 
     # --- 주문 변경 ---------------------------------------------------------------------------------
     def _post_order(self, p: dict) -> RawReply:
