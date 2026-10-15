@@ -18,6 +18,7 @@ from decimal import Decimal
 from trading_system.domain.clock import KST
 from trading_system.domain.enums import HaltType
 from trading_system.domain.history import RECENT_ENTRY_DAYS, history_view
+from trading_system.domain.investor_flow import InvestorFlow
 from trading_system.domain.market import InstrumentInfo, Quote, SessionInfo, TradingStatus
 from trading_system.domain.sinks import AlertSink, HaltControl
 from trading_system.domain.strategy import Bar, EvaluationSnapshot, InstrumentView, PositionView
@@ -190,17 +191,24 @@ class MarketDataStore:
                  pending: Callable[[str], bool], next_evaluation_at: datetime | None = None,
                  history: Callable[[str], dict] | None = None,
                  recent_days: int = RECENT_ENTRY_DAYS,
-                 listed_at: Callable[[str], datetime | None] | None = None) -> EvaluationSnapshot:
+                 listed_at: Callable[[str], datetime | None] | None = None,
+                 investor_flows: Callable[[str], tuple[tuple[InvestorFlow, ...], bool]] | None = None,
+                 ) -> EvaluationSnapshot:
         """history: 종목 → 저장소 `strategy_history` 원자료. 주면 보유 거래일 수·직전 청산·최근 진입을 채운다.
-        listed_at: [CP-034 D-198] U-B 전략만 — 종목 → 목록 연속 등재 시작 시각(KST). 없으면 None(U-A)."""
+        listed_at: [CP-034 D-198] U-B 전략만 — 종목 → 목록 연속 등재 시작 시각(KST). 없으면 None(U-A).
+        investor_flows: [CP-033 D-193] CAP-DAT-05a 선언 전략만 — 종목 → (확정 투자자별 순매수, 창 완전 여부).
+        창이 불완전하면 그 종목 data_ok False(R-22 무효 = 그 종목 신호 무효). 없으면(미선언) 기존 그대로."""
         views = []
         cal = self.calendar.is_trading_day if self.calendar is not None else None
         for i in instruments:
             inst = self._data.get(i)
             pos = positions(i)
             extra: dict = {}
+            flows_ok = True
             if listed_at is not None:
                 extra["listed_at"] = listed_at(i)
+            if investor_flows is not None:
+                extra["investor_flows"], flows_ok = investor_flows(i)
             if history is not None:
                 h = history_view(history(i), as_of, cal, recent_days)
                 if pos is not None and h.holding_days is not None:
@@ -220,6 +228,7 @@ class MarketDataStore:
                 last_price=q.price if q is not None and q.at <= as_of else None,
                 statuses=inst.statuses or frozenset(), position=pos, has_pending_order=pending(i), **extra,
                 # 공급이 끊겨 마지막 일봉이 오래됐으면 품질 실패 (지난 확정 거래일 일봉이 있어야 함)
-                data_ok=prepared.report.ok and bool(bars) and bars[-1].at >= latest_complete_day(as_of, self.calendar)))
+                data_ok=prepared.report.ok and bool(bars) and bars[-1].at >= latest_complete_day(as_of, self.calendar)
+                and flows_ok))
         return EvaluationSnapshot(evaluation_id, market, account, as_of, base_amount, tuple(views),
                                   next_evaluation_at)

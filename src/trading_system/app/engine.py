@@ -46,6 +46,9 @@ from trading_system.execution.executor import ExecutionBlocked, Executor
 from trading_system.execution.resolver import ResolveOutcome, ResolveProgress, UnknownResolver
 from trading_system.gate.gate import Gate
 from trading_system.halt.manager import K5_LINK_REST, K5_LINK_THREAD, HaltManager
+from trading_system.domain.investor_flow import CAPABILITY as FLOW_CAPABILITY, InvestorFlow
+from trading_system.marketdata.calendar import KrxCalendar
+from trading_system.marketdata.investor_flow import flow_days_of, flow_window
 from trading_system.marketdata.store import MarketDataStore
 from trading_system.monitoring.watchers import AlertWatcher, DailyRiskTracker
 from trading_system.ops.commands import OpsProcessor
@@ -556,10 +559,14 @@ class Engine:
         else:
             insts = sorted(set(spec.universe) & set(self._known_instruments())) if spec.universe_method == "U-A" \
                 else sorted(self._known_instruments())
+        # [CP-033 D-193] CAP-DAT-05a 선언 전략만 투자자별 순매수 입력(일자 < d·확정값만). 미선언 전략은 기존 그대로
+        flows = ({"investor_flows": investor_flow_source(self.repo, self.store.calendar, now,
+                                                         flow_days_of(ls.strategy))}
+                 if FLOW_CAPABILITY in spec.capabilities else {})
         snap = self.store.snapshot(ev_id, "M1", self.account, now, base, insts, pos_view, pending,
                                    self._next_eval(ls, at),
                                    history=lambda inst: self.repo.strategy_history(self.account, owner, inst),
-                                   **({"listed_at": ub.listed_at.get} if ub is not None else {}))
+                                   **({"listed_at": ub.listed_at.get} if ub is not None else {}), **flows)
         lots = {i: info.lot_size for i in insts if (info := self.store.instrument(i)) is not None}
         result = run_evaluation(ls.strategy, snap, ls.params, lots,
                                 **({"entry_universe": ub.entry} if ub is not None else {}),
@@ -698,3 +705,15 @@ class Engine:
         while not stop.is_set():
             self.tick()
             stop.wait(loop_seconds)
+
+
+def investor_flow_source(repo: Repository, calendar: KrxCalendar | None, as_of: datetime,
+                         n: int) -> Callable[[str], tuple[tuple[InvestorFlow, ...], bool]]:
+    """[CP-033 D-189·D-193] PAPER 판정 입력: 저장소(02 ENT-33)의 회차·관측으로 종목별 (확정값 최근 n개, 창 완전 여부).
+    백테스트(InvestorFlowBook)와 같은 규칙 함수(marketdata.investor_flow.flow_window)를 쓴다."""
+    d = as_of.astimezone(KST).date()
+    since, until = d - timedelta(days=n * 3 + 62), d - timedelta(days=1)
+
+    def source(instrument: str) -> tuple[tuple[InvestorFlow, ...], bool]:
+        return flow_window(repo.investor_flow_revisions(instrument, since=since, until=until), as_of, calendar, n)
+    return source

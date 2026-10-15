@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
@@ -25,6 +25,8 @@ from pathlib import Path
 from trading_system.domain.clock import KST, from_iso, to_iso
 from trading_system.domain.daily_base import DailyBase, DailyBaseCorrupt
 from trading_system.domain.enums import ACTIVE_INTENT_STATES, IntentState, Mode
+from trading_system.domain.fin import FIN_BASIS, FIN_SOURCE
+from trading_system.domain.investor_flow import INVESTOR_KEYS, UNIT_AMOUNT, FlowRevision, FlowWrite, InvestorFlow
 from trading_system.domain.minute_bar import MinuteBar
 from trading_system.domain.models import Account
 from trading_system.domain.universe import SUBMIT_CHANNEL, ListEntry, ListVersion
@@ -175,6 +177,38 @@ CREATE TRIGGER IF NOT EXISTS minute_bar_no_update BEFORE UPDATE ON minute_bar
   BEGIN SELECT RAISE(ABORT, 'minute_bar is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS minute_bar_no_delete BEFORE DELETE ON minute_bar
   BEGIN SELECT RAISE(ABORT, 'minute_bar is append-only'); END;
+-- 투자자별 일별 순매수 (CAP-DAT-05a, CP-033 D-190·02 ENT-33, T-035): 키 (종목, 일자, 단위, 회차, 투자자 구분). 추가 전용
+-- 표라 스키마 버전을 올리지 않는다(D-144·A-086 ③과 같은 방식) — 기존 저장소도 열 때 생성. 고치거나 지우지 않는다(트리거,
+-- 자동 삭제 없음). 재수집 값이 다르면 새 회차 행 + 감사 INVESTOR_FLOW_CORRECTED, 같으면 관측(investor_flow_seen)만 추가.
+-- 관측 시각은 확정 판정(D-189)에 쓴다. 주문 경로는 이 표를 읽지 않는다(05a 선언 전략의 판정 입력으로만)
+CREATE TABLE IF NOT EXISTS investor_flow (
+  instrument TEXT NOT NULL, trade_date TEXT NOT NULL, unit TEXT NOT NULL, revision INTEGER NOT NULL,
+  investor TEXT NOT NULL, mode TEXT NOT NULL, value TEXT NOT NULL, source TEXT NOT NULL,
+  collected_at TEXT NOT NULL, collect_run TEXT NOT NULL,
+  PRIMARY KEY (instrument, trade_date, unit, revision, investor));
+CREATE TABLE IF NOT EXISTS investor_flow_seen (
+  instrument TEXT NOT NULL, trade_date TEXT NOT NULL, unit TEXT NOT NULL, revision INTEGER NOT NULL,
+  seen_at TEXT NOT NULL, mode TEXT NOT NULL, collect_run TEXT NOT NULL,
+  PRIMARY KEY (instrument, trade_date, unit, revision, seen_at));
+CREATE TRIGGER IF NOT EXISTS investor_flow_no_update BEFORE UPDATE ON investor_flow
+  BEGIN SELECT RAISE(ABORT, 'investor_flow is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS investor_flow_no_delete BEFORE DELETE ON investor_flow
+  BEGIN SELECT RAISE(ABORT, 'investor_flow is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS investor_flow_seen_no_update BEFORE UPDATE ON investor_flow_seen
+  BEGIN SELECT RAISE(ABORT, 'investor_flow_seen is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS investor_flow_seen_no_delete BEFORE DELETE ON investor_flow_seen
+  BEGIN SELECT RAISE(ABORT, 'investor_flow_seen is append-only'); END;
+-- 재무 스냅샷 (CAP-DAT-05b, CP-033 D-194·02 ENT-34, T-037): 키 (종목, 수집일). 축적만 — 판정·백테스트 입력에 쓰지 않는다.
+-- 추가 전용(트리거, 자동 삭제 없음, 스키마 번호 유지). fields = ka10001 필드 JSON, unchanged = 직전 스냅샷과 같음,
+-- basis = 기준 기간 미확인 표시. 같은 날 다시 받으면 처음 값 유지
+CREATE TABLE IF NOT EXISTS fin_snapshot (
+  instrument TEXT NOT NULL, collected_day TEXT NOT NULL, mode TEXT NOT NULL, fields TEXT NOT NULL,
+  unparsed TEXT NOT NULL, unchanged INTEGER NOT NULL, basis TEXT NOT NULL, source TEXT NOT NULL,
+  collected_at TEXT NOT NULL, collect_run TEXT NOT NULL, PRIMARY KEY (instrument, collected_day));
+CREATE TRIGGER IF NOT EXISTS fin_snapshot_no_update BEFORE UPDATE ON fin_snapshot
+  BEGIN SELECT RAISE(ABORT, 'fin_snapshot is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS fin_snapshot_no_delete BEFORE DELETE ON fin_snapshot
+  BEGIN SELECT RAISE(ABORT, 'fin_snapshot is append-only'); END;
 -- 조회 인덱스: 데이터 의미 불변이라 스키마 버전을 올리지 않는다 — 기존 저장소도 열 때 생성 (review C절, DP-38)
 CREATE INDEX IF NOT EXISTS ix_intent_state ON intent(state);
 CREATE INDEX IF NOT EXISTS ix_ops_command_status ON ops_command(status);
@@ -523,6 +557,109 @@ class Repository:
         return [MinuteBar(r["instrument"], int(r["bar_minutes"]), from_iso(r["bar_start"]), Decimal(r["open"]),
                           Decimal(r["high"]), Decimal(r["low"]), Decimal(r["close"]), Decimal(r["volume"]),
                           r["adjusted"]) for r in rows]
+
+    # --- 투자자별 순매수 (CAP-DAT-05a, CP-033 D-190, T-035) -----------------------------
+    def _latest_flow(self, instrument: str, day: str, unit: str) -> tuple[int, dict[str, Decimal]] | None:
+        r = self._x("SELECT MAX(revision) FROM investor_flow WHERE instrument=? AND trade_date=? AND unit=?",
+                    (instrument, day, unit)).fetchone()
+        if r is None or r[0] is None:
+            return None
+        rev = int(r[0])
+        rows = self._x("SELECT investor, value FROM investor_flow WHERE instrument=? AND trade_date=? AND unit=? "
+                       "AND revision=?", (instrument, day, unit, rev))
+        return rev, {x["investor"]: Decimal(x["value"]) for x in rows}
+
+    def record_investor_flows(self, flows: Sequence[InvestorFlow], source: str, at: datetime,
+                              run_id: str) -> FlowWrite:
+        """투자자별 순매수를 추가한다 (D-190). 저장 단위 안에서 부른다.
+
+        같은 (종목, 일자, 단위)가 처음이면 회차 1, 마지막 회차와 값이 같으면 관측(seen)만 추가, 다르면 새 회차 행 +
+        감사 INVESTOR_FLOW_CORRECTED(바뀐 투자자 구분 이름만 — 값은 표에 있음). 이전 행은 바꾸지 않는다."""
+        if not self.in_transaction:
+            raise ValueError("record_investor_flows는 저장 단위(tx) 안에서")
+        stamp = to_iso(at)
+        new = same = corrected = 0
+        corrections: list[tuple[str, date]] = []
+        for f in flows:
+            day = f.day.isoformat()
+            values = dict(f.values)
+            latest = self._latest_flow(f.instrument, day, f.unit)
+            if latest is not None and latest[1] == values:
+                rev = latest[0]
+                same += 1
+            else:
+                rev = 1 if latest is None else latest[0] + 1
+                for k, v in f.values:
+                    self._x("INSERT INTO investor_flow(instrument, trade_date, unit, revision, investor, mode, value, "
+                            "source, collected_at, collect_run) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                            (f.instrument, day, f.unit, rev, k, self.mode.value, str(v), source, stamp, run_id))
+                if latest is None:
+                    new += 1
+                else:
+                    corrected += 1
+                    corrections.append((f.instrument, f.day))
+                    changed = sorted(k for k in set(values) | set(latest[1]) if values.get(k) != latest[1].get(k))
+                    self.audit(at, "INVESTOR_FLOW_CORRECTED", "collector", f.instrument,
+                               {"day": day, "unit": f.unit, "previous_revision": latest[0], "revision": rev,
+                                "changed": changed, "source": source, "run": run_id})
+            self._x("INSERT OR IGNORE INTO investor_flow_seen(instrument, trade_date, unit, revision, seen_at, mode, "
+                    "collect_run) VALUES(?,?,?,?,?,?,?)", (f.instrument, day, f.unit, rev, stamp, self.mode.value,
+                                                           run_id))
+        return FlowWrite(new, same, corrected, tuple(corrections))
+
+    def investor_flow_revisions(self, instrument: str, unit: str = UNIT_AMOUNT, *, since: date | None = None,
+                                until: date | None = None) -> list[FlowRevision]:
+        """저장된 회차 전부 (일자·회차 오름차순). since ≤ 일자 ≤ until (주면). 투자자 구분 순서는 INVESTOR_KEYS."""
+        sql, params = "SELECT * FROM investor_flow WHERE instrument=? AND unit=?", [instrument, unit]
+        if since is not None:
+            sql += " AND trade_date >= ?"
+            params.append(since.isoformat())
+        if until is not None:
+            sql += " AND trade_date <= ?"
+            params.append(until.isoformat())
+        groups: dict[tuple[str, int], list[sqlite3.Row]] = {}
+        for r in self._x(sql + " ORDER BY trade_date, revision", tuple(params)):
+            groups.setdefault((r["trade_date"], int(r["revision"])), []).append(r)
+        seen: dict[tuple[str, int], list[datetime]] = {}
+        sql2 = sql.replace("FROM investor_flow ", "FROM investor_flow_seen ", 1)
+        for r in self._x(sql2 + " ORDER BY seen_at", tuple(params)):
+            seen.setdefault((r["trade_date"], int(r["revision"])), []).append(from_iso(r["seen_at"]))
+        order = {k: i for i, k in enumerate(INVESTOR_KEYS)}
+        out: list[FlowRevision] = []
+        for (day, rev), rows in groups.items():
+            vals = sorted(((r["investor"], Decimal(r["value"])) for r in rows), key=lambda kv: order.get(kv[0], 99))
+            flow = InvestorFlow(instrument, date.fromisoformat(day), unit, tuple(vals))
+            out.append(FlowRevision(flow, rev, from_iso(rows[0]["collected_at"]), tuple(seen.get((day, rev), ()))))
+        return out
+
+    # --- 재무 스냅샷 (CAP-DAT-05b, CP-033 D-194, T-037) — 축적만 ------------------------------
+    def record_fin_snapshot(self, instrument: str, day: date, values: object, at: datetime, run_id: str) -> str:
+        """재무 스냅샷 1건 추가. "NEW" / "UNCHANGED"(직전 스냅샷과 같음 — 표시만, 값도 저장) / "DUPLICATE_DAY"(같은 날
+        이미 있음 — 처음 값 유지). values: marketdata.fin_snapshot.FinValues(as_dict·unparsed). 저장 단위 안에서 부른다."""
+        if not self.in_transaction:
+            raise ValueError("record_fin_snapshot는 저장 단위(tx) 안에서")
+        fields = dict(values.as_dict())  # type: ignore[attr-defined]
+        unparsed = list(values.unparsed)  # type: ignore[attr-defined]
+        if self._x("SELECT 1 FROM fin_snapshot WHERE instrument=? AND collected_day=?",
+                   (instrument, day.isoformat())).fetchone():
+            return "DUPLICATE_DAY"
+        prev = self._x("SELECT fields FROM fin_snapshot WHERE instrument=? AND collected_day<? "
+                       "ORDER BY collected_day DESC LIMIT 1", (instrument, day.isoformat())).fetchone()
+        unchanged = prev is not None and json.loads(prev["fields"]) == fields
+        self._x("INSERT INTO fin_snapshot(instrument, collected_day, mode, fields, unparsed, unchanged, basis, source, "
+                "collected_at, collect_run) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (instrument, day.isoformat(), self.mode.value, json.dumps(fields, ensure_ascii=False, sort_keys=True),
+                 json.dumps(unparsed, ensure_ascii=False), int(unchanged), FIN_BASIS, FIN_SOURCE, to_iso(at), run_id))
+        return "UNCHANGED" if unchanged else "NEW"
+
+    def fin_snapshot_first_day(self) -> date | None:
+        """축적 시작일 (가장 이른 수집일). 없으면 None."""
+        r = self._x("SELECT MIN(collected_day) FROM fin_snapshot").fetchone()
+        return date.fromisoformat(r[0]) if r is not None and r[0] else None
+
+    def investor_flow_instruments(self, unit: str = UNIT_AMOUNT) -> list[str]:
+        return [r["instrument"] for r in self._x("SELECT DISTINCT instrument FROM investor_flow WHERE unit=? "
+                                                 "ORDER BY instrument", (unit,))]
 
     # --- 계좌 ---------------------------------------------------------------
     def register_account(self, account: Account) -> None:

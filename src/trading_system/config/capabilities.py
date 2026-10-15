@@ -17,9 +17,13 @@ CapabilityTable = dict[str, dict[str, str]]  # CAP-ID → 시장 → 상태
 # [CP-032 D-175] 미체결 정정·취소 능력의 분리: "CAP-ORD-03" 선언 = 03a(정정)·03b(취소) 둘 다 요구.
 # 취소만 쓰는 전략은 "CAP-ORD-03b"로 선언한다.
 ORD03, ORD03A, ORD03B = "CAP-ORD-03", "CAP-ORD-03a", "CAP-ORD-03b"
-CAPABILITY_PARTS: dict[str, tuple[str, ...]] = {ORD03: (ORD03A, ORD03B)}
+# [CP-033 D-187] 비시세 데이터 분리: "CAP-DAT-05" 선언 = 05a(투자자별 순매수)·05b(재무 스냅샷)·05c(공시·일정) 모두 요구
+DAT05, DAT05A, DAT05B, DAT05C = "CAP-DAT-05", "CAP-DAT-05a", "CAP-DAT-05b", "CAP-DAT-05c"
+CAPABILITY_PARTS: dict[str, tuple[str, ...]] = {ORD03: (ORD03A, ORD03B), DAT05: (DAT05A, DAT05B, DAT05C)}
 # 표 상태와 무관하게 이 코드 버전에 구현이 없는 능력 (표가 먼저 바뀌어도 등록을 막는다)
 NOT_IMPLEMENTED: dict[str, str] = {ORD03A: "정정(03a) 미구현 — CP-032 단계 5(T-033) 전까지 등록 불가"}
+# 표 상태와 무관하게 전략이 선언할 수 없는 능력 (판정 입력이 아님)
+NOT_DECLARABLE: dict[str, str] = {DAT05B: "재무 스냅샷(05b)은 축적만 — 판정 입력이 아니라 선언 불가 (CP-033 D-187·D-194)"}
 
 
 def required_parts(cap: str) -> tuple[str, ...]:

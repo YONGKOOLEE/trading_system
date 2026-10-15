@@ -15,6 +15,9 @@
   7. 장중: run 프로세스 생존·하트비트 감시(멈추면 긴급 알림, 자동 재시작 없음).
   8. 15:45(정규장 마감이 늦은 날은 마감 + 15분): 마감 대조(CLOSE) 완료·전송 중 의도 0건 확인(최대 30분 대기) →
      정지 요청 파일 var/paper/STOP → run이 Ctrl+C와 같은 경로로 정상 종료 → paper-review → 백업 → 일일 요약 텔레그램.
+  9. [CP-033 A-100 Q-6 (a)] 저녁 수집(투자자별 순매수 CAP-DAT-05a, app/investor_collect.py): config/collect.paper.toml
+     enabled = true일 때만(기본 꺼짐 — 꺼져 있으면 아무것도 하지 않음). 일일 요약 뒤, run 종료가 확인된 날만. 결과·실패는
+     알림·일 로그만 — 종료 코드·요약·다음 날 운영에 영향 없음. 조회 API만(주문 없음).
 
 자동 운영은 주문하지 않는다. 주문·정지·재개 판정은 모두 run(엔진·게이트·정지 관리자)이 기존 경로로 한다(CLAUDE.md §8-2).
 자동 운영의 알림은 텔레그램으로 직접 보낸다(감사 ALERT에 쓰지 않음 — run이 꺼진 뒤 다음 실행 때 밀린 알림으로 다시
@@ -153,6 +156,9 @@ class AutopilotDeps:
     review: Callable[[], tuple[int, str]]
     backup: Callable[[], tuple[int, str]]
     log: Callable[[str], None] = field(default=lambda m: None)
+    # [CP-033 A-100 Q-6 (a)] 종료 절차(검토·백업·요약) 뒤 저녁 수집. None(기본) = 단계 없음. 함수가 None을 돌려주면
+    # 스위치 꺼짐(아무것도 하지 않음), (코드, 기록)이면 알림·기록만 — 종료 코드·요약에 넣지 않는다
+    evening: Callable[[], tuple[int, str] | None] | None = None
 
 
 @dataclass
@@ -488,9 +494,36 @@ class Autopilot:
         if self.problems:
             text += "\n확인 필요: " + ", ".join(self.problems)
         self._notify("INFO", text)
+        if not died and self.d.evening is not None:
+            self._evening_step(run)
         if died:
             return EXIT_ABORTED
         return EXIT_PROBLEMS if self.problems else EXIT_OK
+
+    def _evening_step(self, run: RunHandle) -> None:
+        """[CP-033 A-100 Q-6 (a)] 저녁 수집 단계 — 일일 요약 뒤. 결과·실패·예외는 알림·일 로그만 남기고 종료 코드·요약·
+        다음 날 운영에 영향을 주지 않는다. run이 아직 살아 있으면 하지 않는다(수집 함수도 run.lock을 다시 본다)."""
+        assert self.d.evening is not None
+        try:
+            if run.alive():
+                # run이 안 끝난 날은 이미 긴급 "정상 종료 안 됨"이 나갔다. 스위치를 읽기 전이라 꺼진 날에도 새 기록·알림을
+                # 만들지 않도록 조용히 건너뛴다(재검토 2026-10-15 #2). 수집 함수도 run.lock을 다시 본다
+                return
+            result = self.d.evening()
+        except Exception as exc:  # noqa: BLE001 — 수집 결함이 자동 운영 종료 코드를 바꾸지 않게
+            self.d.log(f"저녁 수집 예외:\n{traceback.format_exc()}")
+            self._notify("WARNING", f"저녁 수집 오류 {type(exc).__name__} — 수집 결과 없음. 자동 운영·다음 날 운영 영향 "
+                                    f"없음, PC에서 var/paper/logs/autopilot 로그 확인")
+            return
+        if result is None:   # 스위치 꺼짐 — 기록하지 않는다
+            return
+        rc, out = result
+        self.d.log(f"저녁 수집 출력(코드 {rc}):\n{out}")
+        head = (out.strip().splitlines() or [f"저녁 수집 결과 없음(코드 {rc})"])[0]
+        if rc == 0:
+            self._notify("INFO", head)
+        else:
+            self._notify("WARNING", f"{head} — 자동 운영·다음 날 운영 영향 없음 (var/paper/collect·autopilot 로그 확인)")
 
     # --- 보조 ---------------------------------------------------------------------------------
     def _read(self, fn: Callable[[Repository], object]):  # type: ignore[no-untyped-def]
@@ -933,10 +966,15 @@ def _autopilot_main(ctx: _MainCtx, argv: Sequence[str] | None, environ: Mapping[
                                          root, child_env, base / "logs" / f"run-console-{stamp}.log")
         return handle
 
+    def evening() -> tuple[int, str] | None:
+        # [CP-033 A-100 Q-6 (a)] config/collect.paper.toml enabled = true일 때만. 꺼짐·파일 없음 → None(아무것도 안 함)
+        from .investor_collect import evening_from_autopilot
+        return evening_from_autopilot(root, child_env, clock)
+
     deps = AutopilotDeps(clock=clock, sleep=_time.sleep, notify=notify,
                          preflight=lambda: captured(lambda: preflight_main(root, child_env)),
                          launch=launch, review=lambda: captured(lambda: review_main(common)),
-                         backup=lambda: captured(lambda: backup_main(common)), log=log)
+                         backup=lambda: captured(lambda: backup_main(common)), log=log, evening=evening)
     log(f"자동 운영 시작 (PAPER, 계좌 {app.account})")
     try:
         rc = Autopilot(Mode.PAPER, base, app.account, calendar, Schedule(), deps,

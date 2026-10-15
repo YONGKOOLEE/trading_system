@@ -483,6 +483,20 @@ def load_universe_history(path: Path) -> dict[date, tuple[str, ...]]:
     return {d: tuple(sorted(c)) for d, c in sorted(out.items())}
 
 
+def _load_investor_dir(path: str | None, calendar: KrxCalendar):  # type: ignore[no-untyped-def]
+    """[CP-033 D-193] --investor-dir → InvestorFlowBook (없으면 None). 폴더가 없거나 CSV가 없으면 ConfigError."""
+    if not path:
+        return None
+    from trading_system.marketdata.investor_flow import load_investor_dir
+    d = Path(path)
+    if not d.is_dir():
+        raise ConfigError(f"--investor-dir 폴더 없음: {d.name}")
+    book = load_investor_dir(d, calendar)
+    if book.first_day is None:
+        raise ConfigError(f"--investor-dir {d.name}: 종목코드 CSV가 없음")
+    return book
+
+
 def backtest_main(argv: Sequence[str], root: Path) -> int:
     from trading_system.app.backtest import BacktestConfig, BacktestError, perturbation_check, render_report, \
         run_backtest, run_sensitivity
@@ -507,6 +521,8 @@ def backtest_main(argv: Sequence[str], root: Path) -> int:
                    help="한도(정책 프로필) 파일, 저장소 기준 경로 [CP-034 D-196]. 보고서에 프로필·승인 여부 표시")
     p.add_argument("--universe-history", default=None,
                    help="[CP-034] U-B 전략 목록 이력 CSV(date,code). 없으면 데이터 전 종목·판정 시점 목록 아님(C-7) 표시")
+    p.add_argument("--investor-dir", default=None,
+                   help="[CP-033 D-193] CAP-DAT-05a 선언 전략: 투자자별 순매수 CSV 폴더(<종목코드>.csv, A-090 수집 형식)")
     ns = p.parse_args(argv)
     try:
         mode = Mode.BACKTEST
@@ -532,7 +548,8 @@ def backtest_main(argv: Sequence[str], root: Path) -> int:
                              final_from=load_validation_settings(root / "config" / "validation.toml")["final_from"],  # type: ignore[arg-type]
                              final_check=ns.final_check,
                              universe_history=load_universe_history(Path(ns.universe_history))
-                             if ns.universe_history else None)
+                             if ns.universe_history else None,
+                             investor_flows=_load_investor_dir(ns.investor_dir, calendar))
         if ns.final_check:
             # 인자·날짜를 먼저 검사하고(실패하면 장부 미기록) 장부에 1회 사용을 기록한 뒤 실행 (D-163)
             from trading_system.app.backtest import _run_days
