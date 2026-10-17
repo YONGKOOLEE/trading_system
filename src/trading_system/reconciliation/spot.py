@@ -121,7 +121,8 @@ class SpotReconciler(Reconciler):
             found.append((ItemKind.UNKNOWN_BROKER_ORDER, o.instrument, o.order_no, None,
                           f"{o.side} {o.quantity} {o.state}",
                           {"side": o.side, "quantity": str(o.quantity), "trade_date": M2_TIME.local(now).date()
-                           .isoformat(), "detected_at": now.isoformat(), "client_order_id": o.client_order_id}))
+                           .isoformat(), "detected_at": now.isoformat(), "client_order_id": o.client_order_id,
+                           "broker_state": o.state, "filled_quantity": str(o.filled_quantity)}))   # A-109 ④
         for io in self._repo.open_orders(account):
             b = by_ref.get((io.instrument, io.order_no))
             if b is None:

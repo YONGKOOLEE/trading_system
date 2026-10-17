@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from decimal import Decimal
 
 from trading_system.domain.clock import Clock, from_iso
@@ -99,10 +100,16 @@ class ReconcileResolver:
             at = from_iso(detail["detected_at"]) if detail.get("detected_at") else self._clock.now()
             if self._repo.broker_order_by_no(item["ref"], self._repo.trade_date_of(at), account) is not None:
                 return "이미 기록된 주문 — 원장 변경 없음"
-            self._repo.insert_broker_order(
+            qty = Decimal(detail.get("quantity", "0"))
+            key = self._repo.insert_broker_order(
                 account=account, order_no=item["ref"], at=at, intent_id=None, instrument=inst,
-                side=detail.get("side", "BUY"), quantity=Decimal(detail.get("quantity", "0")), origin="EXTERNAL")
-            return "외부 주문으로 인정 — 원장 변경 없음(체결분은 수량 대조로 반영)"
+                side=detail.get("side", "BUY"), quantity=qty, origin="EXTERNAL")
+            # A-109 ④: 브로커가 알린 상태·체결 수량으로 기록한다. ACCEPTED 0/수량으로 두면 이미 체결된 외부 주문이
+            # status에 유령 미체결로 남는다. 체결 행·포지션·소유권은 만들지 않는다(수량은 QTY_MISMATCH로)
+            state, filled = external_order_state(detail, item["broker_value"], qty)
+            if state != "ACCEPTED":
+                self._repo.update_broker_order(key, filled, state)
+            return f"외부 주문으로 인정({state} {filled}/{qty}) — 원장 변경 없음(체결분은 수량 대조로 반영)"
         if item["kind"] == "MISSING_FILL":
             order = self._repo.broker_order(detail["order_key"])
             if order is None:
@@ -133,3 +140,64 @@ class ReconcileResolver:
         self._executor.apply_event(OrderEvent(kind=kind, order_no=order.order_no, account=account,
                                               trade_date=detail["order_key"].split("|")[1]))
         return f"내부 주문 종결({kind})"
+
+
+_EXTERNAL_STATES = ("PARTIAL", "FILLED", "CANCELLED", "EXPIRED", "REJECTED", "MODIFIED")
+EXTERNAL_CORRECTED = "EXTERNAL_ORDER_CORRECTED"
+
+
+def _broker_state_of(detail: dict, broker_value: str | None) -> str | None:
+    """항목의 브로커 상태. 새 항목은 detail["broker_state"], 수정 전 항목은 broker_value "BUY 1 FILLED"의 마지막 낱말."""
+    state = detail.get("broker_state")
+    if not state and broker_value:
+        state = broker_value.split()[-1]
+    return state if state in _EXTERNAL_STATES or state == "ACCEPTED" else None
+
+
+def external_order_state(detail: dict, broker_value: str | None, quantity: Decimal) -> tuple[str, Decimal]:
+    """미확인 브로커 주문을 외부 주문으로 인정할 때 기록할 (상태, 체결 수량) — A-109 ④.
+
+    FILLED → 수량 전부. PARTIAL·취소·만료·거부·정정 → 항목의 체결 수량(수정 전 항목은 모르므로 0), 수량 이하로.
+    ACCEPTED·모르는 상태 → ACCEPTED 0 (종전 기록)."""
+    state = _broker_state_of(detail, broker_value)
+    if state == "FILLED":
+        return "FILLED", quantity
+    if state in _EXTERNAL_STATES:
+        filled = Decimal(detail.get("filled_quantity") or "0")
+        return state, min(max(filled, Decimal("0")), quantity)
+    return "ACCEPTED", Decimal("0")
+
+
+def correct_external_filled(repo: Repository, order_no: str, account: str | None, actor: str,
+                            now: datetime) -> str:
+    """1회 정정 (A-109 ④): 수정 전 EXTERNAL 해소가 ACCEPTED·PARTIAL로 남긴 외부 주문을 FILLED로 고친다.
+
+    근거는 그 주문의 EXTERNAL 해소 항목(감사 RECONCILE_RESOLVE 있음)의 브로커 값이 "FILLED"이고 수량이 같은 것뿐이다.
+    대상이 하나가 아니거나 근거가 없거나 어긋나면 ResolveError. 체결 행·포지션·소유권은 바꾸지 않는다.
+    호출자가 저장 단위(tx)와 실행 잠금(run 꺼짐)을 책임진다."""
+    sql = ("SELECT * FROM broker_order WHERE order_no=? AND origin='EXTERNAL' AND state IN ('ACCEPTED','PARTIAL')"
+           + (" AND account=?" if account else ""))
+    rows = repo.select(sql, (order_no, account) if account else (order_no,))
+    if len(rows) != 1:
+        raise ResolveError(f"정정 대상(열린 외부 주문) {len(rows)}건 — 주문번호·--account 확인"
+                           if rows else f"열린 외부 주문 없음: {order_no}")
+    row = rows[0]
+    items = [i for i in repo.select(
+        "SELECT * FROM recon_item WHERE kind='UNKNOWN_BROKER_ORDER' AND ref=? AND account=? AND instrument=? "
+        "AND state='RESOLVED' AND method='EXTERNAL'", (order_no, row["account"], row["instrument"]))
+        if repo.select("SELECT 1 FROM audit_event WHERE kind='RECONCILE_RESOLVE' AND ref=?", (i["item_id"],))]
+    if not items:
+        raise ResolveError("EXTERNAL 해소 기록(항목·감사)이 없음 — 정정 근거 없음")
+    quantity = Decimal(row["quantity"])
+    for i in items:
+        detail = json.loads(i["detail"] or "{}")
+        if _broker_state_of(detail, i["broker_value"]) != "FILLED" or \
+                Decimal(detail.get("quantity", "-1")) != quantity:
+            raise ResolveError(f"해소 기록의 브로커 값이 수량 {quantity} FILLED가 아님: {i['broker_value']} — 증권사 확인")
+    repo.update_broker_order(row["order_key"], quantity, "FILLED")
+    repo.audit(now, EXTERNAL_CORRECTED, actor, row["order_key"],
+               {"order_no": order_no, "instrument": row["instrument"], "from": f"{row['state']} "
+                f"{row['filled_quantity']}/{row['quantity']}", "to": f"FILLED {quantity}/{quantity}",
+                "basis": [i["item_id"] for i in items], "approval": "A-109"})
+    return f"외부 주문 {order_no} {row['instrument']}: {row['state']} {row['filled_quantity']}/{row['quantity']} " \
+           f"→ FILLED {quantity}/{quantity} (체결 행·포지션 변경 없음)"
