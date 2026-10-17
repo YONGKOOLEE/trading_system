@@ -236,3 +236,8 @@
 - rateLimits(테스트넷): REQUEST_WEIGHT 6000/60초(내부 예산 3000), ORDERS 50/10초(25), ORDERS 160,000/일(80,000), RAW_REQUESTS 300,000/5분.
 - 계좌: SPOT, canTrade True. 테스트넷 가상 잔고 BTC 1·USDT 10,000 외 자산 다수(517개 0 아닌 자산 — 테스트넷 기본 지급).
 - 미확인 해소: **B-U1 테스트넷 rateLimits 값 확인**(실전 값은 여전히 미확인 — LIVE 준비 때). **B-U4 부분 해소**: BTCUSDT 존재·규칙값 확인, 호가 유동성·체결 품질은 PAPER-0(T-M2-15) 관찰 대상으로 남음.
+
+## 13. ② T-050 테스트넷 관찰 run — 사용자 데이터 스트림 (2026-10-17 20:27 KST~, 진행 중)
+- 실행: 사용자, m2-binance 브랜치 m2/run2(406ab6a, CP-036 T-045~T-049), `scripts/run-m2.py`, 주문 스위치 꺼짐(감사 ORDER_SWITCH orders_enabled=false), 배포 전략 없음 — 승인 A-109 ②.
+- **PV-M2-06(B-U9) 부분 확인: HMAC 키로 WS API `userDataStream.subscribe.signature` 구독 성공** — 감사 기록 RECONCILE trigger STREAM_RECONNECT(20:27:06, 스트림 ONLINE 보고 뒤에만 실행되는 대조), K5 없음(에이전트 M2 DB 읽기 전용 조회). 서명 방식 세부·24시간 교체 동작은 관찰 중.
+- 시작 대조: K4 — BTCUSDT 수량(내부 0·브로커 1, 테스트넷 지급분)·USDT 기준선 없음(QUOTE_BASELINE_MISSING 10000) 2건, 예상대로(A-106 Q-1·D-210). 시계 오차 0.0148초. 주기 대조 1분 간격 정상.
