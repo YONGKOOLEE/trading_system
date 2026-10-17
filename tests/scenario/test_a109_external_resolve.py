@@ -275,3 +275,120 @@ def test_fix_command_refuses_live_and_missing_db(tmp_path: Path, capsys: pytest.
     assert fix_external_main(["--mode", "PAPER", "--root", str(tmp_path), "0056724"]) == 2
     assert not (tmp_path / "var" / "live").exists() and not (tmp_path / "var" / "paper" / "trading.db").exists()
     assert "거부" in capsys.readouterr().out
+
+
+# --- 관찰 순서 무관: 먼저 미체결로, 나중에 체결로 본 외부 주문 (독립 검토) ------------------------------
+
+def _open_then_filled_items(env: Env, qty: str = "2") -> tuple[str, dict[str, str]]:
+    """같은 외부 주문을 접수 상태로 한 번, 체결 뒤 한 번 대조 → 브로커 값이 달라 미확인 항목이 2개 열린다."""
+    no = env.broker.add_external_order(ACCOUNT, "TST-C", "BUY", Decimal(qty))
+    rec(env).run(ACCOUNT, "PERIODIC")
+    env.broker.fill(no)
+    env.broker.drop_events()
+    rec(env).run(ACCOUNT, "PERIODIC")
+    items = {i["broker_value"].split()[-1]: i["item_id"] for i in env.repo.open_recon_items(ACCOUNT)
+             if i["kind"] == ItemKind.UNKNOWN_BROKER_ORDER}
+    assert sorted(items) == ["ACCEPTED", "FILLED"], items
+    return no, items
+
+
+@pytest.mark.parametrize("order", [("ACCEPTED", "FILLED"), ("FILLED", "ACCEPTED")])
+def test_open_then_filled_items_record_filled_in_any_resolve_order(env: Env, order: tuple[str, str]) -> None:
+    no, items = _open_then_filled_items(env)
+    r = ReconcileResolver(env.repo, env.executor, env.clock)
+    notes = [r.resolve(items[s], "EXTERNAL", "u") for s in order]
+    row = ext_row(env, no)
+    assert (row["state"], Decimal(row["filled_quantity"]), Decimal(row["quantity"])) == ("FILLED", 2, 2), notes
+    if order[0] == "ACCEPTED":
+        assert "FILLED" in notes[1] and "상향" in notes[1], notes      # 이미 기록된 행을 종결 상태로 올렸다고 알린다
+    else:
+        assert "원장 변경 없음" in notes[1] and "상향" not in notes[1], notes   # 낮추지 않는다
+    assert fills_of(env, row["order_key"]) == []                       # 체결 행·포지션은 만들지 않음
+    assert env.repo.position(ACCOUNT, "TST-C").quantity == 0
+    resolve_all(env)                                                    # 남은 QTY_MISMATCH
+    assert env.repo.position(ACCOUNT, "TST-C").quantity == 2
+    assert rec(env).run(ACCOUNT, "MANUAL").result == "MATCH"
+    assert check_invariants(env.repo.connection, Mode.BACKTEST.value) == []
+
+
+def test_already_recorded_upgrade_never_touches_internal_rows(env: Env) -> None:
+    """이미 기록된 행이 내부 주문이면 항목이 FILLED라고 해도 바꾸지 않는다."""
+    now = env.clock.now()
+    with env.repo.tx():
+        key = env.repo.insert_broker_order(account=ACCOUNT, order_no="0000555", at=now, intent_id=None,
+                                           instrument="TST-C", side="BUY", quantity=Decimal("2"), origin="INTERNAL_NEW")
+        rid = env.repo.insert_reconciliation(ACCOUNT, "PERIODIC", "MISMATCH", {}, now)
+        iid = env.repo.insert_recon_item(rid, ACCOUNT, ItemKind.UNKNOWN_BROKER_ORDER, "TST-C", "0000555", None,
+                                         "BUY 2 FILLED",
+                                         json.dumps({"side": "BUY", "quantity": "2", "broker_state": "FILLED",
+                                                     "filled_quantity": "2", "trade_date": env.repo.trade_date_of(now),
+                                                     "detected_at": now.isoformat()}))
+    note = ReconcileResolver(env.repo, env.executor, env.clock).resolve(iid, "EXTERNAL", "u")
+    assert "원장 변경 없음" in note and "상향" not in note
+    assert env.repo.broker_order(key).state == "ACCEPTED"
+
+
+def _resolved_item(repo: Repository, now: datetime, no: str, broker_value: str, qty: str = "1",
+                   trade_date: str | None = None, inst: str = "005930") -> str:
+    """EXTERNAL로 해소된 미확인 주문 항목(감사 RECONCILE_RESOLVE 포함)만 추가한다 — 주문 행은 만들지 않음."""
+    with repo.tx():
+        rid = repo.insert_reconciliation("KR-PAPER-01", "PERIODIC", "MISMATCH", {}, now)
+        iid = repo.insert_recon_item(rid, "KR-PAPER-01", ItemKind.UNKNOWN_BROKER_ORDER, inst, no, None, broker_value,
+                                     json.dumps({"side": "BUY", "quantity": qty,
+                                                 "trade_date": trade_date or repo.trade_date_of(now),
+                                                 "detected_at": now.isoformat()}))
+        repo.resolve_recon_item(iid, "EXTERNAL", "local", now)
+        repo.audit(now, "RECONCILE_RESOLVE", "local", iid,
+                   {"kind": "UNKNOWN_BROKER_ORDER", "method": "EXTERNAL", "note": "외부 주문으로 인정"})
+    return iid
+
+
+def _correct(repo: Repository, no: str) -> str:
+    with repo.tx():
+        return correct_external_filled(repo, no, "KR-PAPER-01", "u", datetime(2026, 10, 17, 1, 0, tzinfo=UTC))
+
+
+def test_correction_accepts_filled_evidence_despite_earlier_accepted_item(tmp_path: Path) -> None:
+    now = datetime(2026, 10, 16, 1, 0, tzinfo=UTC)
+    repo = Repository(tmp_path / "trading.db", Mode.PAPER)
+    try:
+        key = _legacy_external(repo, now, broker_value="BUY 1 ACCEPTED")    # 먼저 접수 상태로 본 항목
+        _resolved_item(repo, now, "0056724", "BUY 1 FILLED")                 # 나중에 체결로 본 항목
+        assert "FILLED" in _correct(repo, "0056724")
+        row = repo.broker_order(key)
+        assert row is not None and (row.state, row.filled_quantity) == ("FILLED", 1)
+        assert check_invariants(repo.connection, Mode.PAPER.value) == []
+    finally:
+        repo.close()
+
+
+@pytest.mark.parametrize("contradiction", ["BUY 2 FILLED", "BUY 1 CANCELLED", "BUY 1 REJECTED"])
+def test_correction_refuses_contradicting_evidence(tmp_path: Path, contradiction: str) -> None:
+    now = datetime(2026, 10, 16, 1, 0, tzinfo=UTC)
+    repo = Repository(tmp_path / "trading.db", Mode.PAPER)
+    try:
+        key = _legacy_external(repo, now)                                   # BUY 1 FILLED
+        _resolved_item(repo, now, "0056724", contradiction, qty=contradiction.split()[1])
+        with pytest.raises(ResolveError):
+            _correct(repo, "0056724")
+        row = repo.broker_order(key)
+        assert row is not None and row.state == "ACCEPTED"
+    finally:
+        repo.close()
+
+
+def test_correction_ignores_evidence_from_another_trade_date(tmp_path: Path) -> None:
+    """주문번호는 거래일 안에서만 유일 (D-046) — 다른 거래일 같은 번호의 FILLED 항목은 근거가 아니다."""
+    now = datetime(2026, 10, 16, 1, 0, tzinfo=UTC)
+    repo = Repository(tmp_path / "trading.db", Mode.PAPER)
+    try:
+        with repo.tx():                                                     # 10-16 외부 주문 행 (ACCEPTED 0/1)
+            key = repo.insert_broker_order(account="KR-PAPER-01", order_no="0056724", at=now, intent_id=None,
+                                           instrument="005930", side="BUY", quantity=Decimal("1"), origin="EXTERNAL")
+        _resolved_item(repo, now, "0056724", "BUY 1 FILLED", trade_date="2026-10-15")   # 전날 같은 번호의 근거
+        with pytest.raises(ResolveError):
+            _correct(repo, "0056724")
+        row = repo.broker_order(key)
+        assert row is not None and row.state == "ACCEPTED"
+    finally:
+        repo.close()
