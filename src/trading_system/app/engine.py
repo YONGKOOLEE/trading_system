@@ -8,6 +8,7 @@
 4. 일일 기준 시각: 기준 금액 고정·일일 보고, 일일 손실 L4 → K2
 5. 대조 (장중 주기·장 마감 후 1회·요청 시 — RV-25)
 6. 예정 판정 (달력상 거래일, 예정 시각 + 유예 안, K8 등 전역 정지 중이면 건너뜀) → 게이트 → 실행기
+   [CP-037 D-219] CAP-TRG-02 전략(M2만)은 주문 창 안 N분 격자 주기 판정(_evaluate_periodic — 분봉 조회 대기·시한, DP-79)
 7. 실행 정책: CAP-ORD-03b(취소, CP-032 D-175)를 선언한 전략의 미체결 주문이 정해진 시간을 넘으면 취소 요청(게이트 경유)
 입출력·감시 스레드(실시간 수신·텔레그램·시세 조회·감시)는 큐·저장소에만 쓰고 주문하지 않는다.
 단계·훅 오류는 루프 밖으로 내보내지 않는다(기록 실패 시 로컬 파일, RV-06). last_progress = 감시 스레드의 멈춤 판정 근거.
@@ -40,6 +41,7 @@ from trading_system.domain.clock import KST, Clock, from_iso, to_iso
 from trading_system.domain.enums import GateResult, HaltType, IntentState, RequestSource, RequestType, Side
 from trading_system.domain.limits import AccountLimits
 from trading_system.domain.market import CashView
+from trading_system.domain.minute_series import PeriodGrid
 from trading_system.domain.models import GateRequest, OrderEvent
 from trading_system.domain.sinks import AlertSink
 from trading_system.domain.strategy import EvaluationSnapshot, PositionView, evaluation_id_of
@@ -97,6 +99,8 @@ class LoadedStrategy:
     params: dict[str, object]
     eval_times: tuple[time, ...]
     unfilled_minutes: int | None = None   # CAP-ORD-03b 선언 + 파라미터 unfilled_max_minutes 일 때만 (D-175)
+    # [CP-037 D-219] CAP-TRG-02 주기 판정 격자 (M2만 — 조립 지점 period_grid_of가 만든다). None = 정해진 시각 판정(eval_times)
+    period: PeriodGrid | None = None
 
     @property
     def owner(self) -> str:
@@ -182,6 +186,9 @@ class Engine:
     index_source: Callable[[str, datetime], IndexView] | None = None
     # [CP-036 D-201] 시장 프로파일. 기본 M1 = 변경 전 동작 그대로
     profile: MarketProfile = field(default_factory=MarketProfile)
+    # [CP-037 D-219] 주기 판정 상태 (CAP-TRG-02 전략만 씀 — 정해진 시각 판정은 무관)
+    _started_at: datetime | None = None                                       # start() 시각: 이전 예정 시각은 판정 안 함
+    _period_last: dict[str, datetime] = field(default_factory=dict)          # 전략별 마지막으로 처리한 예정 시각
 
     def __post_init__(self) -> None:
         self.profile.attach(self)
@@ -209,7 +216,8 @@ class Engine:
     # --- 시작 -------------------------------------------------------------------------
     def start(self) -> RecoveryReport:
         self.halts.send_thread = threading.get_ident()   # 이 스레드가 판정·실행 스레드 — 정지 취소 재시도는 여기서만 (4차 검토 F-B)
-        self._seed_evaluated(self.clock.now())           # 재시작 뒤 같은 판정 시각 재판정 방지 (T-044)
+        self._started_at = self.clock.now()              # [CP-037 D-219] 주기 판정: 시작 전 예정 시각은 판정하지 않는다
+        self._seed_evaluated(self._started_at)           # 재시작 뒤 같은 판정 시각 재판정 방지 (T-044)
         unknown = self.executor.recover_on_start()
         self.start_unknown = len(unknown)
         self.halts.on_start()
@@ -566,6 +574,9 @@ class Engine:
         if session is None or not session.is_open:
             return
         for ls in self.strategies:
+            if ls.period is not None:   # [CP-037 D-219] CAP-TRG-02 주기 판정 (M2만)
+                self._evaluate_periodic(ls, ls.period, now)
+                continue
             for t in ls.eval_times:
                 at = datetime.combine(today, t, tzinfo=tz)
                 key = self._eval_key(ls, at)   # 시작 때 감사 기록으로도 채운다 (_seed_evaluated, T-044)
@@ -585,13 +596,65 @@ class Engine:
                     continue
                 self._evaluate(ls, at, now)
 
+    def _evaluate_periodic(self, ls: LoadedStrategy, grid: PeriodGrid, now: datetime) -> None:
+        """CAP-TRG-02 주기 판정 (CP-037 D-219·D-220, DP-79). 판정 시각 = 주문 창 안 격자(UTC 00:00 + k×N분 + 확정 여유).
+
+        - 가장 늦은 예정 시각 at 하나만 본다. 시작(start) 전 예정 시각은 판정하지 않는다(재시작 뒤 지난 주기 판정 0, 기록 없음 —
+          판정 여부는 이전 프로세스의 감사 기록이 말한다). 판정 ID = 전략·버전·M2·UTC 예정 시각.
+        - 직전 처리 시각과 at 사이에 지나간 예정 시각(루프 지연)은 하나씩 판정하지 않고 감사 EVALUATION_SKIPPED 1건(건수)으로.
+        - 예정 시각 + 유예(min(60초, N분의 절반)) 초과 → 건너뜀(늦은 판정 금지, DP-21과 같은 원칙). 전역 정지 → 건너뜀.
+        - CAP-DAT-02 전략: 그 판정 시각의 1분봉 조회가 끝날 때까지 기다린다(판정 표시 안 함 → 다음 tick 재확인). 기다림 상한
+          (PeriodGrid.fetch_wait = 유예의 절반)을 넘으면 끝나지 않은 심볼을 FETCH_TIMEOUT(분봉 입력 무효)으로 판정한다 —
+          신규 진입·증액은 판정 실행기가 버리고 청산·감액은 낼 수 있다(DP-78)."""
+        at = grid.latest_at_or_before(now)
+        if at is None:
+            return
+        key = self._eval_key(ls, at)
+        if key in self.evaluated:
+            return
+        if self._started_at is not None and at < self._started_at:
+            self.evaluated.add(key)
+            self._period_last[ls.owner] = at
+            return
+        last = self._period_last.get(ls.owner)
+        if last is None or last != at:
+            missed = grid.count_between(last, at) if last is not None and last < at else 0
+            self._period_last[ls.owner] = at
+            if missed:
+                self._audit("EVALUATION_SKIPPED", f"{ls.owner}|gap|{last.isoformat()}|{at.isoformat()}",  # type: ignore[union-attr]
+                            {"reason": "주기 판정 건너뜀 (루프 지연 — 지나간 예정 시각은 판정하지 않음)", "count": missed,
+                             "after": last.isoformat(), "before": at.isoformat()})  # type: ignore[union-attr]
+        if now - at > grid.grace:
+            self.evaluated.add(key)
+            self._audit("EVALUATION_SKIPPED", key, {"reason": "예정 시각 + 유예 초과 (늦은 판정 금지)",
+                                                    "grace_s": grid.grace.total_seconds()})
+            return
+        if self._blocked_globally():
+            self.evaluated.add(key)
+            self._audit("EVALUATION_SKIPPED", key, {"reason": "전역 정지 중"})
+            return
+        up = self.registry.signal_rejection(ls.owner, RequestType.ENTRY)
+        down = self.registry.signal_rejection(ls.owner, RequestType.EXIT)
+        if up is not None and down is not None:
+            self.evaluated.add(key)
+            self._audit("EVALUATION_SKIPPED", key, {"reason": up})
+            return
+        pending = self.profile.minute_pending(ls, at)
+        if pending and now - at <= grid.fetch_wait:
+            return   # 그 판정 시각 1분봉 조회 대기 — 판정 표시하지 않고 다음 tick에 다시
+        self.evaluated.add(key)
+        self._evaluate(ls, at, now, unfetched=pending)
+
     def _next_eval(self, ls: LoadedStrategy, at: datetime) -> datetime | None:
+        if ls.period is not None:
+            return ls.period.next_after(at)
         tz = self.profile.tz
         later = [datetime.combine(at.astimezone(tz).date(), t, tzinfo=tz) for t in ls.eval_times]
         later = [x for x in later if x > at]
         return min(later) if later else None
 
-    def _evaluate(self, ls: LoadedStrategy, at: datetime, now: datetime) -> None:
+    def _evaluate(self, ls: LoadedStrategy, at: datetime, now: datetime,
+                  unfetched: frozenset[str] | None = None) -> None:
         spec = ls.strategy.spec
         ev_id = self._eval_id(ls, at)
         owner = ls.owner
@@ -600,7 +663,11 @@ class Engine:
         # 배분 규칙: 판정 직렬화 안에서 전략 판정 전에 평가 (D-199). 지정되지 않은 전략은 영향 없음
         block, alloc = self._allocation_block(ls, at) if self.allocations else (None, None)
         ub = self._universe_b(ls, at) if spec.universe_method == "U-B" else None
-        snap, lots = self.profile.evaluation_input(ls, ev_id, at, now, base, ub)   # [CP-036 D-201 (4)]
+        if unfetched is None:
+            snap, lots = self.profile.evaluation_input(ls, ev_id, at, now, base, ub)   # [CP-036 D-201 (4)]
+        else:   # [CP-037 D-219] 주기 판정 — 기다림 상한을 넘긴 분봉 조회 심볼을 함께 넘긴다 (M2 프로파일만)
+            snap, lots = self.profile.evaluation_input(ls, ev_id, at, now, base, ub,  # type: ignore[call-arg]
+                                                       unfetched=unfetched)
         result = run_evaluation(ls.strategy, snap, ls.params, lots,
                                 **({"entry_universe": ub.entry} if ub is not None else {}),
                                 **({"entry_block": block} if block is not None else {}))
@@ -610,6 +677,13 @@ class Engine:
             summary["universe_list"] = ub.record   # 판정 입력에 쓴 목록 버전 (D-198 (3))
         if alloc is not None:
             summary["allocation"] = {k: alloc[k] for k in ("rule", "allow_entry", "failed")}
+        if unfetched is not None:   # [CP-037] 주기 판정 기록: 예정 시각·판정 지연·분봉 조회 시한 초과·버린 신호 사유
+            summary["scheduled_at"] = at.isoformat()
+            summary["delay_s"] = (now - at).total_seconds()
+            if unfetched:
+                summary["minute_unfetched"] = sorted(unfetched)
+            if result.dropped:
+                summary["dropped_reasons"] = [f"{d.instrument} {d.rule_id}: {d.reason}" for d in result.dropped][:5]
         self._audit("EVALUATION", ev_id, summary)
         if result.error:
             self.alerts.alert("WARNING", f"전략 판정 오류 {owner}: {result.error}", ev_id)

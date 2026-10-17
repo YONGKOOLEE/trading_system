@@ -22,7 +22,7 @@ import hashlib
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
 
@@ -163,6 +163,40 @@ class PeriodGrid:
     def grace(self) -> timedelta:
         """늦은 판정 유예 = min(60초, N분의 절반) (D-219 [제안])."""
         return min(timedelta(seconds=60), timedelta(seconds=30 * self.period_minutes))
+
+    @property
+    def fetch_wait(self) -> timedelta:
+        """주기 판정이 그 판정 시각의 1분봉 조회를 기다리는 상한 = 유예의 절반 [제안, DP-79] (N=1 → 15초, N≥2 → 30초).
+        유예보다 짧아 판정·실행 루프(최대 5초)가 기다림 뒤에도 유예 안에서 판정한다 — 늦은 판정은 만들지 않는다."""
+        return self.grace / 2
+
+    def offsets(self) -> tuple[int, ...]:
+        """하루 격자 시각(UTC 00:00부터 분) 가운데 주문 창 안인 것, 오름차순."""
+        lo = self.window_start.hour * 60 + self.window_start.minute
+        hi = self.window_end.hour * 60 + self.window_end.minute
+        return tuple(m for m in range(0, DAY_MINUTES, self.period_minutes) if lo <= m <= hi)
+
+    def day_times(self, day: date) -> tuple[datetime, ...]:
+        """그 UTC 날짜의 판정 시각(격자 시각 + 여유) 전부, 오름차순 (백테스트 일정 — 실운영과 같은 격자, D-221)."""
+        midnight = datetime(day.year, day.month, day.day, tzinfo=UTC)
+        return tuple(midnight + ONE_MINUTE * m + self.margin for m in self.offsets())
+
+    def next_after(self, at: datetime) -> datetime:
+        """at 다음 판정 시각(주문 창 안 격자, 필요하면 다음 날 첫 격자) — 신호 기한 상한(00 §2.6)."""
+        require_aware(at)
+        t = at.astimezone(UTC)
+        for cand in self.day_times(t.date()):
+            if cand > t:
+                return cand
+        return self.day_times(t.date() + timedelta(days=1))[0]
+
+    def count_between(self, earlier: datetime, later: datetime) -> int:
+        """earlier < 판정 시각 < later 인 판정 시각 수 (루프 지연으로 건너뛴 판정 집계용)."""
+        n, t = 0, self.next_after(earlier)
+        while t < later:
+            n += 1
+            t = self.next_after(t)
+        return n
 
     def latest_at_or_before(self, now: datetime) -> datetime | None:
         """now 이전(같음 포함) 가장 늦은 격자 판정 시각(UTC). 그 격자 시각이 주문 창 밖이면 None."""

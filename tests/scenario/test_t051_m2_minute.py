@@ -476,7 +476,8 @@ def test_profile_declared_but_minutes_off_is_invalid(tmp_path: Path) -> None:
         w.start_and_resume()
         w.tick_at(1, 0, 3)
         v = rec.snaps[0].view(WSYM)
-        assert v is not None and not v.data_ok and v.minute_bars == ()
+        # [T-052 DP-78] 기대값 변경: 분봉 무효는 data_ok가 아니라 minute_ok False (청산·감액 신호 보존, CLAUDE.md §8-3)
+        assert v is not None and not v.minute_ok and v.data_ok and v.minute_bars == ()
         [a] = [e for e in w.repo.audit_events() if e["kind"] == MINUTE_INPUT_AUDIT]
         assert "DISABLED" in a["summary"]
     finally:

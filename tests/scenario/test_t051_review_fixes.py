@@ -110,7 +110,8 @@ def test_real_halt_manager_quality_failure_blocks_only_minute_strategy(tmp_path:
         assert w.repo.active_halts(W_ACCOUNT) == []
         assert len(w.sent()) == 1                                    # 비분봉 전략(고정 진입)은 그대로 주문
         v = rec.snaps[0].view(WSYM)
-        assert v is not None and not v.data_ok and v.minute_bars == ()                     # 분봉 전략만 무효
+        # [T-052 DP-78] 기대값 변경: 분봉 무효 = minute_ok False(data_ok는 분봉 외 입력 — 청산·감액 신호 보존, §8-3)
+        assert v is not None and not v.minute_ok and v.data_ok and v.minute_bars == ()     # 분봉 전략만 무효
         [a] = w.audits(MINUTE_INPUT_AUDIT)
         assert "QUALITY" in a["summary"]
         assert w.audits(MINUTE_QUALITY_AUDIT)
@@ -165,7 +166,7 @@ def test_engine_minute_storage_failure_no_k8_and_other_strategy_trades(tmp_path:
         assert "K8" not in w.repo.active_halts(W_ACCOUNT) and w.engine.errors == []
         assert len(w.sent()) == 1                                    # 비분봉 전략 주문은 그대로
         v = rec.snaps[0].view(WSYM)
-        assert v is not None and not v.data_ok
+        assert v is not None and not v.minute_ok and v.data_ok                          # [T-052 DP-78] 기대값 변경
         [a] = w.audits(MINUTE_INPUT_AUDIT)
         assert "STORE_FAILED" in a["summary"]
         alerts = [e["summary"] for e in w.audits("ALERT")]

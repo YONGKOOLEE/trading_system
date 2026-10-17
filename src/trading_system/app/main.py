@@ -504,7 +504,8 @@ def _run_m2(mode: Mode, base: Path, cfg, caps, strategies: list[StrategyInput], 
         from .m2_minutes import M2MinuteInput
         margin = timedelta(seconds=minute_cfg.confirm_margin_seconds)
         minute_book = SpotMinuteBook(tuple(pairs), margin=margin, account=app.account)
-        minutes = M2MinuteInput(minute_book, lookback_bars=minute_cfg.lookback_bars, margin=margin)
+        minutes = M2MinuteInput(minute_book, lookback_bars=minute_cfg.lookback_bars, margin=margin,
+                                period_minutes=minute_cfg.period_minutes)   # 주기 판정 격자 검사 (T-052, DP-79)
     run = None
     if mode is Mode.PAPER:
         run = _m2_connect(cfg, pairs, clock, facts, relay, switch, connector, minute_book)

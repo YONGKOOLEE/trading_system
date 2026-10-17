@@ -186,6 +186,9 @@ class InstrumentView:
     listed_at: datetime | None = None   # [CP-034 D-198] U-B 목록 연속 등재 시작 버전의 제출 시각(KST). U-A는 None
     # [CP-033 D-189·D-193] CAP-DAT-05a 선언 전략만: 일자 < 판정일·확정값만, 일자 오름차순. 미선언 전략은 언제나 ()
     investor_flows: tuple[InvestorFlow, ...] = ()
+    # [CP-037 DP-78] CAP-DAT-02 선언 전략의 1분봉 판정 입력이 유효한지. False면 minute_bars는 ()이고, 판정 실행기가 이 종목의
+    # 신규 진입·증액 신호를 버린다 — 청산·감액(보유·최근가 등 나머지 입력 기반)은 막지 않는다(CLAUDE.md §8-3). 미선언 전략은 True
+    minute_ok: bool = True
 
 
 @dataclass(frozen=True)
