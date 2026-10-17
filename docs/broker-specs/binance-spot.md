@@ -248,3 +248,8 @@
 - **`/api/v3/exchangeInfo`에 상장폐지 USDT 심볼이 status=BREAK로 남아 있음**: USDT 호가 심볼 765개 = TRADING 511 + BREAK 254 (BCCUSDT·VENUSDT·BCHSVUSDT = BREAK). → "그 당시" 후보 목록을 exchangeInfo 전체(TRADING+BREAK)로 만들 수 있음. 단 아주 오래전 폐지 심볼이 목록에서 완전히 지워졌는지는 미확인.
 - data.binance.vision: 월별 일봉 zip 공개(BCCUSDT 2018-06·BCHSVUSDT 2019-01·BTCUSDT 2018-06 200, VENUSDT 2018-05는 404 — 상장 전 달). 목록 페이지는 자바스크립트로 별도 저장소(다른 호스트)를 읽어 이번 범위로는 목록 불가. klines로 충분하므로 필수 아님.
 - 규모 추정: USDT 심볼 765개 일봉 전 기간 ≈ 심볼당 1~4쪽, 약 2,300회 호출·10~20분, 약 100MB 이하(추정).
+
+## 15. ② 테스트넷 ETHUSDT 거래 규칙 (2026-10-18, A-096 조회 범위 — 공개 GET, 키 없음)
+- `GET https://testnet.binance.vision/api/v3/exchangeInfo?symbol=ETHUSDT`: status TRADING, baseAssetPrecision 8.
+- PRICE_FILTER tickSize 0.01 (0.01~1,000,000) / **LOT_SIZE stepSize 0.0001** (minQty 0.0001, maxQty 9000) / MARKET_LOT_SIZE minQty 0·stepSize 0(BTCUSDT와 같은 형태 — D-208 적용) / NOTIONAL minNotional 5·applyMinToMarket True.
+- 전략실 crypto-trend의 ETH 단위 가정(0.0001)과 일치. ETHUSDT는 M2 유니버스(A-096, BTCUSDT만) 밖 — 유니버스 추가는 사용자 결정(전략실 요청 B).
