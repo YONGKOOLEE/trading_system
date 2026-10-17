@@ -1,5 +1,8 @@
 """M2 백테스트 명령 `python -m trading_system.app backtest --market M2` (T-M2-15, A-111 Q-1 (가)).
 
+[CP-037 T-053] `--interval 1m`이면 1분봉 실행기(app/backtest_m2_minute — D-221 체결·D-222 검증 창, backtest_m2_minute_main).
+`--interval` 없음·`1d` = 아래 일봉 경로 그대로.
+
 - 데이터: 바이낸스 공개 1d klines CSV(A-110 수집 형식: open_time_utc,open,high,low,close,volume,close_time_utc,…, ISO UTC 시각).
   `load_binance_daily_csv`가 형식을 검사해 UTC 일봉(Bar.at = 봉 시작 날짜)으로 바꾼다. 파일은 읽기만 한다.
 - 불완전 봉(거래 중단으로 일찍 끝난 1d 봉)은 빼고 날짜를 보고서·요약에 적는다 → 그날은 판정 데이터 없음(04 §2.1 결측, 주문 없음).
@@ -31,7 +34,7 @@ from trading_system.app.backtest_m2 import (
     SpotBacktestConfig, dust_summary, perturbation_check_m2, render_report_m2, run_backtest_m2,
 )
 from trading_system.app.validation_tool import load_validation_settings
-from trading_system.app.wiring import StrategyInput, load_strategy, spot_rule_problems
+from trading_system.app.wiring import StrategyInput, load_strategy, period_grid_of, spot_rule_problems
 from trading_system.config.app_file import StrategyDeploy
 from trading_system.config.capabilities import load_capabilities
 from trading_system.config.errors import ConfigError
@@ -118,6 +121,11 @@ def _times(text: str) -> tuple[time, ...]:
 
 
 def backtest_m2_main(argv: Sequence[str], root: Path) -> int:
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--interval", default="1d", choices=["1d", "1m"])   # [CP-037 T-053] 1m = 1분봉 실행기
+    first, argv = pre.parse_known_args(argv)
+    if first.interval == "1m":
+        return backtest_m2_minute_main(argv, root)
     p = argparse.ArgumentParser(prog="python -m trading_system.app backtest --market M2")
     p.add_argument("--strategy", required=True, help="패키지.모듈:클래스")
     p.add_argument("--params", required=True, help="파라미터 파일 (저장소 기준)")
@@ -207,4 +215,107 @@ def backtest_m2_main(argv: Sequence[str], root: Path) -> int:
     return 0
 
 
-__all__ = ["backtest_m2_main", "load_binance_daily_csv", "TESTNET_RULES"]
+def backtest_m2_minute_main(argv: Sequence[str], root: Path) -> int:
+    """`backtest --market M2 --interval 1m` (CP-037 T-053, D-221·D-222). 데이터 = A-110 공개 1m CSV(읽기만, 스트리밍).
+    전략은 CAP-TRG-02(파라미터 period_minutes) — 판정 일정은 실운영과 같은 주기 격자. `--validate`면 D-222 6창(2020~2025)."""
+    from functools import partial
+
+    from trading_system.app.backtest_m2_minute import (
+        MinuteBacktestConfig, MinuteValidationInputs, first_minute_start, iter_binance_minute_csv,
+        perturbation_check_minute, render_minute_report, run_minute_backtest, run_minute_validation, summary_of,
+    )
+    p = argparse.ArgumentParser(prog="python -m trading_system.app backtest --market M2 --interval 1m")
+    p.add_argument("--strategy", required=True, help="패키지.모듈:클래스 (CAP-TRG-02 주기 판정 전략)")
+    p.add_argument("--params", required=True, help="파라미터 파일 (저장소 기준 또는 절대 경로)")
+    p.add_argument("--data", required=True, help="바이낸스 공개 1m klines CSV (A-110 형식, 읽기만)")
+    p.add_argument("--symbol", default="BTCUSDT", help="심볼 (거래 규칙이 있는 심볼만: BTCUSDT)")
+    p.add_argument("--start", default=None, help="시작 UTC 날짜 (--validate가 아니면 필수)")
+    p.add_argument("--end", default=None, help="끝 UTC 날짜 (final_from 전, --validate가 아니면 필수)")
+    p.add_argument("--run-id", required=True)
+    p.add_argument("--cash", default="10000", help="초기 USDT")
+    p.add_argument("--lookback", required=True, type=int, help="판정 창 1분봉 수 (설정 [minute] lookback_bars와 같은 의미)")
+    p.add_argument("--margin-seconds", default=2, type=int, help="확정 여유 초 (설정 [minute] confirm_margin_seconds, 기본 2)")
+    p.add_argument("--slippage", required=True, help="불리 슬리피지 비율 (CP-030 D-164 기본 0.001). 기본값 없음 — 사용 값 기록")
+    p.add_argument("--fee", default=None, help="수수료율 (기본: config/m2/market.paper.toml [costs] commission_rate)")
+    p.add_argument("--limits", default="config/m2/limits.paper.toml", help="M2 한도 파일 (저장소 기준)")
+    p.add_argument("--market-config", default="config/m2/market.paper.toml", help="M2 시장 설정 (저장소 기준)")
+    p.add_argument("--out", default="var/backtest", help="결과 폴더 (저장소 기준 또는 절대 경로)")
+    p.add_argument("--data-source", default="", help="보고서 데이터 출처 문구 (기본: 파일 이름·크기)")
+    p.add_argument("--validate", action="store_true", help="D-222 검증 6창(2020~2025) 실행 — --start/--end 무시")
+    p.add_argument("--skip-variants", action="store_true", help="검증: ±20%% 파라미터 변형(C-4) 생략 — 판정표에 미실행 표시")
+    ns = p.parse_args(argv)
+    try:
+        if ns.margin_seconds < 0 or ns.margin_seconds > 59:
+            raise ConfigError("--margin-seconds: 0~59")
+        strat, params = load_strategy(StrategyDeploy(ns.strategy, (root / ns.params).resolve(), ()))
+        if "CAP-TRG-02" not in strat.spec.capabilities:
+            raise ConfigError("1분봉 백테스트는 CAP-TRG-02 주기 판정 전략만 (파라미터 period_minutes, CP-037 D-219)")
+        # 실운영 조립 지점과 같은 일정 검사 (M2·주기 격자·주문 창 — app.wiring.period_grid_of, DP-79)
+        period_grid_of(StrategyInput(strat, params, ()), Market.M2.value, margin=timedelta(seconds=ns.margin_seconds))
+        check = getattr(strat, "validate_deploy", None)
+        problems = check(params, ()) if check is not None else []
+        if problems:
+            raise ConfigError([f"배포 검사: {x}" for x in problems])
+        if ns.symbol not in TESTNET_RULES:
+            raise ConfigError(f"거래 규칙이 없는 심볼: {ns.symbol}")
+        rules, pairs = {ns.symbol: TESTNET_RULES[ns.symbol]}, {ns.symbol: PAIRS[ns.symbol]}
+        problems = spot_rule_problems([StrategyInput(strat, params, ())], rules, pairs)
+        if problems:
+            raise ConfigError([f"거래 규칙 검사: {x}" for x in problems])
+        market = load_m2_market(root / ns.market_config)
+        limits = load_limits_file(root / ns.limits, market=Market.M2).limits
+        caps = load_capabilities(root / "docs" / "capabilities.md")
+        final_from = load_validation_settings(root / "config" / "validation.toml")["final_from"]
+        data_path = Path(ns.data)
+        if not data_path.is_file():
+            raise ConfigError(f"데이터 파일 없음: {data_path.name}")
+        size = data_path.stat().st_size
+        source = ns.data_source or f"바이낸스 공개 1m klines CSV `{data_path.name}` ({size} 바이트, A-110)"
+        fee = Decimal(ns.fee) if ns.fee else market.commission_rate
+        out = Path(ns.out) if Path(ns.out).is_absolute() else root / ns.out
+        if not ns.validate and (ns.start is None or ns.end is None):
+            raise ConfigError("--start·--end가 필요 (--validate가 아니면)")
+        start = date.fromisoformat(ns.start) if ns.start else date(2020, 1, 1)
+        end = date.fromisoformat(ns.end) if ns.end else date(2020, 1, 1)
+        cfg = MinuteBacktestConfig(
+            run_id=ns.run_id, strategy=strat, params=dict(params), account_limits=limits, rules=rules, pairs=pairs,
+            cost_rates=CostRates(commission_rate=fee, sell_tax_rate=Decimal("0"), cost_quantum=QUOTE_PRECISION),
+            symbol=ns.symbol, source=partial(iter_binance_minute_csv, data_path, final_from=final_from),  # type: ignore[arg-type]
+            start=start, end=end, initial_cash=Decimal(ns.cash), out_dir=out, slippage=Decimal(ns.slippage),
+            lookback_bars=ns.lookback, margin=timedelta(seconds=ns.margin_seconds), buy_buffer=market.buy_buffer,
+            sell_buffer=market.sell_buffer, quote_max_age=timedelta(seconds=market.quote_max_age_seconds),
+            final_from=final_from, caps=caps, data_version=f"{data_path.parent.name}/{data_path.name} {size}B",  # type: ignore[arg-type]
+            data_source=source)
+        if ns.validate:
+            v_out = out / ns.run_id
+            if v_out.exists():
+                raise ConfigError(f"같은 실행 ID의 검증 폴더가 이미 있음: {v_out.name}")
+            res = run_minute_validation(MinuteValidationInputs(
+                template=cfg, out_dir=v_out, data_start=first_minute_start(data_path), skip_variants=ns.skip_variants,
+                command=" ".join(["backtest --market M2 --interval 1m", *argv])))
+            print(f"검증 완료: {v_out / 'validation.md'} — 판정 {res['verdict']['verdict']}")
+            return 0
+        result = run_minute_backtest(cfg)
+    except (ConfigError, BacktestError, ValueError, InvalidOperation, OSError) as exc:
+        print(f"백테스트 거부: {exc}")
+        return 2
+    days = result.result.days
+    import time as _t
+    t1 = _t.perf_counter()
+    bad = perturbation_check_minute(cfg, days[:: max(1, len(days) // 10)])
+    t2 = _t.perf_counter()
+    repro_run = run_minute_backtest(replace(cfg, run_id=f"{cfg.run_id}-repro"))
+    reproducible = repro_run.result.digest == result.result.digest
+    result.extras = {"perturbation_seconds": round(t2 - t1, 2), "repro_seconds": repro_run.seconds}
+    run_dir = out / cfg.run_id
+    (run_dir / "report.md").write_text(render_minute_report(cfg, result, reproducible=reproducible, lookahead_bad=bad),
+                                       encoding="utf-8", newline="\n")
+    (run_dir / "summary.json").write_text(json.dumps(summary_of(cfg, result, reproducible=reproducible,
+                                                                lookahead_bad=bad), ensure_ascii=False, indent=2)
+                                          + "\n", encoding="utf-8", newline="\n")
+    print(f"백테스트 완료: {run_dir / 'report.md'} (판정 {result.decisions}회, 거래 {len(result.result.trades)}건, "
+          f"{result.seconds}초)")
+    return 0
+
+
+__all__ = ["backtest_m2_main", "backtest_m2_minute_main", "load_binance_daily_csv", "TESTNET_RULES"]
