@@ -1,0 +1,11 @@
+# btc-trend v1 PAPER 축소판 — 운영 M2 PAPER 한도(A-064: L1 0.5%·L2 10%·L7 100 USDT) 안에서 동작 확인용. 규칙·기간 값은 params-v1과 같고 크기만 축소.
+strategy = "btc-trend"
+version = 1
+
+[params]
+entry_n = 25          # 돌파 기간(탐색 고원 15~40일 중 가운데, 24경계 중앙 MDD 낮은 쪽)
+exit_n = 50           # 청산 50일선(탐색에서 가장 일관된 축)
+stop_atr = "2"        # 손절 ATR14 × 2
+risk_ratio = "0.004"  # L1 0.5% 안(게이트는 지정가×1.005 기준으로 재므로 여유)
+max_weight = "0.10"   # 운영 M2 PAPER L2 10% 안(실제 크기는 order_cap 95 USDT가 정함)
+order_cap = "95"         # 운영 M2 PAPER L7 100 USDT 안
