@@ -131,19 +131,25 @@ class M2World:
                  day: date = DAY, limits: AccountLimits | None = None, rules: bool = True,
                  behavior: FakeBehavior = FakeBehavior.FILL,
                  strategies: Sequence[StrategyInput] | None = None, symbol_rule: SymbolRules | None = None,
-                 price: str = "10000.00") -> None:
+                 price: str = "10000.00", sym: str = SYM, base_asset: str = "TSTA",
+                 caps: dict | None = None) -> None:
+        """sym·base_asset·caps: 기본은 가상 심볼 TSTA-USDT·가상 능력 표. 실제 심볼 이름(예: BTCUSDT, T-M2-15 시험)과
+        실제 docs/capabilities.md 표로도 같은 조립을 쓸 수 있게 둔다(가격·잔고는 여전히 가상값)."""
         self.tmp = tmp
         self.db = tmp / "trading.db"
         self.day = day
+        self.sym = sym
+        self.pairs = PAIRS if (sym, base_asset) == (SYM, "TSTA") else {sym: (base_asset, QUOTE_ASSET)}
+        self.caps = caps if caps is not None else CAPS_M2
         self.clock = FixedClock(utc(day, 0, 30))
         self.broker = FakeSpotBroker(now=self.clock.now, behavior=behavior)
         self.broker.grant = {QUOTE_ASSET: BASELINE}
-        self.broker.spot_fees = FakeSpotFees(rate=FEE_RATE, pairs=PAIRS)
+        self.broker.spot_fees = FakeSpotFees(rate=FEE_RATE, pairs=self.pairs)
         self.broker.ioc_limit = True
-        self.facts = SpotFactsStore(now=self.clock.now, universe=(SYM,))
+        self.facts = SpotFactsStore(now=self.clock.now, universe=(sym,))
         if rules:
-            self.facts.load_rules({SYM: symbol_rule or symbol_rules(SYM)})
-        self.facts.set_daily_bars(SYM, m2_bars(day - timedelta(days=60), day + timedelta(days=10)))
+            self.facts.load_rules({sym: symbol_rule or symbol_rules(sym)})
+        self.facts.set_daily_bars(sym, m2_bars(day - timedelta(days=60), day + timedelta(days=10)))
         self.price = Decimal(price)
         self.limits = limits or m2_limits()
         self.strategies = list(strategies) if strategies is not None else [
@@ -154,10 +160,10 @@ class M2World:
     def build(self) -> Engine:
         self.repo = Repository(self.db, Mode.BACKTEST, order_identity=OrderIdentity.SYMBOL)
         return build_engine(mode=Mode.BACKTEST, repo=self.repo, clock=self.clock, broker=self.broker, store=None,
-                            account=ACCOUNT, account_limits=self.limits, gate_settings=SETTINGS, caps=CAPS_M2,
+                            account=ACCOUNT, account_limits=self.limits, gate_settings=SETTINGS, caps=self.caps,
                             strategies=self.strategies, kill_file=self.tmp / "KILL", clock_health=ClockOk(),
                             alert_thresholds=(10, 5), market="M2",
-                            spot=SpotInputs(self.facts, PAIRS, QUOTE_ASSET, M2_ORDER_POLICY,
+                            spot=SpotInputs(self.facts, self.pairs, QUOTE_ASSET, M2_ORDER_POLICY,
                                             cash_max_age=timedelta(minutes=3)))
 
     def set_baseline(self) -> None:
@@ -165,7 +171,7 @@ class M2World:
         self.engine.account_state.set_baseline(ACCOUNT, BASELINE, self.clock.now())  # type: ignore[attr-defined]
 
     def quote(self, age_seconds: int = 0) -> None:
-        self.facts.update_quote(Quote(SYM, self.price, self.clock.now() - timedelta(seconds=age_seconds)))
+        self.facts.update_quote(Quote(self.sym, self.price, self.clock.now() - timedelta(seconds=age_seconds)))
 
     def at(self, hh: int, mm: int, ss: int = 0, *, day: date | None = None, quote: bool = True) -> None:
         self.clock._now = utc(day or self.day, hh, mm, ss)  # noqa: SLF001
