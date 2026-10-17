@@ -241,3 +241,10 @@
 - 실행: 사용자, m2-binance 브랜치 m2/run2(406ab6a, CP-036 T-045~T-049), `scripts/run-m2.py`, 주문 스위치 꺼짐(감사 ORDER_SWITCH orders_enabled=false), 배포 전략 없음 — 승인 A-109 ②.
 - **PV-M2-06(B-U9) 부분 확인: HMAC 키로 WS API `userDataStream.subscribe.signature` 구독 성공** — 감사 기록 RECONCILE trigger STREAM_RECONNECT(20:27:06, 스트림 ONLINE 보고 뒤에만 실행되는 대조), K5 없음(에이전트 M2 DB 읽기 전용 조회). 서명 방식 세부·24시간 교체 동작은 관찰 중.
 - 시작 대조: K4 — BTCUSDT 수량(내부 0·브로커 1, 테스트넷 지급분)·USDT 기준선 없음(QUOTE_BASELINE_MISSING 10000) 2건, 예상대로(A-106 Q-1·D-210). 시계 오차 0.0148초. 주기 대조 1분 간격 정상.
+
+## 14. ② 실서버 공개 시세 — 상장폐지 심볼 확인 실험 (2026-10-18, A-117)
+- 방법: 에이전트, 공개 GET만(키·서명 없음), 호출 약 10회. api.binance.com `/api/v3/klines`·`/api/v3/exchangeInfo`, data.binance.vision 공개 파일.
+- **상장폐지 심볼도 `/api/v3/klines`로 과거 일봉 조회됨**: BCCUSDT(2018-05-01~), VENUSDT(2018-06-22~), BCHSVUSDT(2018-11-16~) 모두 200·OHLCV+taker 열.
+- **`/api/v3/exchangeInfo`에 상장폐지 USDT 심볼이 status=BREAK로 남아 있음**: USDT 호가 심볼 765개 = TRADING 511 + BREAK 254 (BCCUSDT·VENUSDT·BCHSVUSDT = BREAK). → "그 당시" 후보 목록을 exchangeInfo 전체(TRADING+BREAK)로 만들 수 있음. 단 아주 오래전 폐지 심볼이 목록에서 완전히 지워졌는지는 미확인.
+- data.binance.vision: 월별 일봉 zip 공개(BCCUSDT 2018-06·BCHSVUSDT 2019-01·BTCUSDT 2018-06 200, VENUSDT 2018-05는 404 — 상장 전 달). 목록 페이지는 자바스크립트로 별도 저장소(다른 호스트)를 읽어 이번 범위로는 목록 불가. klines로 충분하므로 필수 아님.
+- 규모 추정: USDT 심볼 765개 일봉 전 기간 ≈ 심볼당 1~4쪽, 약 2,300회 호출·10~20분, 약 100MB 이하(추정).
