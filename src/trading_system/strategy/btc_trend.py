@@ -9,12 +9,14 @@
   탐색에서 결과에 거의 영향이 없었다: 50일선 청산이 먼저 작동. 무상태라 현재 ATR 사용, 차이는 대조 실행에서 확인.)
 - 우선순위: EXIT-2 > EXIT-1 > ENTRY-1. 종목마다 신호 1개. 피라미딩 없음.
 순수 함수. 파일·네트워크·현재 시각·난수 없음.
+[운영 보강 F-2·F-3, A-114 ③ 2026-10-18] 시작 검사 validate_rules(DP-54 형식 — LOT_STEP = 거래소 LOT_SIZE stepSize)와
+배포 검사 validate_deploy(판정 시각 정확히 1개·M2 전용)를 추가했다. 판정·수량·신호 논리는 바꾸지 않았다.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import timedelta
+from datetime import time, timedelta
 from decimal import ROUND_FLOOR, Decimal
 
 from trading_system.domain.enums import OrderType, RequestType
@@ -77,6 +79,31 @@ def build_spec() -> StrategySpec:
 class BtcTrendV1:
     def __init__(self) -> None:
         self.spec = build_spec()
+
+    @staticmethod
+    def validate_rules(params: ParamValues, lot_step: Decimal, min_notional: Decimal) -> list[str]:
+        """[F-2, A-114 ③] 거래소 규칙(exchangeInfo 적재값)과의 일치 검사. M2 시작 때 app.wiring.spot_rule_problems가 유니버스
+        심볼마다 부른다(CP-036 D-209·DP-54 형식: params, LOT_SIZE stepSize, minNotional — m2_verify와 같은 서명). 문제가 있으면
+        시작 거부(주문 0). 이 전략은 수량 내림 단위를 모듈 고정값 LOT_STEP으로 쓰므로 그것이 stepSize와 같아야 한다.
+        min_notional은 서명 호환용으로 받는다 — 수량이 변동이라 사전 고정 검사가 없다(내림 뒤 미달 주문은 게이트·거래소 거부)."""
+        del params, min_notional
+        if LOT_STEP != lot_step:
+            return [f"전략 고정 LOT_STEP {LOT_STEP:f} ≠ 거래소 LOT_SIZE stepSize {lot_step:f}"]
+        return []
+
+    def validate_deploy(self, params: ParamValues, eval_times: tuple[time, ...], *, market: str | None = None) -> list[str]:
+        """[F-3, A-114 ③] 시작 전 배포 검사: 판정은 UTC 하루 1회 전제(전일 확정 일봉·그날 시가) → 판정 시각 정확히 1개.
+        M2(바이낸스 현물) 전용 → 명세 markets가 정확히 ("M2",)이고, market을 주면 "M2"여야 한다.
+        (현재 호출부 app.main·backtest_m2_cli는 market을 넘기지 않는다 — 그때는 명세 markets 검사만 적용.)"""
+        del params
+        problems: list[str] = []
+        if tuple(self.spec.markets) != ("M2",):
+            problems.append(f"markets {tuple(self.spec.markets)} — 이 전략은 M2 전용")
+        if market is not None and market != "M2":
+            problems.append(f"배포 시장 {market!r} — 이 전략은 M2 전용")
+        if len(eval_times) != 1:
+            problems.append(f"판정 시각은 정확히 1개여야 함 (UTC 하루 1회 판정) — 현재 {len(eval_times)}개")
+        return problems
 
     def evaluate(self, snapshot: EvaluationSnapshot, params: ParamValues) -> list[Signal]:
         entry_n, exit_n = int(str(params["entry_n"])), int(str(params["exit_n"]))

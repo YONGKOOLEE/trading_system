@@ -1,6 +1,6 @@
 # 전략 btc-trend v1
 
-> **운영 복사본 (2026-10-17, T-M2-17 후보 검토, 미등록·미승인)** — 원본 `C:\AI\strategy-lab\candidates\btc_trend\strategy.md`(sha256 앞 16자리 `cac6ef8893469c79`). 본문은 원본 그대로이며 운영 수정은 아래 한 곳만: **F-1** 필요 능력 CAP-INS-01 → CAP-INS-05(크립토 현물 — CAP-INS-01은 M2 "해당 없음"이라 등록 거부, 규칙·계산 변경 없음). 운영 검토·판정표 초안: [validation-v1.md](validation-v1.md). 전략실 인계 원문: [lab-handoff.md](lab-handoff.md).
+> **운영 복사본 (2026-10-17, T-M2-17 후보 검토, 미등록·미승인)** — 원본 `C:\AI\strategy-lab\candidates\btc_trend\strategy.md`(sha256 앞 16자리 `cac6ef8893469c79`). 본문은 원본 그대로이며 운영 수정은 아래 한 곳만: **F-1** 필요 능력 CAP-INS-01 → CAP-INS-05(크립토 현물 — CAP-INS-01은 M2 "해당 없음"이라 등록 거부, 규칙·계산 변경 없음). 코드에는 **F-2·F-3 운영 보강(A-114 ③, 2026-10-18)** — 시작 검사 `validate_rules`(고정 LOT_STEP = 거래소 LOT_SIZE stepSize, 아니면 시작 거부)와 배포 검사 `validate_deploy`(판정 시각 정확히 1개·M2 전용, 아니면 거부)를 추가했다. 판정·크기·청산 규칙은 바뀌지 않았다. 전략실 통지: [lab-notice.md](lab-notice.md). 운영 검토·판정표 초안: [validation-v1.md](validation-v1.md). 전략실 인계 원문: [lab-handoff.md](lab-handoff.md).
 
 - 상태: 전략실 연구 후보(운영 미등록). 탐색 결과는 판정이 아님 — 운영 M2 절차(검증 실행기·최종 확인·PAPER)로만 확정.
 - 작성: 2026-10-17 전략실. 근거 research/2026-10-17-crypto-design.md, 사용자 결정 2026-10-17(1회 위험 5%, 피라미딩 없음).

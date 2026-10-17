@@ -1,6 +1,7 @@
 # btc-trend v1 검토 — 복사·구조 시험·백테스트 재현·공통 성과 기준 판정표 초안·LIVE 한도 제안
 
-- 문서: `docs/strategies/btc-trend/validation-v1.md` / 버전 v0.1 / 상태 **draft (미승인)** / 작성 2026-10-17 에이전트(T-M2-17 후보 검토, 브랜치 `feat/btc-trend-v1-review`, 기준 커밋 45348bc)
+- 문서: `docs/strategies/btc-trend/validation-v1.md` / 버전 v0.2 / 상태 **draft (미승인)** / 작성 2026-10-17 에이전트(T-M2-17 후보 검토, 브랜치 `feat/btc-trend-v1-review`, 기준 커밋 45348bc)
+- v0.2 변경(2026-10-18, A-114 ③): §1 표 btc_trend.py 행, §1.1 F-2·F-3 행(처리 → **운영 보강 완료**), §1.2 시험·실행 결과 추가 문단, §8 F-1~F-3 결정 행. 영향 ID: T-M2-17, D-209·DP-54. 판정·백테스트 수치(§2~§7)는 변경 없음 — 거래 논리 무변경.
 - **생존편향 포함 — 모든 수익은 과대 추정된 것으로 본다** (CP-030 D-168·C-7). 유니버스 = U-A BTCUSDT 1개, 2026-10 시점에 사후 선택(A-096). 아래 모든 "통과·충족"은 "과대 추정 가능"으로 읽는다.
 - **이 문서는 기록과 판정 제안이다.** 전략 등록·BACKTEST_PASSED 전환·PAPER 투입·한도 변경·C-2 처리 방식(CP 여부)은 모두 사용자 결정(A-ID)이다. 에이전트는 등록·배포·설정 변경을 하지 않았다.
 - 판정 기준: CP-030(A-082·A-083) C-1~C-8을 CP-037 D-222(A-113 Q-5 (가))의 M2 창으로 적용 — 워크포워드 **검증 2020~2025 6창**(1년씩, 창마다 10,000 USDT·무보유 새로 시작, 워밍업은 창 시작 전 봉), 최종 확인 2026-01-01 이후(미사용).
@@ -11,7 +12,7 @@
 
 | 운영 경로 | 전략실 원본 (읽기만) | sha256 앞 16자리 (원본 = 복사 직후) | 운영 수정 |
 |---|---|---|---|
-| `src/trading_system/strategy/btc_trend.py` | `candidates/btc_trend/strategy.py` | `ad9ccb50c1c6b033` | **F-1** (아래) — 능력 목록 1개 값만 |
+| `src/trading_system/strategy/btc_trend.py` | `candidates/btc_trend/strategy.py` | `ad9ccb50c1c6b033` | **F-1** (아래) — 능력 목록 1개 값만. **F-2·F-3**(A-114 ③) — 검사 메서드 2개 추가, 판정·수량·신호 무변경 |
 | `config/strategies/btc-trend-v1.toml` | `params-v1.toml` | `f8c98ac16e05d02b` | 없음 |
 | `config/strategies/btc-trend-v1-paper.toml` | `params-v1-paper.toml` | `f4cbb96beb4fd655` | 없음 (위치는 m2-verify와 같이 `config/strategies/` — 전략실 제안 `config/m2/strategies/`는 따르지 않음) |
 | `docs/strategies/btc-trend/strategy.md` | `strategy.md` | `cac6ef8893469c79` | 머리 안내 1단락 + CAP 줄 F-1 표시 |
@@ -22,8 +23,8 @@
 | ID | 내용 | 영향 | 처리 |
 |---|---|---|---|
 | **F-1** | 명세 능력에 `CAP-INS-01`(국내 상장주식) 선언. capabilities.md M2 열에서 "해당 없음" → **운영 M2 백테스트 CLI가 전략 등록 단계에서 거부**(`백테스트 거부: 전략 등록 거부: CAP-INS-01: M2에서 해당 없음 — BACKTEST 등록 불가`, 종료 코드 2 — 수정 전 실제 실행). 전략실 도구(m2_quick.py)는 등록 검사를 거치지 않아 드러나지 않음 | 등록 불가(구조 규칙 D-004) | **불가피 수정 — `CAP-INS-05`(크립토 현물)로 교체**, 코드 주석·strategy.md에 "[운영 수정 F-1]" 표시. 신호·크기·청산 로직 무변경. 시험이 원본 값의 거부도 확인 |
-| **F-2** (결함 후보) | `validate_rules` 없음. 수량 단위 `LOT_STEP = 0.00001`이 코드에 고정 → 거래소 stepSize가 달라져도 시작 규칙 검사(D-209·DP-54 형식)가 이 전략을 건너뜀(`spot_rule_problems` 문제 0) | 규칙 불일치 상태로 시작 가능(주문은 거래소·G10에서 거부될 수 있음). CLAUDE.md §8-10 "불확실하면 주문하지 않는다" 취지와 어긋남 | **수정하지 않음**. 시험: 현재 동작 기록 1개 + 요구 동작 xfail(strict) 1개 |
-| **F-3** (결함 후보) | `validate_deploy` 없음. 전략은 하루 1회 판정(UTC 00:15) 전제인데 판정 시각 여러 개 배포를 막지 않음 | 여러 시각 배포 시 같은 봉으로 하루 여러 번 판정(진입 시세가 달라짐) | **수정하지 않음**. xfail(strict) 1개 |
+| **F-2** (결함 후보) | `validate_rules` 없음. 수량 단위 `LOT_STEP = 0.00001`이 코드에 고정 → 거래소 stepSize가 달라져도 시작 규칙 검사(D-209·DP-54 형식)가 이 전략을 건너뜀(`spot_rule_problems` 문제 0) | 규칙 불일치 상태로 시작 가능(주문은 거래소·G10에서 거부될 수 있음). CLAUDE.md §8-10 "불확실하면 주문하지 않는다" 취지와 어긋남 | **운영 보강 완료 (A-114 ③, 2026-10-18)**: `BtcTrendV1.validate_rules(params, lot_step, min_notional)` — m2_verify와 같은 서명(DP-54). 고정 `LOT_STEP` ≠ 거래소 stepSize이면 문제 1개 → `spot_rule_problems`가 시작 거부. min_notional은 서명 호환용(수량 변동이라 사전 검사 없음). 전략실 통지: [lab-notice.md](lab-notice.md) |
+| **F-3** (결함 후보) | `validate_deploy` 없음. 전략은 하루 1회 판정(UTC 00:15) 전제인데 판정 시각 여러 개 배포를 막지 않음 | 여러 시각 배포 시 같은 봉으로 하루 여러 번 판정(진입 시세가 달라짐) | **운영 보강 완료 (A-114 ③, 2026-10-18)**: `BtcTrendV1.validate_deploy(params, eval_times, *, market=None)` — 판정 시각 정확히 1개가 아니면 거부, 명세 markets ≠ ("M2",)이면 거부, market을 주면 "M2" 외 거부. 현재 호출부(app.main·backtest_m2_cli)는 market을 넘기지 않아 그때는 명세 markets 검사만 적용(M2 엔진은 wiring의 markets 검사도 있음) |
 | 관찰 | EXIT-2 손절은 무상태라 현재 ATR 기준(전략실 탐색 도구는 진입 ATR). 손절가 신호값(진입 시 시세 − 2·ATR)과 실제 청산 판정 기준이 다름 | 결과 영향 작음(전체 구간 EXIT-2 4건/40) | 기록만 |
 | 관찰 | PAPER 등록: M2 능력 CAP-TRG-01·DAT-01·ORD-01·INS-05가 "검증 중" → `validate_spec(…, PAPER)` 거부(검증 전략 예외 D-212는 m2-verify 계열 전용) | **btc-trend PAPER 등록은 M2 능력 "지원" 승격(T-M2-16 뒤) 또는 별도 결정 전까지 불가** | 시험으로 현재 상태 기록 |
 
@@ -31,6 +32,7 @@
 - 새 파일 `tests/scenario/test_tm2_17_btc_trend.py`: 파라미터 파일 2개 적재·값, 규칙 표·우선순위, 등록(BACKTEST 통과·PAPER 거부·원본 CAP-INS-01 거부), LOT_STEP = 테스트넷 실측 stepSize(`backtest_m2_cli.TESTNET_RULES`, broker-specs/binance-spot.md §12), PAPER 축소판 주문 금액 ≤ L7 100 USDT·≥ minNotional 5(가격 4점), F-2·F-3 xfail strict, 규칙 동작(돌파 진입·수량 내림·손절가, 같은 값은 진입 안 함, EXIT-1, EXIT-2 우선, 수동 보유 무시). 가상 가격.
 - 실행: `.venv\Scripts\python -m pytest -q tests/scenario/test_tm2_17_btc_trend.py tests/architecture` → **40 passed, 2 xfailed** (구조 시험 27개 포함 — 전략 모듈 import 규칙·금지 호출 위반 없음).
 - 전체 회귀(`.venv\Scripts\python -m pytest -q`, `-m` 없음 — A-084 ⑥ 전체 집합): **3216 passed, 1 skipped, 2 xfailed, 실패 0** (25분 19초). 건너뜀 1 = 기존 test_t042_allocation.py:290(CAP-DAT-05d 반영 전 고정용), xfail 2 = 위 F-2·F-3.
+- **v0.2 (A-114 ③)**: F-2·F-3 xfail 2개와 "현재 동작 = 건너뜀" 기록 시험 1개를 통과 시험으로 바꾸고 거부 경우를 추가 — validate_rules 일치(파라미터 파일 2개)·불일치 stepSize 4가지·규칙 없는 심볼 거부, validate_deploy 통과·판정 시각 0·2·같은 시각 2·3개 거부·market M1/M3/빈 값/소문자 거부·명세 markets 변조 거부·문제 동시 보고. 실행 결과는 이 변경의 커밋 메시지에 기록.
 
 ## 2. 전략실 결과 재현 (요청 2) — 운영 M2 백테스트 CLI
 
@@ -144,7 +146,7 @@ C:\AI\trading_system\trading_system\.venv\Scripts\python.exe -m trading_system.a
 | 구분 | 내용 | 차단 | 확인 주체 |
 |---|---|---|---|
 | 결정 | C-2 처리(§4 A/B/C, CP 여부) | **BACKTEST_PASSED→PAPER 전환 차단**(현재 판단 불가) | 사용자 |
-| 결정 | F-1 수정 수용, F-2·F-3 보강 여부(전략실 수정 후 재인계 또는 운영 보강 — 규칙 아님, 버전 판단 D-011) | 비차단(등록 전 확정 권장) | 사용자 |
+| ~~결정~~ 완료 | F-1 수정 수용, F-2·F-3 운영 보강 — **A-114 ③**(2026-10-18) 결정·보강 완료. 규칙·파라미터 무변경이라 버전 v1 유지(D-011 판단: 시작·배포 검사만 추가). 전략실 통지문 [lab-notice.md](lab-notice.md) — 전달은 사용자 | — | 사용자 |
 | 결정 | C-4 order_cap +20% 0건 변형(PAPER L7 상호작용) 해석 | C-2 결정 뒤 의미 | 사용자 |
 | 선행 | M2 능력 "검증 중" → PAPER 등록 불가(D-212 예외는 검증 전략 전용). T-M2-16 뒤 능력 승격 또는 별도 결정 | **PAPER 등록 차단** | 사용자 |
 | 선행 | D-232 PAPER-1 시작 조건(D-222 판정표 "통과", Demo 재결정, 28 UTC일) | T-M2-17 PAPER-1 차단 | 사용자 |

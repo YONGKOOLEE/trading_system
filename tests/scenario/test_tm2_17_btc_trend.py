@@ -5,8 +5,8 @@
 - 명세: 규칙 표(EXIT-2 > EXIT-1, ENTRY-1), 실제 docs/capabilities.md 기준 BACKTEST 등록 통과(운영 수정 F-1 뒤),
   PAPER 등록은 M2 능력 "검증 중"이라 거부(현재 상태 기록 — 등록·PAPER 투입은 사용자 별도 승인).
 - 거래 규칙(테스트넷 실측, broker-specs/binance-spot.md §12 = backtest_m2_cli.TESTNET_RULES)과 전략 고정값 LOT_STEP·PAPER 크기 정합.
-- 시작 규칙 검사(D-209·DP-54 형식 validate_rules)·배포 검사(validate_deploy): 이 전략에 **없음** → 결함 후보 F-2·F-3
-  (xfail strict — 고치면 XPASS로 알려 준다. 고칠지·어떻게 고칠지는 사용자 결정).
+- 시작 규칙 검사(D-209·DP-54 형식 validate_rules)·배포 검사(validate_deploy): 전략실 원본에 없던 결함 F-2·F-3을
+  운영에서 보강(A-114 ③, 거래 논리 변경 없음) — 일치·통과 경우와 거부 경우를 확인한다.
 - 규칙 동작 최소 확인(가상 봉): 돌파 진입·수량 내림·손절가, EXIT-1, EXIT-2 우선, 수동 보유 무시.
 가격·잔고는 가상값이다. 네트워크 없음.
 """
@@ -96,27 +96,68 @@ def test_paper_size_stays_inside_l7_and_above_min_notional(price: str) -> None:
     assert s.quantity * p >= RULES.min_notional
 
 
-@pytest.mark.xfail(strict=True, reason="결함 후보 F-2: validate_rules 없음 — LOT_STEP 고정값이 거래소 stepSize와 달라도 "
-                                       "시작 규칙 검사(D-209)가 잡지 못함. 수정 여부는 사용자 결정")
-def test_start_rule_check_rejects_mismatched_step() -> None:
+# --- F-2 validate_rules (A-114 ③, DP-54 형식: params, LOT_SIZE stepSize, minNotional) ----------------
+
+def test_start_rule_check_accepts_matching_step() -> None:
+    """F-2 수정: 시작 규칙 검사(D-209)가 이 전략의 validate_rules를 부른다. 고정 LOT_STEP = 거래소 stepSize이면 문제 0."""
+    for name in ("btc-trend-v1.toml", "btc-trend-v1-paper.toml"):
+        assert BtcTrendV1.validate_rules(params(name), RULES.lot_step, RULES.min_notional) == []
+        si = [StrategyInput(BtcTrendV1(), params(name), EVAL)]
+        assert spot_rule_problems(si, {SYM: RULES}, PAIRS) == []
+
+
+@pytest.mark.parametrize("step", ["0.0001", "0.000001", "0.00000001", "1"])
+def test_start_rule_check_rejects_mismatched_step(step: str) -> None:
+    """거래소 stepSize가 전략 고정 LOT_STEP과 다르면 시작 거부(주문 0) — 더 굵은 단위(거래소 거부)·더 가는 단위(조용한 차이) 모두."""
+    p = params("btc-trend-v1-paper.toml")
+    [problem] = BtcTrendV1.validate_rules(p, D(step), RULES.min_notional)
+    assert "LOT_STEP" in problem and step in problem
+    si = [StrategyInput(BtcTrendV1(), p, EVAL)]
+    out = spot_rule_problems(si, {SYM: replace(RULES, lot_step=D(step))}, PAIRS)
+    assert len(out) == 1 and SYM in out[0] and "LOT_STEP" in out[0]
+
+
+def test_start_rule_check_refuses_symbol_without_rules() -> None:
+    """규칙이 적재되지 않은 심볼은 불일치로 본다(불확실하면 시작하지 않음) — validate_rules가 있어 이제 이 경로를 탄다."""
     si = [StrategyInput(BtcTrendV1(), params("btc-trend-v1-paper.toml"), EVAL)]
-    assert spot_rule_problems(si, {SYM: RULES}, PAIRS) == []
-    assert spot_rule_problems(si, {SYM: replace(RULES, lot_step=D("0.0001"))}, PAIRS)   # 불일치면 시작 거부여야 함
+    out = spot_rule_problems(si, {}, PAIRS)
+    assert len(out) == 1 and "거래 규칙 없음" in out[0]
 
 
-def test_start_rule_check_current_behaviour_is_skip() -> None:
-    """현재 동작 기록: validate_rules가 없어 spot_rule_problems가 이 전략을 건너뛴다(불일치 규칙이어도 문제 0)."""
-    assert not hasattr(BtcTrendV1, "validate_rules")
-    si = [StrategyInput(BtcTrendV1(), params("btc-trend-v1-paper.toml"), EVAL)]
-    assert spot_rule_problems(si, {SYM: replace(RULES, lot_step=D("0.0001"))}, PAIRS) == []
+# --- F-3 validate_deploy (A-114 ③): 하루 1회 판정·M2 전용 ---------------------------------------------
+
+def test_deploy_check_accepts_single_daily_eval() -> None:
+    s = BtcTrendV1()
+    for name in ("btc-trend-v1.toml", "btc-trend-v1-paper.toml"):
+        assert s.validate_deploy(params(name), EVAL) == []
+        assert s.validate_deploy(params(name), (time(1, 0),), market="M2") == []
 
 
-@pytest.mark.xfail(strict=True, reason="결함 후보 F-3: validate_deploy 없음 — 하루 1회 판정 전제인데 판정 시각 여러 개 배포를 "
-                                       "막지 않음. 수정 여부는 사용자 결정")
-def test_deploy_check_requires_single_daily_eval() -> None:
-    check = BtcTrendV1.validate_deploy  # type: ignore[attr-defined]
-    assert check(params("btc-trend-v1-paper.toml"), EVAL) == []
-    assert check(params("btc-trend-v1-paper.toml"), (time(0, 15), time(12, 0)))
+@pytest.mark.parametrize("times", [(), (time(0, 15), time(12, 0)), (time(0, 15), time(0, 15)),
+                                   (time(0, 15), time(8, 0), time(16, 0))])
+def test_deploy_check_requires_exactly_one_daily_eval(times: tuple[time, ...]) -> None:
+    [problem] = BtcTrendV1().validate_deploy(params("btc-trend-v1-paper.toml"), times)
+    assert "정확히 1개" in problem and f"{len(times)}개" in problem
+
+
+@pytest.mark.parametrize("market", ["M1", "M3", "", "m2"])
+def test_deploy_check_refuses_market_other_than_m2(market: str) -> None:
+    [problem] = BtcTrendV1().validate_deploy(params("btc-trend-v1-paper.toml"), EVAL, market=market)
+    assert "M2" in problem
+
+
+def test_deploy_check_refuses_spec_whose_markets_are_not_m2_only() -> None:
+    """명세 markets가 M2만이 아니면(예: 복사·수정 중 M1 추가) 판정 시각과 무관하게 거부."""
+    s = BtcTrendV1()
+    for markets in (("M1",), ("M1", "M2"), ()):
+        s.spec = replace(s.spec, markets=markets)
+        problems = s.validate_deploy(params("btc-trend-v1-paper.toml"), EVAL)
+        assert len(problems) == 1 and "markets" in problems[0], problems
+
+
+def test_deploy_check_reports_all_problems_together() -> None:
+    problems = BtcTrendV1().validate_deploy(params("btc-trend-v1-paper.toml"), (time(0, 15), time(12, 0)), market="M1")
+    assert len(problems) == 2
 
 
 # --- 규칙 동작 (가상 봉) ------------------------------------------------------------------------------
