@@ -8,11 +8,12 @@
   창 안에 빈 분이 있으면 GAP(결측) — 둘 다 그 판정 신호 무효. 바이낸스 결측 분이 "거래 없음"인지 "데이터 없음"인지는
   근거가 없어 [미확인] 보수적으로 무효로 본다(M1 정규장 빈 칸 = 거래 없음과 다름).
 - 품질 (CP-032 D-177과 같은 항목): 같은 시각 중복, 역순(받은 순서는 과거→최신이어야 함), 음수 거래량, 0 이하 가격,
-  고가·저가 모순. 위반이면 호출자가 그 심볼 신호 무효 + K10.
+  고가·저가 모순. 위반이면 호출자가 그 심볼 분봉 입력(신호) 무효 — 정지(K10)는 걸지 않는다(DP-72 개정).
 - 지문: 봉(시작 UTC·OHLCV, Decimal은 정규화한 값)의 SHA-256 — 판정 스냅샷 기록과 저장 봉 재현 확인용(V-293).
 - 주기 격자 (D-219 [제안] 값): 판정 시각 = UTC 00:00 + k×N분 + 확정 여유, N은 1440의 약수, 격자 시각(여유 전)이 주문 창
   (A-064 UTC 00:10~23:50, 양끝 포함) 안일 때만. 늦은 판정 유예 = min(60초, N분의 절반). T-051은 분봉 조회 일정에만 쓰고,
-  엔진 주기 판정(CAP-TRG-02)은 T-052가 같은 격자로 연결한다.
+  엔진 주기 판정(CAP-TRG-02)은 T-052가 같은 격자로 연결한다. 격자 시각이 주문 창 안에 하나도 없는 N(예: 1440 → 00:00뿐)은
+  판정·조회가 영원히 일어나지 않으므로 거부한다 [DP-77] (boundaries_in_window).
 """
 
 from __future__ import annotations
@@ -132,6 +133,14 @@ def check_window(bars: Iterable[MinuteBar], decision_at: datetime, lookback: int
 
 # --- 주기 격자 --------------------------------------------------------------------------------------------
 
+def boundaries_in_window(period_minutes: int, start: time = ORDER_WINDOW[0], end: time = ORDER_WINDOW[1]) -> int:
+    """하루 격자 시각(UTC 00:00 + k×N분, 여유 전) 가운데 주문 창 [start, end](양끝 포함) 안인 개수. N은 1440의 약수."""
+    if isinstance(period_minutes, bool) or not isinstance(period_minutes, int) or period_minutes <= 0:
+        raise ValueError("period_minutes는 양의 정수")
+    lo, hi = start.hour * 60 + start.minute, end.hour * 60 + end.minute
+    return sum(1 for m in range(0, DAY_MINUTES, period_minutes) if lo <= m <= hi)
+
+
 @dataclass(frozen=True)
 class PeriodGrid:
     period_minutes: int
@@ -145,6 +154,10 @@ class PeriodGrid:
             raise ValueError("period_minutes는 1440의 약수인 1~1440 정수")
         if self.margin < timedelta(0) or self.margin >= ONE_MINUTE:
             raise ValueError("확정 여유는 0초 이상 60초 미만")
+        if boundaries_in_window(n, self.window_start, self.window_end) == 0:
+            raise ValueError(f"period_minutes {n}: 격자 시각(UTC 00:00 + k×{n}분)이 주문 창 "
+                             f"{self.window_start:%H:%M}~{self.window_end:%H:%M} 안에 하나도 없다 — 판정·조회가 일어나지 "
+                             "않는다 (DP-77)")
 
     @property
     def grace(self) -> timedelta:

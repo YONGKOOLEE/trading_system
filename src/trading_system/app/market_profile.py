@@ -196,7 +196,9 @@ class SpotProfile(MarketProfile):
                        or e.repo.active_new_intents(e.account, inst, Side.SELL.value))
         yesterday = M2_TIME.local(now).date() - timedelta(days=1)
         data_ok = rules is not None and statuses is not None and bool(bars) and bars[-1].at >= yesterday  # type: ignore[operator]
-        if minute is not None:   # 1분봉 누락·결측·품질 실패·공급 꺼짐 → 그 판정 신호 무효 (D-220)
+        if minute is not None:   # 1분봉 누락·결측·품질 실패·저장 실패·공급 꺼짐 → 그 판정 신호 무효 (D-220)
+            # [T-052 재검토 — CLAUDE.md §8-3, DP-75 (6)] data_ok False면 CAP-DAT-02 전략은 청산(위험 축소) 신호도 내지
+            # 못할 수 있다. 무효 창일 때 청산 신호를 허용할지는 엔진 주기 판정을 연결하는 T-052에서 다시 정한다.
             data_ok = data_ok and minute.ok
         return InstrumentView(inst, daily_bars=bars, minute_bars=minute.bars if minute is not None else (),
                               last_price=q.price if q is not None and q.at <= now else None,

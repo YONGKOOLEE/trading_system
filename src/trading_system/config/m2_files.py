@@ -9,7 +9,8 @@ market:
   [costs]  commission_rate(문자열 비율, 비용 추정용 — 값은 사용자 확인 항목 CP-024 §2.4, 비차단)
   [alerts] reject_surge_count·reject_surge_minutes (M1과 같은 형식)
   [minute] (선택, CP-037 D-220 T-056 전 별도 승인 — 표가 없으면 꺼짐) 테스트넷 1m klines 주기 조회 [DP-71]:
-           enabled(bool, 기본 false), period_minutes(1440의 약수 정수 — 판정 격자 N분), lookback_bars(1~997 — 판정 창),
+           enabled(bool, 기본 false), period_minutes(1440의 약수 정수 — 판정 격자 N분, 격자 시각 UTC 00:00 + k×N분이
+           주문 창 00:10~23:50 안에 하나 이상 [DP-77] — 1440 거부), lookback_bars(1~997 — 판정 창),
            confirm_margin_seconds(0~59, 기본 2 [제안]), approval("A-숫자" — enabled = true면 필수, PAPER 시작 때
            docs/approvals.md 표에 그 행이 있어야 한다 — app/startup.m2_paper_problems).
   M1의 price_limit_ratio·sell_tax_rate는 M2에 없다(가격제한폭 없음, 매도세 0 — D-104, §2.6).
@@ -26,6 +27,8 @@ import tomllib
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+
+from trading_system.domain.minute_series import ORDER_WINDOW, boundaries_in_window
 
 from .errors import ConfigError
 from .market_file import parse_alert_settings
@@ -119,6 +122,11 @@ def parse_minute(raw: object) -> M2MinuteSettings:
         period = _int_in(raw.get("period_minutes"), "minute.period_minutes", 1, 1440, problems)
         if period is not None and 1440 % period:
             problems.append("minute.period_minutes: 1440의 약수여야 함 (UTC 00:00 기준 격자)")
+        elif period is not None and boundaries_in_window(period) == 0:
+            lo, hi = ORDER_WINDOW
+            problems.append(f"minute.period_minutes: {period}분 격자 시각(UTC 00:00 + k×{period}분)이 주문 창 "
+                            f"{lo:%H:%M}~{hi:%H:%M} 안에 없다 — 판정·분봉 조회가 일어나지 않는다. 720 이하 1440의 약수를 "
+                            "쓴다 (DP-77)")
     if "lookback_bars" in raw or enabled:
         lookback = _int_in(raw.get("lookback_bars"), "minute.lookback_bars", 1, MAX_MINUTE_LOOKBACK, problems)
     margin = _int_in(raw.get("confirm_margin_seconds", 2), "minute.confirm_margin_seconds", 0, 59, problems)

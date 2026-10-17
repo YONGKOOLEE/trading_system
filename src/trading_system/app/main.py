@@ -491,7 +491,12 @@ def _run_m2(mode: Mode, base: Path, cfg, caps, strategies: list[StrategyInput], 
     relay = M2Relay(app.account)
     minute_cfg = cfg.market_settings.minute
     minute_book = minutes = None
-    if minute_cfg.enabled:   # [CP-037 D-220] 1분봉 주기 조회 — 기본 꺼짐, 켜려면 승인 A-ID(시작 검사 m2_paper_problems)
+    if minute_cfg.enabled and mode is not Mode.PAPER:
+        # [DP-77] BACKTEST는 바이낸스 연결이 없어 1m klines를 조회하지 않는다 — "켜짐"처럼 보이지 않게 알리고 분봉 경로를
+        # 만들지 않는다(CAP-DAT-02 전략 분봉 입력 = DISABLED, 신호 무효).
+        print(f"분봉 조회 없음: 모드 {mode.value} — 설정 [minute] enabled는 PAPER에서만 1m klines를 조회한다 "
+              "(CAP-DAT-02 전략 분봉 입력은 DISABLED, DP-77)")
+    elif minute_cfg.enabled:   # [CP-037 D-220] 1분봉 주기 조회 — 기본 꺼짐, 켜려면 승인 A-ID(시작 검사 m2_paper_problems)
         from datetime import timedelta
 
         from trading_system.marketdata.spot_minute import SpotMinuteBook
@@ -561,8 +566,7 @@ def _run_m2(mode: Mode, base: Path, cfg, caps, strategies: list[StrategyInput], 
         clock_monitor.check()
         clock_monitor._halts = QueuedHalts(engine)    # noqa: SLF001 — 이후 점검은 감시 스레드 → 정지는 큐로 (D-215)
         facts.halts = QueuedHalts(engine)              # 공급 품질 실패(K10)는 큐 경유 (D-215, RV-22)
-        if minute_book is not None:
-            minute_book.halts = QueuedHalts(engine)    # 1분봉 품질 실패(K10)도 큐 경유 (CP-037 D-220)
+        if minute_book is not None:   # 1분봉 품질 실패는 정지 없음 — 분봉 입력 무효·감사·묶음 경고 (DP-72 개정)
             print(f"분봉 조회 켜짐: {minute_cfg.period_minutes}분 격자, 창 {minute_cfg.lookback_bars}봉, 확정 여유 "
                   f"{minute_cfg.confirm_margin_seconds}초, 승인 {minute_cfg.approval} (CP-037 D-220)")
         io_threads = run.threads(stop) if run is not None else []

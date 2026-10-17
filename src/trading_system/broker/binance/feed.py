@@ -25,7 +25,8 @@ binance-feed를 보고 긴급 알림 + K5(D-215).
   `GET /api/v3/klines?interval=1m&limit=lookback+3`(한 쪽, weight 2, 시세 우선순위 = 같은 WeightBudget 최하위). 같은 격자
   시각은 한 번만, 유예(min(60초, N분의 절반))를 넘겨 늦은 단계면 조회하지 않고 minute_skipped만 센다.
 - 해석: market.parse_klines(필드·경계·closeTime·순서·중복·OHLC·음수 검사) → domain MinuteBar(adjusted = NO_ADJUSTMENT)
-  → minute_sink.put_minute_bars. 해석 실패 = 품질 실패 → minute_sink.minute_quality_failed(K10은 받는 쪽, 공통 계약).
+  → minute_sink.put_minute_bars. 해석 실패 = 품질 실패 → minute_sink.minute_quality_failed(받는 쪽이 분봉 입력 무효 처리 —
+  정지 없음, DP-72 개정).
   조회 실패·보류는 다른 조회와 같은 경보 묶음(DP-67). 닫힌 봉 거르기·저장은 받는 쪽(marketdata/spot_minute)이 한다.
 - 시작 예산 검사: minute_budget_problem — 심볼 수 × 쪽 × weight 2 × (창 길이 안 격자 수)가 내부 예산(rateLimits 50%)의
   10%를 넘으면 시작 거부(D-220 [제안], run_start.M2RunConnector) [DP-74].
@@ -51,7 +52,7 @@ from trading_system.domain.strategy import Bar
 from trading_system.domain.trading_rules import SymbolRules as DomainRules
 
 from .alert_throttle import ConditionAlerts
-from .client import BinanceQueryError, BinanceSpotClient
+from .client import WEIGHT, BinanceQueryError, BinanceSpotClient
 from .facts import BinanceMarketFacts
 from .market import KlineDataError, parse_avg_price, parse_klines
 from .weights import BUDGET_FRACTION_PERCENT, RateLimits
@@ -115,8 +116,10 @@ class MinutePlan:
         return math.ceil(self.limit / KLINE_PAGE_MAX)
 
 
-def minute_budget_problem(limits: RateLimits, symbols: int, plan: MinutePlan, weight: int = 2) -> str | None:
-    """분봉 조회가 REQUEST_WEIGHT 창마다 내부 예산(한도 × 50%)의 10%를 넘으면 거부 사유, 아니면 None (D-220)."""
+def minute_budget_problem(limits: RateLimits, symbols: int, plan: MinutePlan) -> str | None:
+    """분봉 조회가 REQUEST_WEIGHT 창마다 내부 예산(한도 × 50%)의 10%를 넘으면 거부 사유, 아니면 None (D-220).
+    klines 한 쪽 weight는 client.WEIGHT["klines"] 하나만 쓴다(조회 때 차감하는 값과 같은 상수)."""
+    weight = WEIGHT["klines"]
     for w in limits.weight:
         per_window = max(1, math.ceil(w.interval_ms / (plan.period_minutes * 60_000)))
         need = symbols * plan.pages * weight * per_window

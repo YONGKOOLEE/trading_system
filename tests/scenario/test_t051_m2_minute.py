@@ -19,7 +19,7 @@ from tests.support.binance_exchange_sim import RATE_LIMITS, ExchangeSim
 from tests.support.binance_ws_fake import FakeWsApi
 from tests.support.m2_engine_world import CAPS_M2, M2World, fixed_spec
 from trading_system.app.m2_minutes import (
-    MINUTE_CAPABILITY, MINUTE_INPUT_AUDIT, MINUTE_SOURCE, MINUTE_STORED_AUDIT, M2MinuteInput,
+    MINUTE_CAPABILITY, MINUTE_INPUT_AUDIT, MINUTE_QUALITY_AUDIT, MINUTE_SOURCE, MINUTE_STORED_AUDIT, M2MinuteInput,
 )
 from trading_system.app.main import run_main
 from trading_system.app.wiring import StrategyInput
@@ -90,7 +90,7 @@ class MinuteRig:
                                         now_ms=lambda: _ms(self.clock), sleep=lambda s: None,
                                         on_alert=lambda k, m: self.feed_alerts.append((k, m)))
         self.facts = SpotFactsStore(now=self.clock.now, universe=(SYM,))
-        self.book = SpotMinuteBook((SYM,), halts=self.halts, account=ACCOUNT)
+        self.book = SpotMinuteBook((SYM,), account=ACCOUNT)
         self.feed = BinanceFeed(self.client, self.facts, [SYM], now=self.clock.now,
                                 alert=lambda k, m: self.feed_alerts.append((k, m)), account=ACCOUNT,
                                 minute=plan, minute_sink=self.book if plan is not None else None)
@@ -273,17 +273,18 @@ GOOD = "100", "101", "99", "100", "1"
     _rows((utc(0, 29), "100", "99", "98", "100", "1")),                            # 고가 < 시가 (고저 모순)
     _rows((utc(0, 29), "0", "101", "0", "100", "1")),                              # 0 이하 가격
 ], ids=["duplicate", "reverse", "negative", "high-low", "zero-price"])
-def test_v292_quality_violation_symbol_invalid_and_k10(rig: MinuteRig, body: list) -> None:
+def test_v292_quality_violation_symbol_invalid_no_halt(rig: MinuteRig, body: list) -> None:
+    # 재검토(DP-72 개정): 이전 기대값 "K10 1건" → K10 없음. K10은 종목 범위라 분봉을 쓰지 않는 전략(m2-verify)의 진입까지
+    # 막고 일봉 data_ok 보고(UTC 하루 1회)로만 풀렸다. 이제 CAP-DAT-02 전략의 그 심볼 분봉 입력만 무효 + 감사·묶음 경고.
     rig.at(utc(0, 25, 2))                                        # 정상 수신 먼저
     rig.sim.minute_body = body
     rig.at(utc(0, 30, 2))
-    assert [(h, inst) for h, _, inst in rig.halts.items] == [("K10", SYM)]
     res = rig.decide(utc(0, 30, 2))[SYM]
     assert not res.ok and res.record["status"] == "QUALITY" and res.bars == ()
+    assert rig.halts.items == [] and rig.audits(MINUTE_QUALITY_AUDIT)
     rig.sim.minute_body = None                                   # 다음 정상 수신 → 판정 입력은 다시 유효
     rig.at(utc(0, 35, 2))
     assert rig.decide(utc(0, 35, 2), "ev-next")[SYM].ok
-    assert len(rig.halts.items) == 1                              # K10 해제는 이 경로가 하지 않는다
 
 
 def test_book_ignores_symbols_outside_universe_and_bounds_pending() -> None:
