@@ -66,6 +66,10 @@ class ExchangeSim:
         self.server_offset_ms = 0
         self.market_down = False      # 시세 조회 5XX (T-048 공급 지연)
         self.bad_klines = False       # klines OHLC 불일치 (품질 실패 → K10)
+        # 1m klines (CP-037 T-051): 지금 분(진행 중 봉)까지 limit개. 빠질 봉 시작(ms)·종가 가감·본문 통째 교체
+        self.minute_skip: set[int] = set()
+        self.minute_close_delta = D("0")
+        self.minute_body: object | None = None
         self.sent: list[tuple[str, str, dict[str, str]]] = []
         self.headers: list[dict[str, str]] = []
         self._next_order = 1000
@@ -159,7 +163,9 @@ class ExchangeSim:
         return _reply(200, {"mins": 5, "price": fmt(self.price[p["symbol"]]), "closeTime": self.now_ms()})
 
     def _get_klines(self, p: dict) -> RawReply:
-        """1d 봉: 오늘(진행 중) 포함 limit개. bad_klines면 OHLC 불일치 행(품질 실패)."""
+        """1d 봉: 오늘(진행 중) 포함 limit개. bad_klines면 OHLC 불일치 행(품질 실패). 1m은 _minute_klines."""
+        if p.get("interval") == "1m":
+            return self._minute_klines(p)
         day = 86_400_000
         today = self.now_ms() // day * day
         n = int(p.get("limit", "500"))
@@ -170,6 +176,26 @@ class ExchangeSim:
             high = fmt(self.price[p["symbol"]] + 100) if not self.bad_klines else fmt(D("1"))
             rows.append([o, px, high, fmt(self.price[p["symbol"]] - 100), px, "10.0", o + day - 1, "1000", 10,
                          "5.0", "500", "0"])
+        return _reply(200, rows)
+
+    def _minute_klines(self, p: dict) -> RawReply:
+        """1m 봉: 지금 분(진행 중) 포함 limit개(BN §8 행 형식), minute_skip 봉은 뺀다. minute_body면 그 본문 그대로."""
+        if self.market_down:
+            return _reply(503, None)
+        if self.minute_body is not None:
+            return _reply(200, self.minute_body)
+        step = 60_000
+        cur = self.now_ms() // step * step
+        n = int(p.get("limit", "500"))
+        px = self.price[p["symbol"]]
+        rows = []
+        for i in range(n - 1, -1, -1):
+            o = cur - i * step
+            if o in self.minute_skip:
+                continue
+            c = px + self.minute_close_delta
+            rows.append([o, fmt(px), fmt(max(px, c) + 10), fmt(min(px, c) - 10), fmt(c), "1.5", o + step - 1, "90000",
+                         7, "0.7", "42000", "0"])
         return _reply(200, rows)
 
     # --- 주문 변경 ---------------------------------------------------------------------------------

@@ -34,6 +34,8 @@ from trading_system.monitoring.spot_cash import QuoteBalance, SpotAccountFacts
 from trading_system.reconciliation.reconciler import ReconcileResult
 from trading_system.reconciliation.spot import STARTUP, SpotReconcileCycle, SpotReconcileSchedule
 
+from .m2_minutes import MINUTE_CAPABILITY, M2MinuteInput, MinuteInput, disabled_inputs
+
 if TYPE_CHECKING:
     from .engine import Engine, LoadedStrategy, _UbInput
 
@@ -95,8 +97,9 @@ class SpotProfile(MarketProfile):
 
     def __init__(self, *, facts: SpotFacts, pairs: Mapping[str, tuple[str, str]], quote_asset: str,
                  account_facts: SpotAccountFacts, order_policy: SpotOrderPolicy, dust: DustHandler,
-                 schedule: SpotReconcileSchedule) -> None:
+                 schedule: SpotReconcileSchedule, minutes: M2MinuteInput | None = None) -> None:
         self.facts = facts
+        self.minutes = minutes   # [CP-037 D-220] 1분봉 저장·판정 입력 (None = 분봉 공급 꺼짐)
         self.pairs = dict(pairs)
         self.quote_asset = quote_asset
         self.account_facts = account_facts
@@ -157,6 +160,8 @@ class SpotProfile(MarketProfile):
         if done:
             e._last_reconcile = now   # noqa: SLF001
             self.review_dust(sorted(self.pairs))
+        if self.minutes is not None:   # [CP-037 D-220] 받은 1분봉 → minute_bar (판정·실행 스레드만 저장소에 쓴다)
+            self.minutes.flush(e.repo, e.alerts, now)
 
     def after_start(self, now: datetime) -> None:
         self.schedule.mark(STARTUP, now)   # 시작 대조는 복구 판정(RecoveryChecker)이 이미 했다
@@ -172,12 +177,16 @@ class SpotProfile(MarketProfile):
         spec = ls.strategy.spec
         insts = sorted(set(spec.universe) & set(self.pairs)) if spec.universe_method == "U-A" else sorted(self.pairs)
         self.review_dust(insts)   # 매도 뒤 남은 dust는 보유 없음 취급 전에 소유권부터 정리 (D-102)
-        views = tuple(self._view(i, ls.owner, now) for i in insts)
+        mins: dict[str, MinuteInput] = {}
+        if MINUTE_CAPABILITY in spec.capabilities:   # [CP-037 D-220] CAP-DAT-02 선언 전략만 1분봉 입력
+            mins = (self.minutes.inputs(e.repo, e.alerts, insts, at, now, ev_id) if self.minutes is not None
+                    else disabled_inputs(e.repo, insts, at, now, ev_id))
+        views = tuple(self._view(i, ls.owner, now, mins.get(i)) for i in insts)
         snap = EvaluationSnapshot(ev_id, self.market.value, e.account, now, base, views, e._next_eval(ls, at))  # noqa: SLF001
         lots = {i: r.lot_step for i in insts if (r := self.facts.rules(i)) is not None}
         return snap, lots
 
-    def _view(self, inst: str, owner: str, now: datetime) -> InstrumentView:
+    def _view(self, inst: str, owner: str, now: datetime, minute: MinuteInput | None = None) -> InstrumentView:
         e = self._engine
         rules = self.facts.rules(inst)
         bars = final_daily_bars(self.facts.daily_bars(inst), now)
@@ -187,7 +196,10 @@ class SpotProfile(MarketProfile):
                        or e.repo.active_new_intents(e.account, inst, Side.SELL.value))
         yesterday = M2_TIME.local(now).date() - timedelta(days=1)
         data_ok = rules is not None and statuses is not None and bool(bars) and bars[-1].at >= yesterday  # type: ignore[operator]
-        return InstrumentView(inst, daily_bars=bars, last_price=q.price if q is not None and q.at <= now else None,
+        if minute is not None:   # 1분봉 누락·결측·품질 실패·공급 꺼짐 → 그 판정 신호 무효 (D-220)
+            data_ok = data_ok and minute.ok
+        return InstrumentView(inst, daily_bars=bars, minute_bars=minute.bars if minute is not None else (),
+                              last_price=q.price if q is not None and q.at <= now else None,
                               statuses=statuses or frozenset(), position=self._position(inst, owner, rules),
                               has_pending_order=pending, data_ok=data_ok)
 

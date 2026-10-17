@@ -20,7 +20,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from trading_system.domain.sinks import HaltControl
@@ -32,7 +32,7 @@ from .client import (
     TESTNET_REST, AfterSendError, BinanceQueryError, BinanceSpotClient, PreSendError, Transport,
 )
 from .facts import BinanceMarketFacts
-from .feed import BinanceFeed, FeedPlan, SpotSink
+from .feed import BinanceFeed, FeedPlan, MinutePlan, MinuteSink, SpotSink, minute_budget_problem
 from .preflight import BOOTSTRAP_RATE_LIMITS, TESTNET_HOST
 from .run_guard import RunGuard
 from .signing import Credentials, SecretLike
@@ -188,8 +188,21 @@ class M2RunConnector:
 
     def __call__(self, *, api_key: SecretLike, secret: SecretLike, symbols: Sequence[str], account: str,
                  now: Callable[[], datetime], sleep: Callable[[float], None], orders_enabled: bool, sink: SpotSink,
-                 on_alert: Alert, on_stream_state: Callable[[str, str], None], halts: HaltControl) -> M2Run | str:
-        """준비 실패면 거부 사유(문자열) — 호출자는 시작 거부(종료 코드 2)."""
+                 on_alert: Alert, on_stream_state: Callable[[str, str], None], halts: HaltControl,
+                 minute_plan: tuple[int, int, int] | None = None, minute_sink: MinuteSink | None = None) -> M2Run | str:
+        """준비 실패면 거부 사유(문자열) — 호출자는 시작 거부(종료 코드 2).
+
+        minute_plan = (판정 주기 N분, 판정 창 봉 수, 확정 여유 초) — 1m klines 조회(CP-037 D-220). 기본 None = 조회 없음.
+        app이 설정 `[minute] enabled = true`와 승인 A-ID를 확인했을 때만 넘긴다. 호출 예산 시작 검사를 넘지 못하면 거부."""
+        minute: MinutePlan | None = None
+        if minute_plan is not None:
+            if minute_sink is None:
+                return "1m klines 조회 계획에 받는 쪽이 없다 (D-220)"
+            try:
+                minute = MinutePlan(minute_plan[0], minute_plan[1], timedelta(seconds=minute_plan[2]))
+            except (ValueError, IndexError, TypeError) as exc:
+                return f"1m klines 조회 계획 오류: {exc} (D-220)"
+
         def now_ms() -> int:
             return int(now().timestamp() * 1000)
         feed_box: list[BinanceFeed] = []
@@ -200,8 +213,12 @@ class M2RunConnector:
                 on_filter_reject=lambda s: feed_box[0].request_rules_reload(s) if feed_box else None)
         except SpotStartRefused as exc:
             return str(exc)
+        if minute is not None:
+            problem = minute_budget_problem(session.rate_limits, len(symbols), minute)
+            if problem is not None:
+                return problem
         feed = BinanceFeed(session.client, sink, symbols, now=now, alert=on_alert, halts=halts, account=account,
-                           plan=self._plan)
+                           plan=self._plan, minute=minute, minute_sink=minute_sink if minute is not None else None)
         feed_box.append(feed)
         stream = UserStream(self._ws_connect, session.credentials, session.adapter, now_ms=now_ms,
                             on_state=lambda st, m: on_stream_state(st.value, m), url=self._ws_url)

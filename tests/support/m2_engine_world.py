@@ -132,9 +132,11 @@ class M2World:
                  behavior: FakeBehavior = FakeBehavior.FILL,
                  strategies: Sequence[StrategyInput] | None = None, symbol_rule: SymbolRules | None = None,
                  price: str = "10000.00", sym: str = SYM, base_asset: str = "TSTA",
-                 caps: dict | None = None) -> None:
+                 caps: dict | None = None, minutes: object | None = None) -> None:
         """sym·base_asset·caps: 기본은 가상 심볼 TSTA-USDT·가상 능력 표. 실제 심볼 이름(예: BTCUSDT, T-M2-15 시험)과
-        실제 docs/capabilities.md 표로도 같은 조립을 쓸 수 있게 둔다(가격·잔고는 여전히 가상값)."""
+        실제 docs/capabilities.md 표로도 같은 조립을 쓸 수 있게 둔다(가격·잔고는 여전히 가상값).
+        minutes: M2 분봉 판정 입력(app.m2_minutes.M2MinuteInput, CP-037 T-051). 기본 None = 분봉 없음(기존 조립 그대로)."""
+        self.minutes = minutes
         self.tmp = tmp
         self.db = tmp / "trading.db"
         self.day = day
@@ -164,7 +166,7 @@ class M2World:
                             strategies=self.strategies, kill_file=self.tmp / "KILL", clock_health=ClockOk(),
                             alert_thresholds=(10, 5), market="M2",
                             spot=SpotInputs(self.facts, self.pairs, QUOTE_ASSET, M2_ORDER_POLICY,
-                                            cash_max_age=timedelta(minutes=3)))
+                                            cash_max_age=timedelta(minutes=3), minutes=self.minutes))
 
     def set_baseline(self) -> None:
         """기준선 확정(D-103 — 실운영은 사람이 T-049 도구로). 거래소 USDT와 같은 값."""

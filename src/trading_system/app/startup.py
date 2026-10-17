@@ -207,6 +207,11 @@ def m2_paper_problems(cfg: M2StartupConfig) -> tuple[list[str], OrderSwitch | No
                                     approvals_file=cfg.repo_root / APPROVALS_FILE)
     except ConfigError as exc:
         out.extend(exc.problems if getattr(exc, "problems", None) else [str(exc)])
+    minute = cfg.market_settings.minute
+    if minute.enabled and minute.approval not in recorded_approval_ids(cfg.repo_root / APPROVALS_FILE):
+        # [CP-037 D-220, DP-71] 테스트넷 1m klines 주기 조회는 별도 승인 — 기록된 A-ID만 켠다(주문 스위치 DP-66과 같은 방식)
+        out.append(f"config/m2/market.paper.toml [minute] approval {minute.approval}가 승인 기록 표"
+                   f"({cfg.repo_root / APPROVALS_FILE})의 A-ID 행에 없다 — 1분봉 주기 조회는 기록된 승인으로만 켠다")
     return out, switch
 
 

@@ -461,15 +461,19 @@ def run_m2_main(root: Path, mode: Mode, base: Path, max_seconds: float | None, c
         lock.release()
 
 
-def _m2_connect(cfg, pairs, clock, facts, relay, switch, connector):  # type: ignore[no-untyped-def]
+def _m2_connect(cfg, pairs, clock, facts, relay, switch, connector, minute_book=None):  # type: ignore[no-untyped-def]
     """PAPER 바이낸스 연결 묶음 (D-209): 서버 시각 → exchangeInfo(규칙·rateLimits) → 예산 → 어댑터·스트림·공급.
-    비밀 값은 Secret 그대로 넘긴다(읽어 출력하지 않음). 준비 실패면 거부 사유(문자열)."""
+    비밀 값은 Secret 그대로 넘긴다(읽어 출력하지 않음). 준비 실패면 거부 사유(문자열).
+    minute_book: [CP-037 D-220] 설정 [minute] enabled일 때만 — 1m klines 조회 계획(N분·창·여유)과 받는 쪽을 넘긴다."""
     from .startup import BINANCE_SECRET_KEYS
     s = cfg.secrets
+    m = cfg.market_settings.minute
+    minute = ({"minute_plan": (m.period_minutes, m.lookback_bars, m.confirm_margin_seconds),
+               "minute_sink": minute_book} if minute_book is not None else {})
     return connector(api_key=s.get(BINANCE_SECRET_KEYS[0]), secret=s.get(BINANCE_SECRET_KEYS[1]),
                      symbols=tuple(pairs), account=cfg.app.account, now=clock.now, sleep=time.sleep,
                      orders_enabled=bool(switch is not None and switch.enabled), sink=facts, on_alert=relay.alert,
-                     on_stream_state=relay.stream_state, halts=relay)
+                     on_stream_state=relay.stream_state, halts=relay, **minute)
 
 
 def _run_m2(mode: Mode, base: Path, cfg, caps, strategies: list[StrategyInput], pairs, gate_settings,  # type: ignore[no-untyped-def]
@@ -485,9 +489,20 @@ def _run_m2(mode: Mode, base: Path, cfg, caps, strategies: list[StrategyInput], 
     clock = SystemClock()
     facts = SpotFactsStore(now=clock.now, universe=tuple(pairs))
     relay = M2Relay(app.account)
+    minute_cfg = cfg.market_settings.minute
+    minute_book = minutes = None
+    if minute_cfg.enabled:   # [CP-037 D-220] 1분봉 주기 조회 — 기본 꺼짐, 켜려면 승인 A-ID(시작 검사 m2_paper_problems)
+        from datetime import timedelta
+
+        from trading_system.marketdata.spot_minute import SpotMinuteBook
+
+        from .m2_minutes import M2MinuteInput
+        margin = timedelta(seconds=minute_cfg.confirm_margin_seconds)
+        minute_book = SpotMinuteBook(tuple(pairs), margin=margin, account=app.account)
+        minutes = M2MinuteInput(minute_book, lookback_bars=minute_cfg.lookback_bars, margin=margin)
     run = None
     if mode is Mode.PAPER:
-        run = _m2_connect(cfg, pairs, clock, facts, relay, switch, connector)
+        run = _m2_connect(cfg, pairs, clock, facts, relay, switch, connector, minute_book)
         if isinstance(run, str):
             print(f"시작 거부(주문 없음): {run} (D-209)")
             return 2
@@ -535,7 +550,7 @@ def _run_m2(mode: Mode, base: Path, cfg, caps, strategies: list[StrategyInput], 
                                   fallback_log=base / "logs" / "alerts-fallback.log",
                                   reconcile_every=_minutes(app.reconcile_minutes),
                                   requery_wait=lambda: time.sleep(REQUERY_WAIT_SECONDS), market=Market.M2.value,
-                                  spot=SpotInputs(facts, pairs, cfg.universe.quote_asset, policy))
+                                  spot=SpotInputs(facts, pairs, cfg.universe.quote_asset, policy, minutes=minutes))
         except ConfigError as exc:
             print(f"시작 거부(주문 없음): {exc}")
             return 2
@@ -546,6 +561,10 @@ def _run_m2(mode: Mode, base: Path, cfg, caps, strategies: list[StrategyInput], 
         clock_monitor.check()
         clock_monitor._halts = QueuedHalts(engine)    # noqa: SLF001 — 이후 점검은 감시 스레드 → 정지는 큐로 (D-215)
         facts.halts = QueuedHalts(engine)              # 공급 품질 실패(K10)는 큐 경유 (D-215, RV-22)
+        if minute_book is not None:
+            minute_book.halts = QueuedHalts(engine)    # 1분봉 품질 실패(K10)도 큐 경유 (CP-037 D-220)
+            print(f"분봉 조회 켜짐: {minute_cfg.period_minutes}분 격자, 창 {minute_cfg.lookback_bars}봉, 확정 여유 "
+                  f"{minute_cfg.confirm_margin_seconds}초, 승인 {minute_cfg.approval} (CP-037 D-220)")
         io_threads = run.threads(stop) if run is not None else []
         from .telegram_run import M2_CHAT_KEY, M2_TOKEN_KEY, telegram_threads
         io_threads += telegram_threads(engine, repo, mode is Mode.PAPER and app.telegram_enabled, cfg.secrets, clock,

@@ -53,6 +53,7 @@ from trading_system.monitoring.spot_cash import SpotAccountFacts
 from trading_system.reconciliation.spot import SpotReconcileCycle, SpotReconcileSchedule, SpotReconciler
 
 from .engine import AccountState, Engine, LoadedAllocation, LoadedStrategy
+from .m2_minutes import M2MinuteInput
 from .market_profile import SpotFacts, SpotProfile
 
 BROKER_ENV = {Mode.BACKTEST: "fake", Mode.PAPER: "mock"}
@@ -91,6 +92,7 @@ class SpotInputs:
     quote_asset: str
     order_policy: SpotOrderPolicy
     cash_max_age: timedelta = timedelta(minutes=3)
+    minutes: M2MinuteInput | None = None   # [CP-037 D-220] 1분봉 저장·판정 입력. None = 분봉 공급 꺼짐(기본)
 
 
 def spot_execution(repo: Repository, broker: BrokerAdapter, clock: Clock, kill_file: Path, gate: Gate, *,
@@ -337,7 +339,7 @@ def _build_spot_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: Br
                                account_limits.daily_reference_time, market_time=M2_TIME)
     schedule = SpotReconcileSchedule(reconcile_every, M2_TIME, account_limits.daily_reference_time)
     profile = SpotProfile(facts=facts, pairs=spot.pairs, quote_asset=spot.quote_asset, account_facts=acct,
-                          order_policy=spot.order_policy, dust=dust, schedule=schedule)
+                          order_policy=spot.order_policy, dust=dust, schedule=schedule, minutes=spot.minutes)
     reconciler.balance_listeners.append(profile.observe_balances)
     ops.prepare = profile.prepare_ops   # [CP-036 D-211] 운영 요청도 M2 주문 조건(유형·가격·dust·수량 단위)을 탄다
     profile.cycle = SpotReconcileCycle(reconciler, account, schedule, on_day_close=profile.day_closed)

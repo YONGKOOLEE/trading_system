@@ -8,6 +8,10 @@ market:
            server_time_warn_ms(정수 밀리초, A-064 500)
   [costs]  commission_rate(문자열 비율, 비용 추정용 — 값은 사용자 확인 항목 CP-024 §2.4, 비차단)
   [alerts] reject_surge_count·reject_surge_minutes (M1과 같은 형식)
+  [minute] (선택, CP-037 D-220 T-056 전 별도 승인 — 표가 없으면 꺼짐) 테스트넷 1m klines 주기 조회 [DP-71]:
+           enabled(bool, 기본 false), period_minutes(1440의 약수 정수 — 판정 격자 N분), lookback_bars(1~997 — 판정 창),
+           confirm_margin_seconds(0~59, 기본 2 [제안]), approval("A-숫자" — enabled = true면 필수, PAPER 시작 때
+           docs/approvals.md 표에 그 행이 있어야 한다 — app/startup.m2_paper_problems).
   M1의 price_limit_ratio·sell_tax_rate는 M2에 없다(가격제한폭 없음, 매도세 0 — D-104, §2.6).
 universe:
   quote_asset = "USDT" (계좌 기준 통화 A-055), symbols = ["<기초자산>USDT", ...] — 거래소 심볼 이름(대문자·숫자).
@@ -43,6 +47,22 @@ class Universe:
 
 
 @dataclass(frozen=True)
+class M2MinuteSettings:
+    """1m klines 주기 조회 설정 (CP-037 D-220). 기본 꺼짐 — 켜는 것은 사용자(별도 승인 A-ID)."""
+
+    enabled: bool = False
+    period_minutes: int | None = None
+    lookback_bars: int | None = None
+    confirm_margin_seconds: int = 2
+    approval: str | None = None
+
+
+MINUTE_KEYS = ("enabled", "period_minutes", "lookback_bars", "confirm_margin_seconds", "approval")
+MAX_MINUTE_LOOKBACK = 997          # klines 한 쪽(limit 1000) − 여유 3 (broker/binance/feed.MAX_MINUTE_LOOKBACK과 같음)
+_APPROVAL_ID = re.compile(r"A-\d{3,}")
+
+
+@dataclass(frozen=True)
 class M2MarketSettings:
     quote_max_age_seconds: int
     buy_buffer: Decimal
@@ -50,6 +70,7 @@ class M2MarketSettings:
     server_time_warn_ms: int
     commission_rate: Decimal
     alerts: tuple[int, int]
+    minute: M2MinuteSettings = M2MinuteSettings()
 
 
 def _ratio(raw: object, name: str, problems: list[str]) -> Decimal | None:
@@ -74,10 +95,49 @@ def _pos_int(raw: object, name: str, problems: list[str]) -> int | None:
     return raw
 
 
+def _int_in(raw: object, name: str, lo: int, hi: int, problems: list[str]) -> int | None:
+    if isinstance(raw, bool) or not isinstance(raw, int) or not lo <= raw <= hi:
+        problems.append(f"{name}: {lo}~{hi} 정수")
+        return None
+    return raw
+
+
+def parse_minute(raw: object) -> M2MinuteSettings:
+    """[minute] 표 (CP-037 D-220). 없으면 꺼짐. 형식 오류·알 수 없는 키면 거부."""
+    if raw is None:
+        return M2MinuteSettings()
+    problems: list[str] = []
+    if not isinstance(raw, dict):
+        raise ConfigError("[minute]: 표여야 함")
+    problems += [f"minute.{k}: 알 수 없는 키" for k in raw if k not in MINUTE_KEYS]
+    enabled = raw.get("enabled", False)
+    if not isinstance(enabled, bool):
+        problems.append("minute.enabled: true/false")
+        enabled = False
+    period = lookback = None
+    if "period_minutes" in raw or enabled:
+        period = _int_in(raw.get("period_minutes"), "minute.period_minutes", 1, 1440, problems)
+        if period is not None and 1440 % period:
+            problems.append("minute.period_minutes: 1440의 약수여야 함 (UTC 00:00 기준 격자)")
+    if "lookback_bars" in raw or enabled:
+        lookback = _int_in(raw.get("lookback_bars"), "minute.lookback_bars", 1, MAX_MINUTE_LOOKBACK, problems)
+    margin = _int_in(raw.get("confirm_margin_seconds", 2), "minute.confirm_margin_seconds", 0, 59, problems)
+    approval = raw.get("approval")
+    if approval is not None and (not isinstance(approval, str) or not _APPROVAL_ID.fullmatch(approval)):
+        problems.append("minute.approval: \"A-숫자\" 형식 (예 \"A-123\")")
+        approval = None
+    elif enabled and approval is None:
+        problems.append("minute.enabled = true인데 approval(1분봉 주기 조회 승인 A-ID)이 없다 — 테스트넷 1m klines 주기 "
+                        "조회는 별도 승인 범위 (CP-037 §4·T-056)")
+    if problems:
+        raise ConfigError(problems)
+    return M2MinuteSettings(enabled, period, lookback, margin if margin is not None else 2, approval)
+
+
 def parse_m2_market(raw: dict) -> M2MarketSettings:
     problems: list[str] = []
     for k in raw:
-        if k not in ("gate", "costs", "alerts"):
+        if k not in ("gate", "costs", "alerts", "minute"):
             problems.append(f"{k}: 알 수 없는 키")
     gate, costs = raw.get("gate"), raw.get("costs")
     if not isinstance(gate, dict):
@@ -99,9 +159,14 @@ def parse_m2_market(raw: dict) -> M2MarketSettings:
         alerts = parse_alert_settings(raw)
     except ConfigError as exc:
         problems += exc.problems
+    minute = M2MinuteSettings()
+    try:
+        minute = parse_minute(raw.get("minute"))
+    except ConfigError as exc:
+        problems += exc.problems
     if problems:
         raise ConfigError(problems)
-    return M2MarketSettings(age, buy, sell, warn, com, alerts)  # type: ignore[arg-type]
+    return M2MarketSettings(age, buy, sell, warn, com, alerts, minute)  # type: ignore[arg-type]
 
 
 def parse_universe(raw: dict) -> Universe:
