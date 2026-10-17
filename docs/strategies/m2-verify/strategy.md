@@ -125,10 +125,10 @@ verification_approval = "A-<전략 승인 ID>"
 - 같은 날 재매수, 체결 0 IOC의 재전송, 실패한 매도의 자동 재시도 — 없음.
 - 시세·지표 기반 판단, 수익 추구, PAPER-1·LIVE 투입, 일부러 장애 만들기 — 없음.
 
-## 백테스트 통과 기준 (04-validation §2.7) — 미결
+## 백테스트 통과 기준 (04-validation §2.7)
 | 항목 | 값 |
 |---|---|
-| A-029 증거(이 시스템 백테스트 1회 오류 없는 실행 기록) | **미결 Q-1**: `app/backtest_m2.py`는 하루 판정 시각 1개(`eval_time`)만 지원해 01:00 진입·04:00 청산 왕복을 실행하지 못한다. 상태 전이 BACKTEST_PASSED에는 증거 파일이 필요(`strategy.py transition --evidence`) |
+| A-029 증거(이 시스템 백테스트 1회 오류 없는 실행 기록) | **실행 기록 작성 [`backtest-v1.md`](backtest-v1.md)** (2026-10-17, A-111 Q-1 (가)): backtest_m2 하루 여러 판정 시각(M1 DP-42 일봉 근사), A-110 공개 일봉 2017-08-17~2025-12-31, 01:00·04:00 UTC — 오류 없음, 왕복 3,058, 게이트 거부 0, 재현성·교란 검사 통과. BACKTEST_PASSED 전이는 사용자 승인 A-ID(`strategy.py transition --evidence`) |
 | 최소 거래 수 / 성과 기준 / 벤치마크 | 해당 없음(검증 전략, 실행 기록만) |
 | 체결 가정·구간 분리 변경 | 없음 (04 2-M2.2 M2 기본 가정) |
 
@@ -162,7 +162,7 @@ C:\AI\trading_system\trading_system\.venv\Scripts\python.exe scripts\strategy.py
 C:\AI\trading_system\trading_system\.venv\Scripts\python.exe scripts\strategy.py show --mode PAPER --market M2
 ```
 - 기대: `등록 통과: m2-verify:1 (PAPER 대상, PAPER-0 검증 승인 A-…)`, 마지막 `show`에 `m2-verify v1 M2 PAPER`. 다른 시장 DB면 `거부(아무것도 쓰지 않음)`(종료 코드 2).
-- 두 번째 줄의 증거 파일 `backtest-v1.md`는 **아직 없다** — Q-1 결정 뒤 만든다. 없으면 `전이 거부: 증거 파일 없음`으로 끝나고 아무것도 바뀌지 않는다.
+- 두 번째 줄의 증거 파일 `backtest-v1.md`는 2026-10-17 작성(A-111 Q-1 (가)) — M2 체크아웃에 이 파일이 있어야 한다(`m2/run` 갱신 뒤). 없으면 `전이 거부: 증거 파일 없음`으로 끝나고 아무것도 바뀌지 않는다.
 
 **3. 기준선 확정 (엔진 정지 중, 처음 한 번 — T-050에서 이미 했으면 건너뜀)**
 ```powershell
@@ -219,7 +219,7 @@ New-Item -ItemType File C:\AI\trading_system\m2-binance\var\paper\STOP
 | B-5 | 승인 | 이 전략 승인 + T-M2-15 주문 전송 승인(별개). 실전 주문 코드·LIVE 승인 아님 | **차단** | 사용자 |
 | B-6 | 결정됨 + 미확인 | D-208(A-106 Q-4 (가)): step 0이면 LOT_SIZE 내림. **MARKET_LOT_SIZE stepSize 0의 거래소 의미는 미확인 — PV-M2-08** 실측이 다르면 CP | 비차단 | PV-M2-08 |
 | B-8 | 해소(브랜치) | 시작 시 `validate_rules` 호출(D-209, DP-54) | — | — |
-| B-11 | 미결 | A-029 백테스트 실행 기록(BACKTEST_PASSED 증거) — backtest_m2 판정 시각 1개 한계(Q-1) | **차단**(상태 PAPER 전이) | 사용자 |
+| B-11 | 증거 작성 | A-029 백테스트 실행 기록 — A-111 Q-1 (가)로 backtest_m2 복수 판정 시각 보강 후 실행, [`backtest-v1.md`](backtest-v1.md). 전이 승인·사용자 확인 항목(슬리피지·수수료 자리 값, 불완전 봉 제외)은 남음 | **차단**(BACKTEST_PASSED 전이 승인 전) | 사용자 |
 | B-12 | 선행 | T-050 관찰 run 결과(PV-M2-12), V-157 잔여 4개(V-02·V-76 부분, V-112·V-127) | **차단** | 사용자 + 구현 |
 | B-9 | 가정 | KST 10:00·13:10 사이 PC·M2 프로세스 가동, 주말 포함 | 비차단 | 사용자 |
 | B-10 | 미확인 | **테스트넷 수수료 적용·수수료 자산(B-U10)** — 미승인 수수료 자산이면 K4(D-101) | 비차단 — PV-M2-07 | PAPER-0 관찰 |
@@ -246,3 +246,4 @@ New-Item -ItemType File C:\AI\trading_system\m2-binance\var\paper\STOP
 |---|---|---|---|
 | v1 초안 | 2026-10-15 | 최초 작성(에이전트, 브랜치 feat/T-M2-15-verify-strategy 36e4b2d). 코드·파라미터·오프라인 시험 포함, 배포 안 함 | draft (미승인) |
 | v1 확정안 | 2026-10-17 | A-110 ①: 새 M2 실행 경로(CP-036, 406ab6a) 기준 갱신 — CAP-INS-05 선언, 실행 경로 연결 표, 등록(D-212)·시작 규칙 검사(D-209)·지급 BTC(A-106 Q-1 (가)) 반영, 하루 왕복 시험을 `build_engine(market="M2")`로 교체, PV-M2 실행 절차, 미확인·차단 갱신. 이전 초안 m2-paper0-verify superseded 표시. 규칙·파라미터 값 변경 없음 | draft (미승인) |
+| v1 확정안 (증거 추가) | 2026-10-17 | A-111 Q-1 (가): 백테스트 실행 기록 `backtest-v1.md` 연결(백테스트 통과 기준 표·B-11·절차 2단계 문구). 규칙·파라미터 값 변경 없음 | draft (미승인) |

@@ -815,8 +815,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     ns, rest = p.parse_known_args(argv)
     root = Path(ns.root).resolve()
     if ns.command == "backtest":
+        if ns.market == "M2":   # T-M2-15 (A-111 Q-1): 바이낸스 공개 일봉, 하루 여러 판정(DP-42 근사)
+            from trading_system.app.backtest_m2_cli import backtest_m2_main
+            return backtest_m2_main(rest, root)
         if ns.market != "M1":
-            p.error("backtest는 M1만 (M2 백테스트는 T-M2-12)")
+            p.error("backtest는 M1·M2만")
         return backtest_main(rest, root)
     if rest:
         p.error(f"알 수 없는 인자: {' '.join(rest)}")
