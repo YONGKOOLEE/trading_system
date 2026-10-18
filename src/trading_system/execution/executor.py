@@ -370,6 +370,8 @@ class Executor:
             # M2: 같은 체결의 보고 금액(Y·quoteQty)이 오면 임시 금액을 확정한다 (D-118). M1 통보는 해당 없음
             if ev.commission_asset is not None or ev.quote_qty is not None:
                 self._recheck_fill_fee(order, fill_key, ev, now)
+            if ev.is_maker is not None:   # M2: 먼저 온 통보(FULL fills)에 isMaker가 없었으면 중복 통보 값을 1번만 기록 (D-267 (4))
+                self._record_late_maker(fill_key, ev.is_maker, now)
             return None
         if ev.quantity <= 0 or ev.price <= 0:
             return self._anomaly(ev, "체결 수량·가격이 0 이하", order.account)
@@ -438,6 +440,13 @@ class Executor:
         elif intent.state is not IntentState.PARTIAL:
             self._set_state(intent.intent_id, IntentState.PARTIAL)
         return None
+
+    def _record_late_maker(self, fill_key: str, is_maker: bool, now: datetime) -> None:
+        """이미 반영한 체결의 중복 통보에 온 isMaker를 감사 FILL_MAKER(참조 = 체결 키)로 체결마다 1건만 남긴다 — 기록 전용,
+        체결·포지션·주문 상태는 바꾸지 않는다 (CP-040 D-267 (4), V-338. FULL 응답 fills에는 maker 필드가 없다 — BN)."""
+        if self._repo.select("SELECT 1 FROM audit_event WHERE kind='FILL_MAKER' AND ref=?", (fill_key,)):
+            return
+        self._repo.audit(now, "FILL_MAKER", "tracker", fill_key, {"is_maker": is_maker})
 
     def _recheck_fill_fee(self, order: BrokerOrderRow, fill_key: str, ev: OrderEvent, now: datetime) -> None:
         """이미 기록한 체결의 다른 경로 통보 (M2: FULL 응답 fills ↔ executionReport ↔ myTrades, D-118·V-150).

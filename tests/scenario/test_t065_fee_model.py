@@ -148,3 +148,34 @@ def test_fill_audit_records_is_maker_when_reported(tmp_path: Path) -> None:
         assert check_invariants(env.repo.connection, Mode.BACKTEST.value) == []
     finally:
         env.repo.close()
+
+
+def test_is_maker_from_later_duplicate_report_recorded_once(tmp_path: Path) -> None:
+    """재검토 지적 2: FULL 응답 fills(isMaker 없음)가 먼저 반영되고 executionReport(m 있음)가 같은 체결의 중복 통보로 오면
+    FILL 감사에는 is_maker가 없다 → 중복 통보의 isMaker를 FILL_MAKER 감사 1건으로 남긴다(기록 전용, 포지션·체결 불변)."""
+    env = build_m2_env(tmp_path)
+    try:
+        original = env.broker.poll_events
+        seen: list[OrderEvent] = []
+
+        def capture() -> list[OrderEvent]:
+            evs = original()
+            seen.extend(e for e in evs if e.kind == "FILL")
+            return evs
+
+        env.broker.poll_events = capture  # type: ignore[method-assign]
+        hold(env, "0.1000")
+        [fill] = seen
+        [first] = [json.loads(e["summary"]) for e in env.repo.audit_events() if e["kind"] == "FILL"]
+        assert "is_maker" not in first
+        held = env.repo.position(fill.account, fill.instrument).quantity
+        env.broker.poll_events = lambda: [replace(fill, is_maker=True)]  # type: ignore[method-assign]
+        env.executor.process_events()
+        env.executor.process_events()                             # 같은 중복 통보가 또 와도 1건
+        makers = [(e["ref"], json.loads(e["summary"])) for e in env.repo.audit_events() if e["kind"] == "FILL_MAKER"]
+        assert len(makers) == 1 and makers[0][1]["is_maker"] is True
+        assert len([e for e in env.repo.audit_events() if e["kind"] == "FILL"]) == 1
+        assert env.repo.position(fill.account, fill.instrument).quantity == held
+        assert check_invariants(env.repo.connection, Mode.BACKTEST.value) == []
+    finally:
+        env.repo.close()
