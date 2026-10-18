@@ -1,6 +1,6 @@
 # 세션 인계 (짧게 유지 — 작업이 끝날 때마다 덮어쓴다)
 
-- 갱신: **2026-10-18 03시 (세션 49 끝)**. 마지막 승인 기록 **A-118**(다음 A-119). main **8a010c0 이후**, origin보다 44커밋 이상 앞섬 — **push는 사용자 실행**(`git push origin main`, 에이전트 권한 차단).
+- 갱신: **2026-10-18 오후 (세션 49 끝, 새 세션 인계)**. 마지막 승인 기록 **A-119**(다음 A-120). main **966c4fd 이후**(이 인계 커밋 포함), origin보다 50커밋 가까이 앞섬 — **push는 사용자 실행**(`git push origin main`, 에이전트 권한 차단).
 - 실전 주문 코드·LIVE 승인 **없음**(M1·M2 모두).
 - 방향 전환: **M2(크립토) 우선 인도**(CP-037, A-113). M1은 매일 06:45 무인 건강 검진 유지, M1 PAPER-1은 사용자 전략 결정 대기.
 
@@ -19,6 +19,7 @@
    - ③ `fix/external-resolve`(3a2b23e, main e2eea7b 위)
    - ④ `feat/a110-binance-klines`(e9a3935 — scripts\fetch-binance-klines.py, 이동 뒤 전체 시험 일부만 돌았음)
    - **⑤ `feat/T-052-053-m2-periodic`(434211a)는 이번에 넣지 않음** — 독립 재검토 미실시 + DP-78~DP-81 사용자 확인 필요(아래 결정 대기).
+   - **⑥ `feat/crypto-trend-v1-review`(b8fb28c, 434211a 위)도 넣지 않음** — ⑤ 위에 있으므로 ⑤ 병합 뒤. 전략 코드만 들어 있고 등록·PAPER 아님.
    - 충돌 예상: `docs/decisions-pending.md`(main DP-50 / 체인 DP-51~77 — 행 모두 보존), `docs/capabilities.md`(체인의 M2 열·CAP-INS-05 — M1 칸 불변 확인). 그 밖은 수동 해소 후 사실 확인.
    - 통합 브랜치에서 **전체 시험** `.venv\Scripts\python -m pytest -q`(-m 없음, 약 25분). 부하 민감 시험 2개(`test_run_rehearsal2::test_r3_soak_market_hours_no_false_halts`, `test_t049_review_fixes::test_dead_binance_feed_and_user_stream_threads_raise_k5`)만 실패하면 단독 재실행. **통과하면** `git checkout main; git merge --ff-only integ/2026-10-18`. 실패하면 main은 그대로(월요일 운영 보호) 두고 원인 조사.
 3. **사용자 실행**(병합 뒤): `& C:\AI\trading_system\trading_system\.venv\Scripts\python.exe C:\AI\trading_system\trading_system\scripts\fix-external-order.py --mode PAPER --account KR-PAPER-01 0056724` → 기대 "정정 완료 … ACCEPTED 0/1 → FILLED 1/1" → status 미체결 0. (운영 DB 0056724 근거 항목은 "BUY 1 FILLED" 1건 — 10-17 읽기 전용 확인)
@@ -33,18 +34,20 @@
 | 3 | CP-040 T-065 수수료 필드 → T-066 1h/15m 집계·확장 열 → T-067 1분 손절 감시 → T-068 백테스트 확장 → T-069 문서 | A-115 (Q-1 60·15분, Q-2 시스템 1분 감시, Q-3 1분봉 저가 L4, Q-4 L5 5, Q-5 0.1% 자리값) | 미착수 |
 | 4 | CP-039 T-060~T-063(신호=실서버 공개 시세, 주문=테스트넷, D-098 좁게 개정, 가격 차 1% 진입 거부) → T-064 관찰은 **별도 연결 승인** | A-115 | 미착수 (CP-040과 같은 경로라 동시 진행 금지) |
 | 5 | T-056 M2 무인 관찰 run(주문 차단) | 별도 승인 | — |
+| 6 | CP-041 T-070(F-3 `validate_symbol_rules` 종목별 규칙) → T-071(T-068 확장: 여러 심볼 한 계좌·1d 파일 일봉·매시 last_price·매분 L4) → 사용자 결정 → T-072(`universe-add` 도구, ETH 유니버스 추가는 M2 정지 중 설정 변경) | A-119 ②③④, **CP-041 draft v0.1(966c4fd) 승인 대기** | CP 승인 전 착수 금지. T-071은 CP-040 T-068과 같은 파일 — 순서 맞춰 진행 |
 
-## 전략실 요청 A~E (2026-10-18, 세션 메시지 strategy-lab-46) 처리 결과 — 승인 A-118
+## 전략실 요청 A~E (2026-10-18, 세션 메시지 strategy-lab-46) 처리 결과 — 승인 A-118, 후속 A-119
 | # | 요청 | 결과 |
 |---|---|---|
+| A2 | **crypto-trend v2 재검토**(A-119 ①) | 같은 브랜치 **b8fb28c**. 코드·설정 2개는 전략실 a5c1405와 **바이트 동일**(리드 해시 대조). v1 코드·설정은 삭제(이력 9fdb517), 리뷰 `docs/strategies/crypto-trend/review-v2.md`. **F-1 해소**(60분 격자 23회/일, 실제 조립 경로 포함), **F-2 해소**(validate_deploy: 빈 시각+60분+M2만 통과), F-3은 xfail(strict) 유지(CP-041 대기). BACKTEST 등록 통과·PAPER 거부(능력 4개 "검증 중")·ETHUSDT 유니버스 밖 거부. **재현 여전히 불가**(1분봉 실행기가 일봉을 안 줘 신호 0 — T-071 필요). 일봉 근사는 v2가 23개 시각을 거부해 임시 하위 클래스(커밋 안 함)로만 실행: 27건·+7.78%·MDD 1.48%, v1과 동일. 시험: 해당 파일 24 passed/1 xfailed(리드 재실행 51 passed/1 xfailed, architecture 포함), 에이전트 전체 3339 passed/1 skipped/1 xfailed/0 failed. **포함 안 한 전략실 후속 커밋**: 031890f(ETH 수량 단위 주석)·7e011c1(검토 문서 — 다종목 v3 우선 권고)·2f2ef66(v3 후보 coin-top5-trend, 인계 패킷) → 사용자 결정 |
 | A | crypto-trend v1(BTC·ETH 한 계좌, 60분 판정, 진입 게이트 가격>SMA50) 검토 | 브랜치 `feat/crypto-trend-v1-review` **9fdb517**(434211a 위, worktree `.claude\worktrees\agent-a7209a7812a5d0e6b`, 전체 3335 passed/3 xfailed). 원본 바이트 동일 복사, 능력 CAP-TRG-02·DAT-01·ORD-01·INS-05. BACKTEST 등록 통과·PAPER 거부(예상)·M2 조립은 ETHUSDT 유니버스 밖이라 거부. 결함 F-1(period_minutes 없음)·F-2(validate_deploy 23개 vs D-219 eval_times=[])·F-3(validate_rules에 종목 없음). **재현 불가** — T-068에 여러 심볼·일봉 입력 필요. 근사 1회(BTC만·일봉 근사) 27건·+7.78%. 리뷰 `docs/strategies/crypto-trend/review-v1.md`. 전략실 참고: 2018 상위 18종목에서도 추세 효과(비율 0.99) — BTC·ETH 수치(약 2)는 과대 가능 |
-| B | M2 유니버스 ETHUSDT 추가 | **사용자 결정 대기**(제안서 `C:\AI\strategy-lab\research\proposal-ops-eth-expansion-2026-10-18.md`) |
+| B | M2 유니버스 ETHUSDT 추가 | **결정 A-119 ③**(추가). 순서는 CP-041 D-272: T-070→T-071→사용자 결정→M2 정지 중 설정 변경→`universe-add`·기준선→시작. **순서 이유 정정**: A-119 비고의 "m2-verify 시작 규칙 검사가 ETH 단위와 충돌"은 틀림(`spot_rule_problems`가 U-A 전략은 자기 유니버스만 검사 — 434211a 코드 확인). 실제 이유는 테스트넷 지급 ETH가 유니버스에 들어오는 순간 수동 보유로 잡혀 K4·한도에 영향 → 도구로 기준선 처리 필요 |
 | C | USDT 현물 전 심볼 일봉 | **완료**: 765심볼(TRADING 511·BREAK 254) 중 763 수집·851,978행·143MB `var\backtest\data\binance-public-usdt-1d-20261018\`(meta\summary.csv), 실패 2(비ASCII 심볼명), 옛 폐지 표본 17개 모두 목록에 있음. 전략실 전달·수령 확인 |
-| D | 저빈도 코인 전략 PAPER-1 90일 이상 | **사용자 결정 대기**(CP-037 D-232는 28일, CP-038 초안은 90일) |
+| D | 저빈도 코인 전략 PAPER-1 90일 이상 | **결정 A-119 ④**(최소 90일). "저빈도" 정의는 CP-041 D-278 초안(2020~2025 공식 백테스트에서 완결 왕복 0회인 28일 창 비율 ≥25%), D-279 D-232 개정 |
 | E | 코스피200 ETF 일봉·M1 ETF 매매 | 답함: ETF 일봉은 ka10081로 가능성 높음(미실측), M1 ETF 매매는 CAP-INS-02 미지원 → CP 필요 |
 
 ## 사용자 결정 대기
-0. **crypto-trend 후속(요청 A)**: F-1·F-2는 **전략실이 v2로 수정 완료**(CryptoTrendV2, period_minutes 60, eval_times 빈 목록, 매매 규칙 불변 — 전략실 커밋 a5c1405, 운영 재검토는 사용자 승인 뒤). 테스트넷 ETHUSDT LOT_SIZE 0.0001 확인(binance-spot §15), T-068 범위에 여러 심볼 한 계좌·확정 일봉 입력(1d 파일 vs 1분봉 집계) 명시할지(CP-040 개정), F-3 해결 방식(DP-54 서명에 종목 추가 공통 CP 권장 / 전략 파라미터). B·D도 함께.
+0. **CP-041 승인 여부와 질문 Q-1~Q-5**(`docs/changes/CP-041-m2-multi-symbol.md` draft v0.1): Q-1 2종목 한도(종목별·합산), Q-2 슬롯 수, Q-3 일봉 출처(1d 파일 권장 vs 1분봉 집계), Q-4 저빈도 기준 25%, Q-5 유니버스 추가 시점(권장: crypto-trend PAPER 준비 때). 함께: 전략실 후속 커밋 031890f·7e011c1·2f2ef66(v3 coin-top5-trend — 연간 상위 5 코인, U-B 유니버스) 반영·검토 여부. v3는 U-B(동적 유니버스)라 CP-041 범위(고정 2종목)보다 넓을 수 있음 — 전략실 요청이 오면 능력표부터 확인.
 1. **T-052·T-053 DP-78~81**: DP-78 분봉 무효 시 ENTRY·INCREASE만 버리고 EXIT·REDUCE 허용(§8-3), DP-79 판정 대기·유예(min(60초, N/2), fetch_wait 15/30초, 재시작 뒤 지난 판정 0건), DP-80 capabilities M2 CAP-TRG-02·CAP-DAT-02 "검증 중", DP-81(T-053). 재검토 뒤 확인 요청.
 2. **CP-038(저빈도 대체 기준) vs A-091 Q-5 "C-2를 약하게 만들지 않음" 충돌** — 사용자는 전략실 검토 뒤 결정. 전략실 회신: BTC+ETH 2종목이면 82건(C-2를 다종목으로 해결하는 A-091 방향과 맞음) → **전략실 ETH 확대 제안서**(`C:\AI\strategy-lab\research\proposal-ops-eth-expansion-2026-10-18.md`, 사용자가 검토 후 전달 예정)를 먼저 보는 것을 권장. 유니버스 A-096(BTCUSDT만) 변경·한도는 사용자 결정.
 3. **btc-trend v1**: 확정 아님(사용자 검토 중). 운영 검토 803c8c5·66d2781 — 재현 일치(40건·+6,498.6%·MDD 43.38%), 판정 초안 "판단 불가(C-2 30건)", F-1 수정·F-2/F-3 보강(A-114 ③), PAPER는 M2 PAPER-0 뒤·능력 "지원" 승격 뒤(A-114 ④), LIVE 한도는 LIVE 준비 때 보수안부터(A-114 ⑤). 전략실 새 후보 `crypto_trend`(1시간 판정, T-066·T-069 뒤 코드).
@@ -52,18 +55,20 @@
 5. **B-U6/U-17** 계정·약관·법규·세금 확인은 사용자가 LIVE 요청 전(A-113 Q-4).
 6. DP-46~DP-77(결정 대기열 `docs/decisions-pending.md`), 데이터 실험 결과: 상장폐지 USDT 심볼 254개(BREAK) 포함 765심볼 일봉 수집 가능(binance-spot §14) — 수집은 전략실 지시·별도 승인.
 
-## 이번 주 승인 요약 (A-098~A-117)
-A-098 Windows Update 대책 · A-099 PV-11 절차·토큰 감사 기록 · A-100 CP-033 · A-101 CP-025 · A-102 계획 문서 묶음 재승인 · A-103 R-9 정정 · A-104/A-105 CP-035(보유 중 교체 금지)·T-044 · A-106 CP-036(M2 실행 경로) · A-107/A-108 키움 일봉 수집(사용자 매매·전 종목) · A-109 M2 병합·T-050 연결·M2 텔레그램·EXTERNAL 수정 · A-110 바이낸스 공개 시세(BTC) · A-111/A-112 m2-verify 결정·BACKTEST_PASSED·PAPER 전환 · A-113 CP-037(M2 우선) · A-114 분봉 품질 처리·C-2 B안 방침·btc-trend 결함 · A-115 CP-039·CP-040 · A-116 ETHUSDT · A-117 상장폐지 확인 실험.
+## 이번 주 승인 요약 (A-098~A-119)
+A-098 Windows Update 대책 · A-099 PV-11 절차·토큰 감사 기록 · A-100 CP-033 · A-101 CP-025 · A-102 계획 문서 묶음 재승인 · A-103 R-9 정정 · A-104/A-105 CP-035(보유 중 교체 금지)·T-044 · A-106 CP-036(M2 실행 경로) · A-107/A-108 키움 일봉 수집(사용자 매매·전 종목) · A-109 M2 병합·T-050 연결·M2 텔레그램·EXTERNAL 수정 · A-110 바이낸스 공개 시세(BTC) · A-111/A-112 m2-verify 결정·BACKTEST_PASSED·PAPER 전환 · A-113 CP-037(M2 우선) · A-114 분봉 품질 처리·C-2 B안 방침·btc-trend 결함 · A-115 CP-039·CP-040 · A-116 ETHUSDT · A-117 상장폐지 확인 실험 · A-118 전략실 요청 A~E · A-119 crypto-trend v2 재검토·F-3/T-068 CP·ETH 유니버스·저빈도 PAPER-1 90일.
 
 ## 데이터 (모두 `var\backtest\data\`, git 제외, 읽기 전용 제공)
 - `kiwoom-krall-adj-20261017\` 국내 주식 2,771종목 일봉 2016~2026-10-16(+amount, 수정 거래량 확인, README), meta\stocks.csv(ETF·ETN 목록 포함)
 - `kiwoom-usertrades-adj-20261016\` 사용자 매매 151+코스피200(351종목)
 - `binance-public-20261017\` BTCUSDT·ETHUSDT 일봉(3,348봉)·1분봉(약 481만 행, 빈 구간 35곳) — 실서버 공개 시세
+- `binance-public-usdt-1d-20261018\` USDT 현물 763심볼 일봉(상장폐지 BREAK 포함, 851,978행, meta\summary.csv)
 - 정리 대상(사용자): `tmp-index001-20261016\`, `C:\Users\user\AppData\Local\Temp\v91-p8kqynon`
 - 백테스트·검증에는 2026-01-01 이후 행 제외(CP-030 최종 확인 구간).
 
 ## 전략실 연락
 - 이 세션 이름 `trading-system-eb`. 전략실 세션 `strategy-lab-46`(작업 중)에 10-18 수집·판단 결과를 메시지로 보냄 → 회신(참고용, 요청 없음): ETH 재현, 2종목 82건, 1시간 판정 우위·15분 열위, F-1~F-3 원본 반영, ETH 확대 제안서 작성(사용자 검토 후 전달).
+- 10-18 오후: crypto-trend v2 재검토 결과(b8fb28c 요약)를 전략실에 전달. 전략실은 그 사이 v3 후보 coin-top5-trend(2f2ef66)와 인계 패킷을 만듦 — 운영 요청은 아직 안 받음.
 - 전략실 저장소는 **읽기만**(쓰기·커밋 금지). 메시지는 `SendMessage`(ListAgents로 이름 확인).
 
 ## 도구 (사람 실행, 먼저 `Set-Location C:\AI\trading_system\trading_system`)
