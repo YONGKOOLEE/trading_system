@@ -14,4 +14,4 @@ implementation_start: authorized   # A-022 (2026-10-01). M2 구현 시작 A-071 
 live_order_code: not-authorized
 live_run: not-authorized    # 시장별: M1/M2/M3 모두 없음. PAPER 자동 운영(CP-029)은 PAPER 전용
 commit_policy: D-082 (A-017) + A-030   # 작업 완료·테스트 통과 시 로컬 커밋(문서 포함, A-030), push·main 병합은 지시 시
-last_updated: 2026-10-18   # 세션 49 끝(인계). A-104~A-119. M2 우선(CP-037). CP-041 draft 승인 대기. 병합 대기 브랜치 다수(handoff 참조, PV-11 정지 뒤 통합 브랜치에서). M1 PV-11 run·M2 T-050 관찰 run 실행 중. 실전 주문 코드·LIVE 승인 없음
+last_updated: 2026-10-18   # 세션 49 끝(인계). A-104~A-120. M2 우선(CP-037), M2 매매 대상 BTC·ETH 고정(A-120). CP-041·CP-038 v0.2 draft 승인 대기. 병합 대기 브랜치 다수(handoff 참조). M1 PV-11 run·M2 T-050 관찰 run 실행 중. 실전 주문 코드·LIVE 승인 없음
