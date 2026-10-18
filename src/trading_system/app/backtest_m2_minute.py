@@ -159,35 +159,46 @@ class DecisionPoint:
     minute_ok: bool
     last: Bar | None             # 판정 시각에 닫힌 가장 최근 봉 (최근가 = 종가)
     fill: Bar | None             # 체결 봉(격자 시각에 시작) — 결측이면 None
+    prev_close: Bar | None = None  # 이 판정 날짜 UTC 00:00 전 마지막 봉 — 전날 평가액·일일 기준 금액(UTC 00:00 가격, A-124)
 
 
 def decision_points(bars: Iterable[Bar], grid: PeriodGrid, days: Sequence[date], lookback: int,
-                    counter: list[int] | None = None) -> Iterator[DecisionPoint]:
+                    counter: list[int] | None = None,
+                    end_bar: list[Bar | None] | None = None) -> Iterator[DecisionPoint]:
     """판정 시각 순서로 (창·최근 봉·체결 봉). 창에는 판정 시각에 닫힌 봉(시작 ≤ 격자 시각 − 1분)만 들어간다 — 체결 봉과 그
-    이후 봉은 판정 입력에 쓰이지 않는다(룩어헤드 차단). counter[0]에는 첫 판정 날짜 00:00 이후 들어온 봉 수를 센다."""
+    이후 봉은 판정 입력에 쓰이지 않는다(룩어헤드 차단). counter[0]에는 첫 판정 날짜 00:00 이후 들어온 봉 수를 센다.
+    end_bar[0]에는 마지막 날 끝(24:00) 전 마지막 봉을 남긴다(마지막 날 평가액 — 판정 입력 아님)."""
     window: deque[Bar] = deque(maxlen=lookback)
     last: Bar | None = None
+    before_day: Bar | None = None
     it = iter(bars)
     nxt = next(it, None)
     span = ONE_MINUTE * lookback
     since = datetime(days[0].year, days[0].month, days[0].day, tzinfo=UTC) if days else None
     for day in days:
+        midnight = datetime(day.year, day.month, day.day, tzinfo=UTC)
         for at in grid.day_times(day):
             b = at - grid.margin
             while nxt is not None and nxt.at < b:   # type: ignore[operator]
                 window.append(nxt)
                 last = nxt
+                if nxt.at < midnight:   # type: ignore[operator]
+                    before_day = nxt
                 if counter is not None and since is not None and nxt.at >= since:  # type: ignore[operator]
                     counter[0] += 1
                 nxt = next(it, None)
             ok = len(window) == lookback and window[-1].at == b - ONE_MINUTE and window[0].at == b - span
             fill = nxt if nxt is not None and nxt.at == b else None
-            yield DecisionPoint(at, b, tuple(window) if ok else (), ok, last, fill)
-    if counter is not None and since is not None:   # 마지막 판정 뒤 같은 날 봉도 결측 집계에 넣는다
+            yield DecisionPoint(at, b, tuple(window) if ok else (), ok, last, fill, before_day)
+    if days and (counter is not None or end_bar is not None):   # 마지막 판정 뒤 같은 날 봉: 결측 집계·마지막 날 평가액
         end = datetime(days[-1].year, days[-1].month, days[-1].day, tzinfo=UTC) + timedelta(days=1)
         while nxt is not None and nxt.at < end:   # type: ignore[operator]
-            counter[0] += 1 if nxt.at >= since else 0   # type: ignore[operator]
+            if counter is not None and since is not None and nxt.at >= since:   # type: ignore[operator]
+                counter[0] += 1
+            last = nxt
             nxt = next(it, None)
+    if end_bar is not None:
+        end_bar[0] = last
 
 
 # --- 설정·결과 ---------------------------------------------------------------------------------------------------
@@ -339,9 +350,11 @@ def run_minute_backtest(cfg: MinuteBacktestConfig) -> MinuteBacktestResult:
     warm = _midnight(days[0]) - ONE_MINUTE * cfg.lookback_bars
     stop = _midnight(days[-1]) + timedelta(days=1)
     counter = [0]
-    for dp in decision_points(cfg.source(warm, stop), grid, days, cfg.lookback_bars, counter):
+    end_bar: list[Bar | None] = [None]
+    for dp in decision_points(cfg.source(warm, stop), grid, days, cfg.lookback_bars, counter, end_bar):
         day = dp.at.date()
         clock._now = dp.at  # noqa: SLF001
+        prev_last = last_close
         if dp.last is not None:
             last_close = dp.last.close
         if dirty:
@@ -355,14 +368,16 @@ def run_minute_backtest(cfg: MinuteBacktestConfig) -> MinuteBacktestResult:
             reserved = sum((r.cash_remaining for r in repo.active_reservations(ACCOUNT)), _ZERO)
             dirty = False
         mark = held * (last_close if last_close is not None else avg)
-        if day != cur_day:   # UTC 일 경계 첫 판정: 전날 평가액·K2 다음 날 재개·기준 금액
+        if day != cur_day:   # UTC 일 경계 첫 판정: 전날 평가액·K2 다음 날 재개·기준 금액 — 모두 UTC 00:00 전 마지막 봉 종가
+            px0 = dp.prev_close.close if dp.prev_close is not None else prev_last
+            mark0 = held * (px0 if px0 is not None else avg)   # 판정 사이에는 체결이 없어 보유·현금은 전날 끝과 같다
             if cur_day is not None:
-                equity.append((cur_day, cash + mark))
+                equity.append((cur_day, cash + mark0))
             cur_day = day
             if HaltType.K2.value in repo.active_halts(ACCOUNT):
                 if halts.resume(HaltType.K2, ACCOUNT, Channel.LOCAL, "backtest").ok:
                     k2_resumes += 1
-            base = cash + mark
+            base = cash + mark0
             if base <= 0:
                 repo.close()
                 raise BacktestError(f"{day} 기준 금액 0 이하")
@@ -416,8 +431,9 @@ def run_minute_backtest(cfg: MinuteBacktestConfig) -> MinuteBacktestResult:
         dirty = True
     if dirty:
         held = repo.position(ACCOUNT, sym).quantity
-    if cur_day is not None:
-        equity.append((cur_day, cash + held * (last_close if last_close is not None else _ZERO)))
+    if cur_day is not None:   # 마지막 날 평가액 = 그날 마지막 봉 종가(마지막 판정 뒤 봉 포함)
+        px_end = end_bar[0].close if end_bar[0] is not None else last_close
+        equity.append((cur_day, cash + held * (px_end if px_end is not None else _ZERO)))
     unknown = repo.intents_in_state(IntentState.UNKNOWN)
     repo.close()
     if unknown:

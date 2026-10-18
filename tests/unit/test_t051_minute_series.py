@@ -127,7 +127,8 @@ def test_grid_only_inside_order_window() -> None:
     g = PeriodGrid(5)                                                  # 기본 주문 창 UTC 00:10~23:50 (A-064)
     assert g.latest_at_or_before(utc(0, 5, 2)) is None
     assert g.latest_at_or_before(utc(0, 10, 2)) == utc(0, 10, 2)
-    assert g.latest_at_or_before(utc(23, 50, 2)) == utc(23, 50, 2)
+    assert g.latest_at_or_before(utc(23, 45, 2)) == utc(23, 45, 2)
+    assert g.latest_at_or_before(utc(23, 50, 2)) is None              # 창 끝 제외 — 게이트 L8 start ≤ t < end와 같음 (A-124 ①)
     assert g.latest_at_or_before(utc(23, 55, 2)) is None
     g2 = PeriodGrid(15, window_start=time(0, 0), window_end=time(23, 59))
     assert g2.latest_at_or_before(utc(0, 0, 3)) == utc(0, 0, 2)

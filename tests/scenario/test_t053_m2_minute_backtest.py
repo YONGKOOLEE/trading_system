@@ -226,7 +226,8 @@ def test_v294_no_fill_outside_order_window_and_gap_in_window_invalid(tmp_path: P
     s = Script(always=True)
     bars = [b for b in day_bars() if b.at != utc(5, 2)]                  # 05:05 판정 창(05:00~05:04) 안 결측
     out = run_minute_backtest(cfg_of(tmp_path, s, bars))
-    assert all(time(0, 10) <= x.as_of.time() <= time(23, 50, 2) for x in s.snaps)     # 판정은 주문 창 안에서만
+    assert all(time(0, 10) <= x.as_of.time() < time(23, 50) for x in s.snaps)     # 판정은 주문 창 [00:10, 23:50) 안에서만 (A-124 ①)
+    assert max(x.as_of for x in s.snaps) == utc(23, 45, 2)                # N=5 마지막 판정 23:45 (23:50 판정 없음)
     assert out.result.fills                                   # 체결은 판정 시각(창 안)에만 일어난다 (match at = 판정 시각)
     v = next(x for x in s.snaps if x.as_of == utc(5, 5, 2)).instruments[0]
     assert not v.minute_ok and v.minute_bars == ()                     # 무효 → 진입 신호는 실행기가 버림
@@ -401,3 +402,18 @@ def test_cli_daily_path_unchanged_with_explicit_interval(tmp_path: Path, capsys:
     a = json.loads((tmp_path / "o1" / "d1" / "summary.json").read_text(encoding="utf-8"))
     b = json.loads((tmp_path / "o2" / "d1" / "summary.json").read_text(encoding="utf-8"))
     assert a["digest"] == b["digest"]
+
+
+def test_daily_equity_uses_that_days_last_closed_bar(tmp_path: Path) -> None:
+    """A-124 재검토 지적 2: 날짜별 평가액 = 그날 마지막 닫힌 봉(23:59) 종가 — 다음 날 첫 판정 가격이나 마지막 판정 가격이 아님."""
+    day2 = DAY + timedelta(days=1)
+    bars = (flat_bars(utc(0, 0) - timedelta(minutes=30), 30 + 1430)                 # 1일차 ~23:49 100
+            + flat_bars(utc(23, 50), 10, price="120.00")                            # 1일차 23:50~23:59 120 (창 밖)
+            + flat_bars(utc(0, 0, day=day2), 1425, price="150.00")                  # 2일차 ~23:44 150
+            + flat_bars(utc(23, 45, day=day2), 15, price="160.00"))                 # 2일차 23:45~23:59 160 (마지막 판정 뒤)
+    out = run_minute_backtest(cfg_of(tmp_path, Script(enter_at="01:00", exit_at="23:59"), bars, end=day2))
+    assert fills(out)[0][0] == "BUY"
+    (d1, e1), (d2, e2) = out.result.equity
+    assert (d1, d2) == (DAY, day2)
+    held = (e2 - e1) / D("40")                                    # 2일차 거래 없음 → 차이 = 보유 × (160 − 120)
+    assert D("0.99") < held <= D("1")                             # 옛 계산: 두 날 모두 150 → 차이 0

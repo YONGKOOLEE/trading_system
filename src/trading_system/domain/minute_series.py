@@ -136,11 +136,11 @@ def check_window(bars: Iterable[MinuteBar], decision_at: datetime, lookback: int
 # --- 주기 격자 --------------------------------------------------------------------------------------------
 
 def boundaries_in_window(period_minutes: int, start: time = ORDER_WINDOW[0], end: time = ORDER_WINDOW[1]) -> int:
-    """하루 격자 시각(UTC 00:00 + k×N분, 여유 전) 가운데 주문 창 [start, end](양끝 포함) 안인 개수. N은 1440의 약수."""
+    """하루 격자 시각(UTC 00:00 + k×N분, 여유 전) 가운데 주문 창 [start, end) 안인 개수 — 끝 제외, 게이트 L8과 같음(A-124 ①). N은 1440의 약수."""
     if isinstance(period_minutes, bool) or not isinstance(period_minutes, int) or period_minutes <= 0:
         raise ValueError("period_minutes는 양의 정수")
     lo, hi = start.hour * 60 + start.minute, end.hour * 60 + end.minute
-    return sum(1 for m in range(0, DAY_MINUTES, period_minutes) if lo <= m <= hi)
+    return sum(1 for m in range(0, DAY_MINUTES, period_minutes) if lo <= m < hi)
 
 
 @dataclass(frozen=True)
@@ -176,10 +176,10 @@ class PeriodGrid:
     def _offsets(self) -> tuple[int, ...]:
         lo = self.window_start.hour * 60 + self.window_start.minute
         hi = self.window_end.hour * 60 + self.window_end.minute
-        return tuple(m for m in range(0, DAY_MINUTES, self.period_minutes) if lo <= m <= hi)
+        return tuple(m for m in range(0, DAY_MINUTES, self.period_minutes) if lo <= m < hi)
 
     def offsets(self) -> tuple[int, ...]:
-        """하루 격자 시각(UTC 00:00부터 분) 가운데 주문 창 안인 것, 오름차순."""
+        """하루 격자 시각(UTC 00:00부터 분) 가운데 주문 창 [시작, 끝) 안인 것, 오름차순 (끝 제외 — A-124 ①)."""
         return self._offsets
 
     def day_times(self, day: date) -> tuple[datetime, ...]:
@@ -214,6 +214,6 @@ class PeriodGrid:
         midnight = base.replace(hour=0, minute=0)
         k = int((base - midnight) / ONE_MINUTE) // self.period_minutes
         boundary = midnight + ONE_MINUTE * (k * self.period_minutes)
-        if not self.window_start <= boundary.time() <= self.window_end:
+        if not self.window_start <= boundary.time() < self.window_end:
             return None
         return boundary + self.margin

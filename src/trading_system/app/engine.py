@@ -599,8 +599,8 @@ class Engine:
     def _evaluate_periodic(self, ls: LoadedStrategy, grid: PeriodGrid, now: datetime) -> None:
         """CAP-TRG-02 주기 판정 (CP-037 D-219·D-220, DP-79). 판정 시각 = 주문 창 안 격자(UTC 00:00 + k×N분 + 확정 여유).
 
-        - 가장 늦은 예정 시각 at 하나만 본다. 시작(start) 전 예정 시각은 판정하지 않는다(재시작 뒤 지난 주기 판정 0, 기록 없음 —
-          판정 여부는 이전 프로세스의 감사 기록이 말한다). 판정 ID = 전략·버전·M2·UTC 예정 시각.
+        - 가장 늦은 예정 시각 at 하나만 본다. 시작(start) 전 예정 시각은 판정하지 않는다(재시작 뒤 지난 주기 판정 0 — 이전
+          프로세스가 판정·건너뜀을 남기지 않은 시각이면 EVALUATION_SKIPPED '재시작' 1건, A-124 ③). 판정 ID = 전략·버전·M2·UTC 예정 시각.
         - 직전 처리 시각과 at 사이에 지나간 예정 시각(루프 지연)은 하나씩 판정하지 않고 감사 EVALUATION_SKIPPED 1건(건수)으로.
         - 예정 시각 + 유예(min(60초, N분의 절반)) 초과 → 건너뜀(늦은 판정 금지, DP-21과 같은 원칙). 전역 정지 → 건너뜀.
         - CAP-DAT-02 전략: 그 판정 시각의 1분봉 조회가 끝날 때까지 기다린다(판정 표시 안 함 → 다음 tick 재확인). 기다림 상한
@@ -615,6 +615,8 @@ class Engine:
         if self._started_at is not None and at < self._started_at:
             self.evaluated.add(key)
             self._period_last[ls.owner] = at
+            if self._started_at - at <= grid.grace:   # 시작 때 아직 유예 안 — 재시작이 없었으면 판정됐을 시각
+                self._audit_restart_skip(ls, at, key)
             return
         last = self._period_last.get(ls.owner)
         if last is None or last != at:
@@ -644,6 +646,24 @@ class Engine:
             return   # 그 판정 시각 1분봉 조회 대기 — 판정 표시하지 않고 다음 tick에 다시
         self.evaluated.add(key)
         self._evaluate(ls, at, now, unfetched=pending)
+
+    def _audit_restart_skip(self, ls: LoadedStrategy, at: datetime, key: str) -> None:
+        """재시작으로 판정하지 않은 주기 예정 시각을 감사 EVALUATION_SKIPPED로 남긴다(A-124 ③, DP-79 — PAPER-1 판정 실행률
+        집계에서 재시작 누락을 구분). 시작 시각에 아직 유예 안이던 예정 시각만(그보다 오래된 시각은 꺼져 있던 시간 — 종전처럼
+        기록 없음). 판정은 여전히 하지 않는다. 이전 프로세스가 이미 판정·건너뜀 기록을 남긴 시각이면 남기지 않는다. 기록 조회가 실패하면 판정 여부 불명으로 표시해 남긴다(주문과 무관 — 판정은 어느 쪽이든 하지 않음)."""
+        try:
+            prior = bool(self.repo.audited_refs(("EVALUATION", "EVALUATION_SKIPPED"), [self._eval_id(ls, at), key]))
+            unknown = False
+        except Exception as exc:  # noqa: BLE001 — 조회 실패는 기록에 표시만
+            log_exception(self.log_dir, "engine.restart_skip", exc)
+            prior, unknown = False, True
+        if prior:
+            return
+        detail: dict[str, object] = {"reason": "재시작 — 시작 전 예정 시각은 판정하지 않음 (주기 판정, DP-79)",
+                                     "started_at": self._started_at.isoformat() if self._started_at else None}
+        if unknown:
+            detail["prior_unknown"] = True
+        self._audit("EVALUATION_SKIPPED", key, detail)
 
     def _next_eval(self, ls: LoadedStrategy, at: datetime) -> datetime | None:
         if ls.period is not None:

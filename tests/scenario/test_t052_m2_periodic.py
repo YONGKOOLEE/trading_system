@@ -1,6 +1,6 @@
 """CP-037 T-052 (A-113·A-114) — M2 주기 판정 CAP-TRG-02 (D-219), 분봉 입력 대기·무효(D-220), 위험 축소 신호 보존(DP-78).
 
-V-291: 판정은 UTC 00:10~23:50 안의 k×N분(+여유)에만, 판정 ID 시장 M2·UTC 시각, 유예 초과는 건너뜀 기록, 재시작 뒤 지난
+V-291: 판정은 UTC [00:10, 23:50) 안의 k×N분(+여유)에만, 판정 ID 시장 M2·UTC 시각, 유예 초과는 건너뜀 기록, 재시작 뒤 지난
 주기 판정 0, 신호 기한 ≤ 다음 판정, M1 등록 거부. 네트워크 없음 — 실제 조립 함수 build_engine(market="M2")·fake 현물 브로커·
 가짜 시계·임시 SQLite. 능력 표는 실제 docs/capabilities.md(BACKTEST 대상 — M2 열 "검증 중").
 """
@@ -109,11 +109,12 @@ def skipped(w: M2World) -> list[dict]:
 def test_grid_next_after_count_and_day_times() -> None:
     g = PeriodGrid(5)
     assert g.next_after(utc(0, 30, 2)) == utc(0, 35, 2)
+    assert g.next_after(utc(23, 45, 2)) == utc(0, 10, 2, day=DAY + timedelta(days=1))   # 창 끝(23:50) 제외 — 다음 날 첫 격자 (A-124 ①)
     assert g.next_after(utc(23, 50, 2)) == utc(0, 10, 2, day=DAY + timedelta(days=1))   # 창 밖 건너 다음 날 첫 격자
     assert g.next_after(utc(0, 0, 0)) == utc(0, 10, 2)
     assert g.count_between(utc(0, 30, 2), utc(0, 50, 2)) == 3
     times = g.day_times(DAY)
-    assert times[0] == utc(0, 10, 2) and times[-1] == utc(23, 50, 2) and len(times) == (1430 - 10) // 5 + 1
+    assert times[0] == utc(0, 10, 2) and times[-1] == utc(23, 45, 2) and len(times) == (1430 - 10) // 5   # [00:10, 23:50)
     assert PeriodGrid(1).fetch_wait == timedelta(seconds=15) and PeriodGrid(15).fetch_wait == timedelta(seconds=30)
     assert PeriodGrid(15).grace == timedelta(seconds=60)
 
@@ -169,8 +170,27 @@ def test_v291_restart_does_not_evaluate_past_period(tmp_path: Path) -> None:
         w.tick_at(0, 30, 40)
         w.tick_at(0, 31, 0)
         assert p.snaps == [] and evaluations(w) == []             # 지난 주기 판정 0
+        rs = [x for x in skipped(w) if "재시작" in x["summary"]]     # A-124 ③: 건너뜀 기록 1건(집계에서 구분)
+        assert len(rs) == 1 and rs[0]["ref"].endswith("|" + utc(0, 30, 2).isoformat())
         w.tick_at(0, 45, 5)
         assert len(p.snaps) == 1 and p.snaps[0].as_of == utc(0, 45, 5)
+    finally:
+        w.close()
+
+
+def test_v291_restart_after_evaluation_records_no_restart_skip(tmp_path: Path) -> None:
+    """이전 프로세스가 이미 판정한 예정 시각이면 재시작 건너뜀 기록을 남기지 않는다(판정 여부는 이전 기록이 말함)."""
+    w, p = world(tmp_path, 15)
+    try:
+        w.at(0, 29, 50)
+        w.start_and_resume()
+        w.tick_at(0, 30, 5)                                       # 00:30:02 판정
+        assert len(evaluations(w)) == 1
+        w.restart()
+        w.at(0, 30, 30)
+        w.start_and_resume()
+        w.tick_at(0, 30, 40)
+        assert len(evaluations(w)) == 1 and not [x for x in skipped(w) if "재시작" in x["summary"]]
     finally:
         w.close()
 
