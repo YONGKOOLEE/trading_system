@@ -71,6 +71,12 @@ def btc_bars(rows: list[tuple[str, str]], start: date = date(2025, 3, 1)) -> lis
 ROWS = [("60000", "61000"), ("61000", "59500"), ("59500", "60000")]
 
 
+def with_prev_day(bars: list[Bar]) -> list[Bar]:
+    """실행 첫날 앞에 전날 봉 1개를 붙인다 — 판정 입력은 '어제 확정 봉'이 있어야 유효(실시간과 같은 규칙, DP-82·V-112)."""
+    b = bars[0]
+    return [Bar(b.at - timedelta(days=1), b.open, b.high, b.low, b.open, b.volume)] + bars  # type: ignore[operator]
+
+
 def cfg(tmp_path: Path, strategy: object, data: list[Bar], times: tuple[time, ...] = TIMES,
         **over: object) -> SpotBacktestConfig:
     base = dict(run_id="mt", strategy=strategy, params=dict(PARAMS), account_limits=m2_limits(), rules={SYM: RULES},
@@ -104,7 +110,7 @@ def test_single_time_digest_and_report_unchanged(tmp_path: Path) -> None:
 # --- 하루 여러 판정 (DP-42 일봉 근사) ---------------------------------------------------------------------------
 
 def test_m2_verify_round_trip_each_day_open_buy_close_sell(tmp_path: Path) -> None:
-    c = cfg(tmp_path, M2Verify(), btc_bars(ROWS))
+    c = cfg(tmp_path, M2Verify(), with_prev_day(btc_bars(ROWS)), start=date(2025, 3, 1))
     r = run_backtest_m2(c)
     assert not r.rejects, r.rejects
     assert set(r.signals_by_eval) == {f"2025-03-0{d}T{t}Z" for d in (1, 2, 3) for t in ("01:00", "04:00")}
@@ -141,11 +147,13 @@ def test_later_decision_buy_fills_at_close_or_expires(tmp_path: Path) -> None:
             return out
 
     # 종가 59000 × 1.001 = 59059.00 ≤ IOC 지정가 60000 × 1.005 = 60300.00 → 체결 (체결 시각 04:00)
-    r = run_backtest_m2(cfg(tmp_path, LateBuy(), btc_bars([("60000", "59000")]), run_id="fill", params={}))
+    r = run_backtest_m2(cfg(tmp_path, LateBuy(), with_prev_day(btc_bars([("60000", "59000")])), run_id="fill", params={},
+                            start=date(2025, 3, 1)))
     assert [(f[3], D(f[5])) for f in r.fills] == [("BUY", D("59059.00"))]
     assert [datetime.fromisoformat(a).astimezone(UTC).time() for a, _, _ in fill_rows(r.db_path)] == [time(4, 0)]
     # 종가 61000 × 1.001 = 61061.00 > 60300.00 → 체결 0 (IOC 만료), 게이트 거부 아님
-    r2 = run_backtest_m2(cfg(tmp_path, LateBuy(), btc_bars([("60000", "61000")]), run_id="exp", params={}))
+    r2 = run_backtest_m2(cfg(tmp_path, LateBuy(), with_prev_day(btc_bars([("60000", "61000")])), run_id="exp", params={},
+                             start=date(2025, 3, 1)))
     assert r2.fills == [] and not r2.rejects and len(r2.signals) == 1
 
 
@@ -302,8 +310,9 @@ def test_cli_runs_m2_verify_and_writes_report_and_summary(tmp_path: Path, capsys
     report = (run_dir / "report.md").read_text(encoding="utf-8")
     assert "01:00, 04:00 UTC" in report and "재현성(D-074): 통과" in report and "V-91): 통과" in report
     summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
-    assert summary["round_trips"] == 8 and summary["fills"] == {"BUY": 8, "SELL": 8}
-    assert summary["dust_events"] == 8 and summary["rejects"] == {} and summary["registration"] == "PASSED"
+    # 첫날(03-01)은 어제 확정 봉이 없어 판정 입력 무효 → 거래 없음(실시간과 같은 규칙, DP-82·V-112 — 이전 기대값 8)
+    assert summary["round_trips"] == 7 and summary["fills"] == {"BUY": 7, "SELL": 7}
+    assert summary["dust_events"] == 7 and summary["rejects"] == {} and summary["registration"] == "PASSED"
     assert summary["fee_rate"] == "0.001" and summary["slippage"] == "0.001"
     assert summary["data_rows_used"] == 8 and summary["data_rows_after_end_dropped"] == 2
     assert summary["incomplete_bars_skipped"] == []

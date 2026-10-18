@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
@@ -40,12 +41,13 @@ from trading_system.broker.fake.spot_fill_model import SpotBacktestBroker
 from trading_system.config.capabilities import CapabilityTable
 from trading_system.config.strategy_registry import StrategyRegistry
 from trading_system.domain.clock import FixedClock
+from trading_system.domain.daily_input import final_daily, m2_daily_input
 from trading_system.domain.enums import GateResult, HaltType, IntentState, Mode, RequestType, Side
 from trading_system.domain.limits import AccountLimits
 from trading_system.domain.market import (
     CashView, CostRates, DailyRisk, InstrumentInfo, InstrumentKind, Quote, SessionInfo, TradingStatus,
 )
-from trading_system.domain.market_time import M2_TIME, daily_bar_is_final, session_247
+from trading_system.domain.market_time import M2_TIME, session_247
 from trading_system.domain.models import Account, GateRequest
 from trading_system.domain.strategy import Bar, EvaluationSnapshot, InstrumentView, PositionView, evaluation_id_of
 from trading_system.domain.trading_rules import SpotOrderPolicy, SymbolRules, apply_spot_terms, sellable_quantity
@@ -163,10 +165,9 @@ class _Limits:
         return self._lim
 
 
-def final_bars(bars: list[Bar], as_of: datetime) -> tuple[Bar, ...]:
-    """as_of 시점에 확정된 1d 봉만 (V-90·V-142): 봉 시작 + 1일 ≤ as_of."""
-    return tuple(b for b in bars if isinstance(b.at, date) and not isinstance(b.at, datetime)
-                 and daily_bar_is_final(b.at, as_of))
+def final_bars(bars: Iterable[Bar], as_of: datetime) -> tuple[Bar, ...]:
+    """as_of 시점에 확정된 1d 봉만 (V-90·V-142): 봉 시작 + 1일 ≤ as_of. 실시간과 같은 규칙(domain.daily_input.final_daily)."""
+    return final_daily(bars, as_of)
 
 
 def sellable(quantity: Decimal, r: SymbolRules) -> Decimal:
@@ -328,9 +329,10 @@ def run_backtest_m2(cfg: SpotBacktestConfig) -> BacktestResult:
                 pending = bool(repo.active_new_intents(ACCOUNT, inst, Side.BUY.value)
                                or repo.active_new_intents(ACCOUNT, inst, Side.SELL.value))
                 qt = market.quote(inst)
-                views.append(InstrumentView(inst, daily_bars=final_bars(cfg.data[inst], now),
+                bars, daily_ok = m2_daily_input(cfg.data[inst], now, final_bars)   # 실시간과 같은 함수 (D-088, DP-82)
+                views.append(InstrumentView(inst, daily_bars=bars,
                                             last_price=qt.price if qt else None, position=pv,
-                                            has_pending_order=pending, data_ok=qt is not None))
+                                            has_pending_order=pending, data_ok=qt is not None and daily_ok))
             snap = EvaluationSnapshot(ev_id, "M2", ACCOUNT, now, base, tuple(views),
                                       next_evaluation_at=_next_eval(day, k, times))
             result = run_evaluation(cfg.strategy, snap, cfg.params,
@@ -462,8 +464,10 @@ def perturbation_check_m2(cfg: SpotBacktestConfig, check_days: list[date]) -> li
             views = []
             for inst in sorted(data):
                 today = next((b for b in data[inst] if b.at == day), None)
-                views.append(InstrumentView(inst, daily_bars=final_bars(data[inst], now),
-                                            last_price=today.open if today else None, data_ok=today is not None))
+                bars, daily_ok = m2_daily_input(data[inst], now, final_bars)
+                views.append(InstrumentView(inst, daily_bars=bars,
+                                            last_price=today.open if today else None,
+                                            data_ok=today is not None and daily_ok))
             ev = evaluation_id_of(spec.strategy_id, spec.version, "M2", f"{day.isoformat()}T{et:%H:%M}Z")
             snap = EvaluationSnapshot(ev, "M2", ACCOUNT, now, cfg.initial_cash, tuple(views),
                                       next_evaluation_at=_next_eval(day, k, times))
