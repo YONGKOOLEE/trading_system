@@ -168,6 +168,11 @@ class M2Run:
     def resume_after_ban(self) -> None:
         self.session.adapter.resume_after_ban()
 
+    def server_offset_now(self) -> int:
+        """지금 바이낸스 서버 시각 − 로컬(ms) — `GET /api/v3/time`(서명 없음, weight 1) 1회. K8 자동 재개 추가 조건
+        (CP-037 D-226)이 명령 처리 시점에 부른다. 조회 실패는 BinanceQueryError(호출자가 조건 미충족으로 처리)."""
+        return self.session.client.server_time_offset_ms()
+
 
 class M2RunConnector:
     """scripts/run-m2.py가 실제 전송(REST·WS)을 넣어 만들고 app.main에 주입한다(app은 이 패키지를 import하지 않는다).

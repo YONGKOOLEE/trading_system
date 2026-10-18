@@ -563,7 +563,15 @@ def _run_m2(mode: Mode, base: Path, cfg, caps, strategies: list[StrategyInput], 
             return 2
         engine.fallback_file = base / "logs" / "engine-fallback.log"
         engine.log_dir = base / "logs"
-        relay.attach(engine)                           # 어댑터·스트림·공급 경보 → 판정·실행 스레드 (D-215)
+        if run is not None:   # [CP-037 D-226] 감독의 K8 자동 재개(AUTO)에만 — 서버 시각·규칙·사용자 스트림·시세 신선도
+            from datetime import timedelta
+
+            from .m2_resume_conditions import M2ResumeConditions
+            engine.ops.auto_resume_check = M2ResumeConditions(
+                server_offset_ms=run.server_offset_now, warn_ms=cfg.market_settings.server_time_warn_ms, facts=facts,
+                symbols=tuple(pairs), stream_online=lambda: relay.stream_online, now=clock.now,
+                max_quote_age=timedelta(seconds=cfg.market_settings.quote_max_age_seconds)).problems
+        relay.attach(engine)                         # 어댑터·스트림·공급 경보 → 판정·실행 스레드 (D-215)
         clock_monitor._halts, clock_monitor._alerts = engine.halts, engine.alerts  # noqa: SLF001 — 조립 지점
         clock_monitor.check()
         clock_monitor._halts = QueuedHalts(engine)    # noqa: SLF001 — 이후 점검은 감시 스레드 → 정지는 큐로 (D-215)

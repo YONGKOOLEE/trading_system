@@ -35,6 +35,9 @@ class M2Relay:
         self._lock = threading.Lock()
         self._bridge: BrokerAlertHalts | None = None
         self.on_ip_ban_cleared: Callable[[], None] = lambda: None
+        # [CP-037 D-226] 사용자 스트림 구독 연결 상태 — K8 자동 재개 추가 조건(app/m2_resume_conditions). 상태를 받는
+        # 즉시(스트림 스레드에서) 바꾼다. 처음은 False(연결 확인 전에는 자동 재개하지 않음). bool 대입 하나라 잠금 없음
+        self.stream_online = False
 
     # --- 연결 ---
     def attach(self, engine: "Engine") -> None:
@@ -71,6 +74,10 @@ class M2Relay:
     # --- 사용자 스트림 상태 ---
     def stream_state(self, state: str, message: str) -> None:
         acct = self._account
+        if state in ("ONLINE", "RECONNECTED"):
+            self.stream_online = True
+        elif state in ("OFFLINE", "REFUSED"):
+            self.stream_online = False
 
         def run() -> None:
             e = self._e()

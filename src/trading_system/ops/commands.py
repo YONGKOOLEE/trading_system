@@ -73,6 +73,9 @@ class OpsProcessor:
         # [CP-036 D-211] 운영 요청의 게이트 전 시장별 주문 조건 훅(M2: 유형·가격·dust·수량 단위). 거부는 ValueError.
         # M1은 None — 기존 동작 그대로
         self.prepare: Callable[[GateRequest], GateRequest] | None = None
+        # [CP-037 D-226] 자동 운영 채널(AUTO) K8 재개의 시장별 추가 조건(M2: 서버 시각·규칙·사용자 스트림·시세 신선도).
+        # 사유 문자열이면 새 대조 없이 거부. M1은 None — 기존 동작 그대로. 원격·로컬 재개에는 쓰지 않는다
+        self.auto_resume_check: Callable[[], str | None] | None = None
 
     def process_pending(self) -> list[CommandOutcome]:
         """대기 명령을 처리한다. 킬 스위치를 먼저 처리하고, 명령 하나의 실패가 나머지를 막지 않게 한다 (CP-018 R-4)."""
@@ -167,6 +170,10 @@ class OpsProcessor:
                 expired = self._auto_expired(args)   # 시한이 지난 자동 재개는 대조도 하지 않고 거부 (CP-029 D-153)
                 if expired:
                     return "REJECTED", expired
+                if self.auto_resume_check is not None:   # [CP-037 D-226] 대조 전에 — 미충족이면 새 대조 없이 거부
+                    unmet = self.auto_resume_check()
+                    if unmet:
+                        return "REJECTED", unmet
             if channel in (Channel.REMOTE, Channel.AUTO) and halt_type in REMOTE_FRESH_RECONCILE:
                 trigger = AUTO_RESUME_TRIGGER if channel == Channel.AUTO else REMOTE_RESUME_TRIGGER
                 fresh, refused = self._fresh_reconcile(account, trigger)
