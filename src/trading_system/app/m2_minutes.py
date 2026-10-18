@@ -320,6 +320,24 @@ class M2MinuteInput:
             return MinuteInput(bars, True, rec)
         return self._agg(repo, s, at, request, bars, rec)
 
+    def closed_bar(self, repo: Repository, symbol: str, at: datetime,
+                   unfetched: bool = False) -> tuple[str, MinuteBar | None]:
+        """[CP-040 T-067 D-263 (2)·(3)] 손절 감시용: 감시 시각 at의 직전 닫힌 1분 봉 하나(저장 봉 — 판정과 같은 출처).
+        (상태, 봉). 상태 OK가 아니면 봉 None = 그 분은 판단하지 않는다(청산하지 않음, §8-10):
+        FETCH_TIMEOUT(그 시각 조회가 기다림 상한 안에 끝나지 않음)·STORE_FAILED(DP-76)·QUALITY(DP-72)·LAST_MISSING(봉 없음).
+        판정 입력의 누락 연속 수(_track)는 바꾸지 않는다 — 감시 경고는 감시가 따로 센다."""
+        if unfetched:
+            return "FETCH_TIMEOUT", None
+        if self._store_problem is not None:
+            return "STORE_FAILED", None
+        if self.book.quality_problem(symbol) is not None:
+            return "QUALITY", None
+        last = last_closed_start(at, self.margin)
+        for b in repo.minute_bars(symbol, 1, NO_ADJUSTMENT, start=last, end=last + ONE_MINUTE):
+            if b.minutes == 1 and b.start.astimezone(last.tzinfo) == last and b.end <= at - self.margin:
+                return "OK", b
+        return "LAST_MISSING", None
+
     def _agg(self, repo: Repository, s: str, at: datetime, req: MinuteRequest, bars: tuple[Bar, ...],
              rec: dict) -> MinuteInput:
         """[D-259] 저장 1분 봉 → 집계 봉 창. 무효면 그 심볼 분봉 입력 전체 무효(1분 창도 넘기지 않음, DP-78 경로)."""

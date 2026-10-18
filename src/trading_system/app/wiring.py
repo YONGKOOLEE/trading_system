@@ -47,6 +47,7 @@ from trading_system.domain.market import Quote
 from trading_system.domain.market_time import M2_TIME, Market
 from trading_system.domain.minute_series import DEFAULT_CONFIRM_MARGIN, PeriodGrid
 from trading_system.domain.sinks import AlertSink
+from trading_system.domain.stop_watch import STOP_CAPABILITY
 from trading_system.domain.trading_rules import SpotOrderPolicy, SymbolRules
 from trading_system.execution.dust import DustHandler
 from trading_system.execution.spot_resolver import SpotUnknownResolver
@@ -55,6 +56,7 @@ from trading_system.reconciliation.spot import SpotReconcileCycle, SpotReconcile
 
 from .engine import AccountState, Engine, LoadedAllocation, LoadedStrategy
 from .m2_minutes import MINUTE_CAPABILITY, M2MinuteInput, minute_request_of
+from .stop_monitor import StopMonitor, stop_strategies
 from .market_profile import SpotFacts, SpotProfile
 
 BROKER_ENV = {Mode.BACKTEST: "fake", Mode.PAPER: "mock"}
@@ -260,6 +262,10 @@ def _register_strategies(registry: StrategyRegistry, strategies: list[StrategyIn
                          minutes: M2MinuteInput | None = None) -> list[LoadedStrategy]:
     loaded: list[LoadedStrategy] = []
     for si in strategies:
+        # [CP-040 D-269 (1)] CAP-HLD-02 손절 감시는 M2 프로파일에서만 연다 — M1은 표 상태와 무관하게 등록 전에 거부(CAP-TRG-02와 같음)
+        if STOP_CAPABILITY in si.strategy.spec.capabilities and market != Market.M2.value:
+            raise ConfigError([f"{si.strategy.spec.owner}: {STOP_CAPABILITY} 손절 감시는 {market} 프로파일에서 열지 않는다 "
+                               "(CP-040 D-269 — M2만, capabilities.md M1 미지원)"])
         reg = registry.register(si.strategy.spec, dict(si.params), caps, account_limits, mode,
                                 verification_approval=si.verification_approval)
         if not reg.ok:
@@ -412,6 +418,12 @@ def _build_spot_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: Br
     ops = OpsProcessor(repo, gate, executor, halts, clock, reconciler=reconciler,
                        resolver=ReconcileResolver(repo, executor, clock), kill_file=kill_file, registry=registry)
     loaded = _register_strategies(registry, strategies, caps, account_limits, mode, account, market, spot.minutes)
+    stop_owners = [ls.owner for ls in stop_strategies(loaded)]
+    if stop_owners:   # [CP-040 D-263 (2)] 손절 감시는 1분 봉 조회가 1분 격자로 켜져 있어야 한다 — 없으면 보호 없이 돌지 않게 시작 거부
+        if spot.minutes is None or spot.minutes.period_minutes != 1:
+            got = "꺼짐" if spot.minutes is None else f"{spot.minutes.period_minutes}분"
+            raise ConfigError([f"{o}: {STOP_CAPABILITY} 손절 감시에는 1분봉 조회 격자 1분이 필요 (현재 {got} — "
+                               "config/m2/market.<mode>.toml [minute], D-263 (2)·DP-74 예산 검사)" for o in stop_owners])
 
     watcher = None
     if alert_thresholds is not None:
@@ -423,13 +435,16 @@ def _build_spot_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: Br
     reconciler.balance_listeners.append(profile.observe_balances)
     ops.prepare = profile.prepare_ops   # [CP-036 D-211] 운영 요청도 M2 주문 조건(유형·가격·dust·수량 단위)을 탄다
     profile.cycle = SpotReconcileCycle(reconciler, account, schedule, on_day_close=profile.day_closed)
-    return Engine(repo=repo, clock=clock, broker=broker, store=facts, gate=gate,  # type: ignore[arg-type]
+    engine = Engine(repo=repo, clock=clock, broker=broker, store=facts, gate=gate,  # type: ignore[arg-type]
                   executor=executor, halts=halts, resolver=resolver, reconciler=reconciler, recovery=recovery,
                   ops=ops, registry=registry, account_state=acct,  # type: ignore[arg-type]
                   reporter=DailyReporter(repo, alerts, gate_settings.cost_rates, price_of, market_time=M2_TIME),
                   watcher=watcher, alerts=alerts, account=account,
                   limits=lambda: settings.effective_limits(account), strategies=loaded,
                   reconcile_every=reconcile_every, profile=profile)
+    if stop_owners and spot.minutes is not None:   # [CP-040 T-067] 감시 → 게이트 → 실행기 (엔진 단계 "stop")
+        engine.stop_monitor = StopMonitor(engine, profile, spot.minutes, loaded)
+    return engine
 
 
 @dataclass(frozen=True)

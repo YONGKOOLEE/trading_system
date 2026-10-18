@@ -224,6 +224,14 @@ class SpotProfile(MarketProfile):
                               agg_bars=minute.agg_bars if minute is not None else (),
                               agg_missing=minute.agg_missing if minute is not None else ())
 
+    def sellable_position(self, inst: str, owner: str) -> PositionView | None:
+        """[CP-040 T-067] 손절 감시의 청산 수량 = 판정 입력과 같은 보유 표시(청산 가능 수량, dust 제외 — D-102).
+        거래 규칙을 모르면 None(수량 단위를 모르면 보내지 않음 — 불확실하면 주문하지 않음)."""
+        rules = self.facts.rules(inst)
+        if rules is None:
+            return None
+        return self._position(inst, owner, rules)
+
     def _position(self, inst: str, owner: str, rules: SymbolRules | None) -> PositionView | None:
         """보유 표시 = 청산 가능 수량(실제로 보낼 매도 경로의 단위로 내림). 0·minQty 미만·확실한 dust면 보유 없음(D-102).
         owned_by_me = 소유권 소유자 비교(수동 보유는 False). 규칙을 모르면 보유 그대로(그 종목 data_ok False)."""
