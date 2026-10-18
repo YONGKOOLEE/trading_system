@@ -54,7 +54,7 @@ from trading_system.monitoring.spot_cash import SpotAccountFacts
 from trading_system.reconciliation.spot import SpotReconcileCycle, SpotReconcileSchedule, SpotReconciler
 
 from .engine import AccountState, Engine, LoadedAllocation, LoadedStrategy
-from .m2_minutes import MINUTE_CAPABILITY, M2MinuteInput
+from .m2_minutes import MINUTE_CAPABILITY, M2MinuteInput, minute_request_of
 from .market_profile import SpotFacts, SpotProfile
 
 BROKER_ENV = {Mode.BACKTEST: "fake", Mode.PAPER: "mock"}
@@ -205,16 +205,21 @@ def build_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: BrokerAd
 
 PERIODIC_CAPABILITY = "CAP-TRG-02"   # 주기 판정 (CP-037 D-219)
 PERIOD_PARAM = "period_minutes"      # 주기 판정 격자 N분 — 전략 파라미터 (D-219)
+# [CP-040 D-258, Q-1 (나) A-115] M2 전략 등록이 받는 판정 주기. 엔진 격자(PeriodGrid)는 D-219대로 1440의 약수를 다루고,
+# 등록 검사만 이 집합으로 좁힌다 — 다른 값은 CP로 추가
+M2_PERIODS_ALLOWED: frozenset[int] = frozenset({15, 60})
 
 
 def period_grid_of(si: StrategyInput, market: str, *, minute_period: int | None = None,
-                   margin: timedelta = DEFAULT_CONFIRM_MARGIN) -> PeriodGrid | None:
+                   margin: timedelta = DEFAULT_CONFIRM_MARGIN, registration: bool = True) -> PeriodGrid | None:
     """[CP-037 D-219, DP-79] 전략의 판정 일정 검사 → CAP-TRG-02면 주기 격자, 아니면 None(정해진 시각 판정). 문제면 ConfigError.
 
     - CAP-TRG-02는 M2 프로파일에서만 연다 — M1은 거부(capabilities.md M1 "미지원"과 별개로 코드도 막는다, CP-032 T-029 몫).
     - CAP-TRG-02 전략: 배포 설정 eval_times는 비어 있어야 하고(일정은 파라미터 period_minutes), N은 1440의 약수이며 격자
       시각이 주문 창 안에 있어야 한다(DP-77). CAP-DAT-02도 선언했고 1분봉 조회가 켜져 있으면 N은 조회 격자(설정 [minute]
       period_minutes)의 배수 — 판정 시각마다 그 시각의 조회가 있어야 한다.
+    - [CP-040 D-258] M2 등록은 period_minutes ∈ M2_PERIODS_ALLOWED(15·60)만 — 그 밖은 거부 사유를 남긴다. registration
+      False(1분봉 백테스트 CLI — 연구·T-053 실행기)는 이 범위 검사를 하지 않는다(엔진 격자 D-219 검사는 그대로).
     - 그 밖의 전략: eval_times가 하나 이상(M2 설정은 빈 목록을 허용하므로 여기서 막는다)."""
     spec = si.strategy.spec
     owner = spec.owner
@@ -242,6 +247,9 @@ def period_grid_of(si: StrategyInput, market: str, *, minute_period: int | None 
                 and n % minute_period:
             problems.append(f"{owner}: {PERIOD_PARAM} {n}이 1분봉 조회 격자 {minute_period}분의 배수가 아님 — 판정 시각에 그 "
                             "시각 조회가 없다 (config/m2/market.<mode>.toml [minute], DP-79)")
+        if registration and n not in M2_PERIODS_ALLOWED:
+            allowed = "·".join(str(x) for x in sorted(M2_PERIODS_ALLOWED))
+            problems.append(f"{owner}: {PERIOD_PARAM} {n} — M2 판정 주기는 {allowed}분만 등록한다 (CP-040 D-258, A-115 Q-1)")
     if problems:
         raise ConfigError(problems)
     return grid
@@ -267,6 +275,12 @@ def _register_strategies(registry: StrategyRegistry, strategies: list[StrategyIn
             period = period_grid_of(replace(si, params=parsed), market,
                                     minute_period=minutes.period_minutes if minutes is not None else None,
                                     margin=minutes.margin if minutes is not None else DEFAULT_CONFIRM_MARGIN)
+        # [CP-040 D-259·D-260] CAP-DAT-02 전략의 집계 봉·흐름 열 파라미터 검사 (M2만 — M1은 CAP-DAT-02 미개방)
+        if MINUTE_CAPABILITY in si.strategy.spec.capabilities and market != Market.M1.value:
+            try:
+                minute_request_of(parsed)
+            except ValueError as exc:
+                raise ConfigError([f"{si.strategy.spec.owner}: {exc}"]) from None
         loaded.append(LoadedStrategy(si.strategy, parsed, si.eval_times, unfilled, period))
     # [CP-035 D-200, DP-49] 보유·예약을 가진 전략을 배포 설정에서 빼면(교체 전이 없이 설정만 바꿈) 시작 거부
     orphans = registry.undeployed_holding_problems(account, {si.strategy.spec.owner for si in strategies})

@@ -35,7 +35,7 @@ from trading_system.monitoring.spot_cash import QuoteBalance, SpotAccountFacts
 from trading_system.reconciliation.reconciler import ReconcileResult
 from trading_system.reconciliation.spot import STARTUP, SpotReconcileCycle, SpotReconcileSchedule
 
-from .m2_minutes import MINUTE_CAPABILITY, M2MinuteInput, MinuteInput, disabled_inputs
+from .m2_minutes import MINUTE_CAPABILITY, M2MinuteInput, MinuteInput, disabled_inputs, minute_request_of
 
 if TYPE_CHECKING:
     from .engine import Engine, LoadedStrategy, _UbInput
@@ -196,8 +196,9 @@ class SpotProfile(MarketProfile):
         self.review_dust(insts)   # 매도 뒤 남은 dust는 보유 없음 취급 전에 소유권부터 정리 (D-102)
         mins: dict[str, MinuteInput] = {}
         if MINUTE_CAPABILITY in spec.capabilities:   # [CP-037 D-220] CAP-DAT-02 선언 전략만 1분봉 입력
-            mins = (self.minutes.inputs(e.repo, e.alerts, insts, at, now, ev_id, unfetched) if self.minutes is not None
-                    else disabled_inputs(e.repo, insts, at, now, ev_id))
+            mins = (self.minutes.inputs(e.repo, e.alerts, insts, at, now, ev_id, unfetched,
+                                        request=minute_request_of(ls.params))   # 집계 봉·흐름 열 (CP-040 D-259·D-260)
+                    if self.minutes is not None else disabled_inputs(e.repo, insts, at, now, ev_id))
         views = tuple(self._view(i, ls.owner, now, mins.get(i)) for i in insts)
         snap = EvaluationSnapshot(ev_id, self.market.value, e.account, now, base, views, e._next_eval(ls, at))  # noqa: SLF001
         lots = {i: r.lot_step for i in insts if (r := self.facts.rules(i)) is not None}
@@ -219,7 +220,9 @@ class SpotProfile(MarketProfile):
                               last_price=q.price if q is not None and q.at <= now else None,
                               statuses=statuses or frozenset(), position=self._position(inst, owner, rules),
                               has_pending_order=pending, data_ok=data_ok,
-                              minute_ok=minute.ok if minute is not None else True)
+                              minute_ok=minute.ok if minute is not None else True,
+                              agg_bars=minute.agg_bars if minute is not None else (),
+                              agg_missing=minute.agg_missing if minute is not None else ())
 
     def _position(self, inst: str, owner: str, rules: SymbolRules | None) -> PositionView | None:
         """보유 표시 = 청산 가능 수량(실제로 보낼 매도 경로의 단위로 내림). 0·minQty 미만·확실한 dust면 보유 없음(D-102).

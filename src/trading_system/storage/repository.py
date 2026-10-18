@@ -177,6 +177,18 @@ CREATE TRIGGER IF NOT EXISTS minute_bar_no_update BEFORE UPDATE ON minute_bar
   BEGIN SELECT RAISE(ABORT, 'minute_bar is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS minute_bar_no_delete BEFORE DELETE ON minute_bar
   BEGIN SELECT RAISE(ABORT, 'minute_bar is append-only'); END;
+-- 분봉 확장 열 (CP-040 D-260, T-066): minute_bar와 같은 키, 값 = 바이낸스 klines 7~10번째 값(Decimal 문자열·정수).
+-- minute_bar 열·키·의미는 바꾸지 않는다. 추가 전용 표라 스키마 버전을 올리지 않는다(D-144·D-190 방식) — 기존 저장소도 열
+-- 때 생성(M1 DB에는 빈 표). 고치거나 지우지 않는다(트리거). 같은 키가 다시 오면 기존 값 유지 — 다르면 건수만 센다(DP-70 방식)
+CREATE TABLE IF NOT EXISTS minute_bar_ext (
+  instrument TEXT NOT NULL, bar_minutes INTEGER NOT NULL, bar_start TEXT NOT NULL, adjusted TEXT NOT NULL,
+  mode TEXT NOT NULL, quote_volume TEXT NOT NULL, trades INTEGER NOT NULL, taker_buy_base TEXT NOT NULL,
+  taker_buy_quote TEXT NOT NULL, source TEXT NOT NULL, recorded_at TEXT NOT NULL,
+  PRIMARY KEY (instrument, bar_minutes, bar_start, adjusted));
+CREATE TRIGGER IF NOT EXISTS minute_bar_ext_no_update BEFORE UPDATE ON minute_bar_ext
+  BEGIN SELECT RAISE(ABORT, 'minute_bar_ext is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS minute_bar_ext_no_delete BEFORE DELETE ON minute_bar_ext
+  BEGIN SELECT RAISE(ABORT, 'minute_bar_ext is append-only'); END;
 -- 투자자별 일별 순매수 (CAP-DAT-05a, CP-033 D-190·02 ENT-33, T-035): 키 (종목, 일자, 단위, 회차, 투자자 구분). 추가 전용
 -- 표라 스키마 버전을 올리지 않는다(D-144·A-086 ③과 같은 방식) — 기존 저장소도 열 때 생성. 고치거나 지우지 않는다(트리거,
 -- 자동 삭제 없음). 재수집 값이 다르면 새 회차 행 + 감사 INVESTOR_FLOW_CORRECTED, 같으면 관측(investor_flow_seen)만 추가.
@@ -542,21 +554,61 @@ class Repository:
                 differing += 1
         return inserted, same, differing
 
+    def insert_minute_bar_ext(self, bars: Sequence[MinuteBar], source: str, at: datetime) -> tuple[int, int, int]:
+        """확장 열(D-260)을 추가한다 — 네 값이 모두 있는 봉만(나머지는 건너뜀). (새로 넣음, 같음, 다름 — 기존 값 유지).
+        저장 단위 안에서 부른다."""
+        if not self.in_transaction:
+            raise ValueError("insert_minute_bar_ext는 저장 단위(tx) 안에서")
+        inserted = same = differing = 0
+        for b in bars:
+            if not b.has_ext:
+                continue
+            key = (b.instrument, b.minutes, to_iso(b.start), b.adjusted)
+            values = (str(b.quote_volume), int(b.trades or 0), str(b.taker_buy_base), str(b.taker_buy_quote))
+            cur = self._x("INSERT OR IGNORE INTO minute_bar_ext(instrument, bar_minutes, bar_start, adjusted, mode, "
+                          "quote_volume, trades, taker_buy_base, taker_buy_quote, source, recorded_at) "
+                          "VALUES(?,?,?,?,?,?,?,?,?,?,?)", (*key, self.mode.value, *values, source, to_iso(at)))
+            if cur.rowcount == 1:
+                inserted += 1
+                continue
+            old = self._x("SELECT quote_volume, trades, taker_buy_base, taker_buy_quote FROM minute_bar_ext WHERE "
+                          "instrument=? AND bar_minutes=? AND bar_start=? AND adjusted=?", key).fetchone()
+            if (Decimal(old[0]), int(old[1]), Decimal(old[2]), Decimal(old[3])) ==                     (b.quote_volume, b.trades, b.taker_buy_base, b.taker_buy_quote):
+                same += 1
+            else:
+                differing += 1
+        return inserted, same, differing
+
     def minute_bars(self, instrument: str, minutes: int, adjusted: str = "1", *, start: datetime | None = None,
-                    end: datetime | None = None) -> list[MinuteBar]:
-        """봉 시작 시각 오름차순. start ≤ 봉 시작 < end (주면)."""
-        sql = "SELECT * FROM minute_bar WHERE instrument=? AND bar_minutes=? AND adjusted=?"
+                    end: datetime | None = None, with_ext: bool = False) -> list[MinuteBar]:
+        """봉 시작 시각 오름차순. start ≤ 봉 시작 < end (주면). with_ext면 확장 열(minute_bar_ext, D-260)을 붙인다 —
+        확장 행이 없는 봉은 그 열만 None."""
+        if with_ext:
+            sql = ("SELECT b.*, e.quote_volume AS x_qv, e.trades AS x_tr, e.taker_buy_base AS x_tbb, "
+                   "e.taker_buy_quote AS x_tbq FROM minute_bar b LEFT JOIN minute_bar_ext e ON "
+                   "e.instrument=b.instrument AND e.bar_minutes=b.bar_minutes AND e.bar_start=b.bar_start AND "
+                   "e.adjusted=b.adjusted WHERE b.instrument=? AND b.bar_minutes=? AND b.adjusted=?")
+        else:
+            sql = "SELECT * FROM minute_bar b WHERE b.instrument=? AND b.bar_minutes=? AND b.adjusted=?"
         params: list[object] = [instrument, minutes, adjusted]
         if start is not None:
-            sql += " AND bar_start >= ?"
+            sql += " AND b.bar_start >= ?"
             params.append(to_iso(start))
         if end is not None:
-            sql += " AND bar_start < ?"
+            sql += " AND b.bar_start < ?"
             params.append(to_iso(end))
-        rows = self._x(sql + " ORDER BY bar_start", tuple(params))
-        return [MinuteBar(r["instrument"], int(r["bar_minutes"]), from_iso(r["bar_start"]), Decimal(r["open"]),
-                          Decimal(r["high"]), Decimal(r["low"]), Decimal(r["close"]), Decimal(r["volume"]),
-                          r["adjusted"]) for r in rows]
+        rows = self._x(sql + " ORDER BY b.bar_start", tuple(params))
+        out: list[MinuteBar] = []
+        for r in rows:
+            ext = with_ext and r["x_qv"] is not None
+            out.append(MinuteBar(r["instrument"], int(r["bar_minutes"]), from_iso(r["bar_start"]), Decimal(r["open"]),
+                                 Decimal(r["high"]), Decimal(r["low"]), Decimal(r["close"]), Decimal(r["volume"]),
+                                 r["adjusted"],
+                                 quote_volume=Decimal(r["x_qv"]) if ext else None,
+                                 trades=int(r["x_tr"]) if ext else None,
+                                 taker_buy_base=Decimal(r["x_tbb"]) if ext else None,
+                                 taker_buy_quote=Decimal(r["x_tbq"]) if ext else None))
+        return out
 
     # --- 투자자별 순매수 (CAP-DAT-05a, CP-033 D-190, T-035) -----------------------------
     def _latest_flow(self, instrument: str, day: str, unit: str) -> tuple[int, dict[str, Decimal]] | None:

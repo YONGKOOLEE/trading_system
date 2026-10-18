@@ -46,6 +46,19 @@ class Kline:
     volume: Decimal
     quote_volume: Decimal
     trades: int
+    # [CP-040 D-260] 응답 9·10번째 값(0부터: takerBuyBase·takerBuyQuote, BN S6). 행이 11값 미만이거나 형식 오류면 None
+    # (확장 열 결측 — OHLCV 판정은 그대로, 흐름 열 선언 전략은 결측으로 센다)
+    taker_buy_base: Decimal | None = None
+    taker_buy_quote: Decimal | None = None
+
+
+def _taker(row: list) -> tuple[Decimal | None, Decimal | None]:
+    if len(row) < 11:
+        return None, None
+    try:
+        return parse_non_negative(row[9], "takerBuyBase"), parse_non_negative(row[10], "takerBuyQuote")
+    except BinanceParseError:
+        return None, None
 
 
 @dataclass(frozen=True)
@@ -96,7 +109,9 @@ def parse_klines(rows: object, *, symbol: str, interval: str) -> list[Kline]:
         if h < max(o, c, lo) or lo > min(o, c) or trades < 0:
             raise KlineDataError(f"{symbol} {interval} {i}번째 행: OHLC 불일치")
         prev = open_ms
-        out.append(Kline(symbol, interval, ms_to_utc(open_ms), ms_to_utc(open_ms + step), o, h, lo, c, v, qv, trades))
+        tb, tq = _taker(row)
+        out.append(Kline(symbol, interval, ms_to_utc(open_ms), ms_to_utc(open_ms + step), o, h, lo, c, v, qv, trades,
+                         tb, tq))
     return out
 
 

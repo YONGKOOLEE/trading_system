@@ -225,11 +225,18 @@ class BinanceSpotClient:
                               signed=False)
         return body
 
-    def klines(self, symbol: str, interval: str, *, limit: int) -> object:
-        """`GET /api/v3/klines?symbol=&interval=&limit=` 본문(서명 없음, 시세 우선순위, timeZone 기본 0 = UTC)."""
+    def klines(self, symbol: str, interval: str, *, limit: int, start_ms: int | None = None,
+               end_ms: int | None = None) -> object:
+        """`GET /api/v3/klines?symbol=&interval=&limit=[&startTime=&endTime=]` 본문(서명 없음, 시세 우선순위, timeZone 기본
+        0 = UTC). startTime·endTime은 항상 UTC ms, weight 2 그대로(BN S6) — 이력 채우기 나눔 조회(CP-040 D-261)."""
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
             raise BinanceQueryError("klines limit은 1~1000", QueryKind.FAILED)
         params = self._symbol(symbol) + [("interval", interval), ("limit", str(limit))]
+        for name, v in (("startTime", start_ms), ("endTime", end_ms)):
+            if v is not None:
+                if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                    raise BinanceQueryError(f"klines {name}은 0 이상 정수 ms", QueryKind.FAILED)
+                params.append((name, str(v)))
         _, body = self._query("/api/v3/klines", params, WEIGHT["klines"], CallPriority.MARKET, signed=False)
         return body
 

@@ -20,6 +20,16 @@
 CAP-DAT-02를 선언한 전략만 분봉 입력을 받는다. 선언했는데 분봉 공급이 꺼져 있으면(설정 [minute] 꺼짐) 모든 심볼
 DISABLED = 신호 무효(불확실하면 주문하지 않음). M2 열 CAP-DAT-02는 T-052에서 "검증 중"(BACKTEST 등록만, PAPER는 "지원" 뒤).
 판정 입력 규칙 [DP-75], 저장 값(adjusted·source) [DP-70].
+5. [CP-040 T-066] 확장 열·집계 봉·이력:
+   - flush는 확장 열(klines 7~10번째 값, D-260)을 추가 전용 `minute_bar_ext`에 같은 저장 단위로 기록한다. 재수신 값이 다르면
+     기존 값 유지 + 건수(감사 MINUTE_BARS_STORED의 ext_differing). 마지막 flush의 확장 열 건수는 last_ext.
+   - 판정 입력에 확장 열을 함께 준다(Bar 선택 필드, 없으면 None). 전략 요청(MinuteRequest — 파라미터 agg_bar_minutes·
+     agg_lookback_bars·max_missing_bars·flow_columns)이 집계 봉을 선언하면 저장 1분 봉에서 집계 봉 창을 계산한다
+     (domain/minute_agg, D-259): 직전 닫힌 집계 봉 결측 → AGG_LAST_MISSING, 오래된 결측 > max_missing_bars →
+     AGG_TOO_MANY_MISSING(둘 다 신호 무효 — 분봉 입력 무효와 같은 DP-78 경로: 진입·증액만 버림, 청산은 허용).
+     흐름 열 선언(flow_columns)이면 1분 창 안 확장 열 결측 → EXT_MISSING, 집계 봉은 확장 열 결측 분을 결측으로 센다.
+   - history(app/m2_backfill.MinuteBackfill)가 있으면 이력 채우기가 끝나기 전 HISTORY_PENDING, 실패 HISTORY_FAILED —
+     신호 무효(D-261 (2), 다른 출처로 메우지 않음).
 4. 주기 판정 대기 [T-052, DP-79]: 엔진은 CAP-TRG-02·CAP-DAT-02 전략의 판정 시각 at에 pending_fetch로 그 시각 조회가 끝났는지
    보고 PeriodGrid.fetch_wait까지 기다린다. 넘으면 그 심볼은 FETCH_TIMEOUT(신호 무효)으로 판정한다(늦은 판정은 만들지 않음).
 [DP-78 — DP-75 (6) 해소, CLAUDE.md §8-3] 분봉 입력이 무효여도 data_ok는 분봉 외 입력(규칙·심볼 상태·1d 봉)만 반영한다.
@@ -30,10 +40,13 @@ DISABLED = 신호 무효(불확실하면 주문하지 않음). M2 열 CAP-DAT-02
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Protocol
 
+from trading_system.domain.minute_agg import AGG_MINUTES, AGG_RULE_VERSION, AggStatus, check_agg_window
+from trading_system.domain.minute_bar import MinuteBar
 from trading_system.domain.minute_series import (
     DEFAULT_CONFIRM_MARGIN, NO_ADJUSTMENT, ONE_MINUTE, WindowStatus, check_window, last_closed_start,
 )
@@ -52,11 +65,68 @@ MISSING_SUMMARY_EVERY = timedelta(minutes=30)
 CONDITION_SUMMARY_EVERY = MISSING_SUMMARY_EVERY   # 품질·저장 실패 묶음 요약 간격 (DP-72·DP-76 [제안])
 
 
+AGG_PARAM = "agg_bar_minutes"            # 집계 봉 길이 15·60 (D-259) — 전략 파라미터
+AGG_LOOKBACK_PARAM = "agg_lookback_bars"  # 집계 봉 창 길이
+MAX_MISSING_PARAM = "max_missing_bars"    # 창 안 오래된 결측 허용 수 (기본 0, D-259 (5))
+FLOW_PARAM = "flow_columns"               # 흐름 열 사용 선언 (D-260)
+
+
+@dataclass(frozen=True)
+class MinuteRequest:
+    """CAP-DAT-02 전략의 분봉 입력 요청 (CP-040 D-259·D-260). agg_minutes None = 1분 창만."""
+
+    agg_minutes: int | None = None
+    agg_lookback: int = 0
+    max_missing: int = 0
+    flow: bool = False
+
+
+def minute_request_of(params: Mapping[str, object]) -> MinuteRequest:
+    """검증된 전략 파라미터 → 요청. 규칙 위반이면 ValueError (등록 검사가 ConfigError로 바꾼다)."""
+    def _int(name: str) -> int | None:
+        v = params.get(name)
+        if v is None:
+            return None
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise ValueError(f"{name}: 정수여야 함")
+        return v
+    agg, lookback, missing = _int(AGG_PARAM), _int(AGG_LOOKBACK_PARAM), _int(MAX_MISSING_PARAM)
+    flow = params.get(FLOW_PARAM, False)
+    if not isinstance(flow, bool):
+        raise ValueError(f"{FLOW_PARAM}: 참·거짓이어야 함")
+    if agg is None:
+        if lookback is not None or missing is not None:
+            raise ValueError(f"{AGG_LOOKBACK_PARAM}·{MAX_MISSING_PARAM}는 {AGG_PARAM}과 함께만 (D-259)")
+        return MinuteRequest(flow=flow)
+    if agg not in AGG_MINUTES:
+        raise ValueError(f"{AGG_PARAM} {agg}: 집계 봉은 {AGG_MINUTES}분만 (D-258·D-259)")
+    if lookback is None or lookback < 1:
+        raise ValueError(f"{AGG_LOOKBACK_PARAM}: {AGG_PARAM}을 쓰면 1 이상 필요 (D-259)")
+    missing = 0 if missing is None else missing
+    if missing < 0 or missing >= lookback:
+        raise ValueError(f"{MAX_MISSING_PARAM} {missing}: 0 이상, 창 {lookback}보다 작아야 함 — 직전 집계 봉은 필수 "
+                         "(D-259 (5))")
+    return MinuteRequest(agg, lookback, missing, flow)
+
+
+class History(Protocol):
+    """이력 채우기 상태 (app/m2_backfill.MinuteBackfill). 상태 값(.value): "PENDING" | "DONE" | "FAILED"."""
+
+    def status(self, symbol: str) -> tuple[object, str]: ...
+
+
 @dataclass(frozen=True)
 class MinuteInput:
     bars: tuple[Bar, ...]     # OK일 때만 lookback개(봉 시작 UTC 오름차순)
     ok: bool
     record: dict              # 감사 기록용 (상태·기대 범위·봉 수·지문)
+    agg_bars: tuple[Bar, ...] = ()            # [D-259] 집계 봉 요청 + OK일 때만 (결측 뺌, 시작 오름차순)
+    agg_missing: tuple[datetime, ...] = ()    # [D-259] 창 안 결측 집계 봉 시작 (OK일 때만)
+
+
+def _bar(b: MinuteBar) -> Bar:
+    return Bar(b.start, b.open, b.high, b.low, b.close, b.volume, quote_volume=b.quote_volume, trades=b.trades,
+               taker_buy_base=b.taker_buy_base, taker_buy_quote=b.taker_buy_quote)
 
 
 @dataclass
@@ -124,6 +194,8 @@ class M2MinuteInput:
         self._conditions = _ConditionAlerts()
         self._store_problem: str | None = None           # 분봉 저장 실패 중이면 사유 (DP-76) — 성공한 flush가 지운다
         self._unaudited: list[MinuteQualityEvent] = []   # 저장 실패로 감사하지 못한 품질 사건 (다음 flush 재시도)
+        self.last_ext: tuple[int, int, int] = (0, 0, 0)  # [D-260] 마지막 flush의 확장 열 (새로 넣음, 같음, 다름)
+        self.history: History | None = None              # [D-261] 이력 채우기 상태 (None = 채우기 없음)
 
     def __repr__(self) -> str:
         return f"M2MinuteInput(lookback={self.lookback}, margin={self.margin}, book={self.book!r})"
@@ -142,15 +214,17 @@ class M2MinuteInput:
             self._store_ok(alerts)
             return 0, 0, 0
         inserted = same = differing = 0
+        ext = (0, 0, 0)
         try:
             with repo.tx():
                 if bars:
                     inserted, same, differing = repo.insert_minute_bars(bars, MINUTE_SOURCE, now)
-                if differing:
+                    ext = repo.insert_minute_bar_ext(bars, MINUTE_SOURCE, now)   # [D-260] 같은 저장 단위
+                if differing or ext[2]:
                     repo.audit(now, MINUTE_STORED_AUDIT, "marketdata", None, {
-                        "inserted": inserted, "same": same, "differing": differing,
+                        "inserted": inserted, "same": same, "differing": differing, "ext_differing": ext[2],
                         "instruments": sorted({b.instrument for b in bars}),
-                        "note": "같은 봉 재수신 값이 다름 — 기존 값 유지(추가 전용, D-220·V-293)"})
+                        "note": "같은 봉 재수신 값이 다름 — 기존 값 유지(추가 전용, D-220·V-293·D-260)"})
                 for ev in events:
                     repo.audit(now, MINUTE_QUALITY_AUDIT, "marketdata", None, {
                         "instrument": ev.symbol, "reason": ev.reason, "at": ev.at.isoformat(),
@@ -160,6 +234,7 @@ class M2MinuteInput:
             self._unaudited = events
             self._store_failed(type(exc).__name__, len(bars), alerts, now)
             return 0, 0, 0
+        self.last_ext = ext
         self._store_ok(alerts)
         return inserted, same, differing
 
@@ -199,11 +274,13 @@ class M2MinuteInput:
         return frozenset(out)
 
     def inputs(self, repo: Repository, alerts: AlertSink | None, symbols: Sequence[str], at: datetime, now: datetime,
-               ev_id: str, unfetched: frozenset[str] = frozenset()) -> dict[str, MinuteInput]:
+               ev_id: str, unfetched: frozenset[str] = frozenset(),
+               request: MinuteRequest = MinuteRequest()) -> dict[str, MinuteInput]:
         """unfetched: 기다림 상한(PeriodGrid.fetch_wait)이 지나도 그 판정 시각 조회가 끝나지 않은 심볼 → FETCH_TIMEOUT
-        (신호 무효 — 판정 직전 닫힌 봉을 받지 못한 것이므로 누락 연속 수에 센다, DP-73·DP-79)."""
+        (신호 무효 — 판정 직전 닫힌 봉을 받지 못한 것이므로 누락 연속 수에 센다, DP-73·DP-79).
+        request: 전략의 집계 봉·흐름 열 요청 (CP-040 D-259·D-260, minute_request_of)."""
         self.flush(repo, alerts, now)
-        out = {s: self._one(repo, alerts, s, at, now, ev_id, s in unfetched) for s in symbols}
+        out = {s: self._one(repo, alerts, s, at, now, ev_id, s in unfetched, request) for s in symbols}
         with repo.tx():
             repo.audit(now, MINUTE_INPUT_AUDIT, "engine", ev_id, {
                 "at": at.isoformat(), "lookback": self.lookback, "margin_s": self.margin.total_seconds(),
@@ -211,7 +288,7 @@ class M2MinuteInput:
         return out
 
     def _one(self, repo: Repository, alerts: AlertSink | None, s: str, at: datetime, now: datetime,
-             ev_id: str, unfetched: bool = False) -> MinuteInput:
+             ev_id: str, unfetched: bool = False, request: MinuteRequest = MinuteRequest()) -> MinuteInput:
         last = last_closed_start(at, self.margin)
         first = last - ONE_MINUTE * (self.lookback - 1)
         if unfetched:   # 그 판정 시각의 조회가 기다림 상한 안에 끝나지 않음 (T-052, DP-79)
@@ -223,13 +300,43 @@ class M2MinuteInput:
         problem = self.book.quality_problem(s)
         if problem is not None:
             return MinuteInput((), False, _record("QUALITY", first, last, reason=problem))
-        stored = repo.minute_bars(s, 1, NO_ADJUSTMENT, start=first, end=last + ONE_MINUTE)
+        if self.history is not None:   # [D-261 (2)] 채우기 전·실패 → 신호 무효 (창 부족, 다른 출처로 메우지 않음)
+            state, why = self.history.status(s)
+            name = getattr(state, "value", state)
+            if name != "DONE":
+                status = "HISTORY_FAILED" if name == "FAILED" else "HISTORY_PENDING"
+                return MinuteInput((), False, _record(status, first, last, reason=why or "분봉 이력 채우기 중 (D-261)"))
+        stored = repo.minute_bars(s, 1, NO_ADJUSTMENT, start=first, end=last + ONE_MINUTE, with_ext=True)
         w = check_window(stored, at, self.lookback, self.margin)
         self._track(s, w.status, alerts, now, ev_id)
         rec = _record(w.status.value, first, last, count=len(stored), missing=w.missing, fingerprint=w.fingerprint)
         if w.status is not WindowStatus.OK:
             return MinuteInput((), False, rec)
-        return MinuteInput(tuple(Bar(b.start, b.open, b.high, b.low, b.close, b.volume) for b in w.bars), True, rec)
+        if request.flow and not all(b.has_ext for b in w.bars):   # [D-260] 흐름 열 선언 → 확장 열 결측 = 결측
+            rec.update(status="EXT_MISSING", missing=sum(1 for b in w.bars if not b.has_ext), fingerprint="")
+            return MinuteInput((), False, rec)
+        bars = tuple(_bar(b) for b in w.bars)
+        if request.agg_minutes is None:
+            return MinuteInput(bars, True, rec)
+        return self._agg(repo, s, at, request, bars, rec)
+
+    def _agg(self, repo: Repository, s: str, at: datetime, req: MinuteRequest, bars: tuple[Bar, ...],
+             rec: dict) -> MinuteInput:
+        """[D-259] 저장 1분 봉 → 집계 봉 창. 무효면 그 심볼 분봉 입력 전체 무효(1분 창도 넘기지 않음, DP-78 경로)."""
+        assert req.agg_minutes is not None
+        empty = check_agg_window((), at, req.agg_minutes, req.agg_lookback, req.max_missing, self.margin)
+        stored = repo.minute_bars(s, 1, NO_ADJUSTMENT, start=empty.first_start,
+                                  end=empty.last_start + timedelta(minutes=req.agg_minutes), with_ext=True)
+        w = check_agg_window(stored, at, req.agg_minutes, req.agg_lookback, req.max_missing, self.margin,
+                             flow=req.flow)
+        rec["agg"] = {"status": w.status.value, "minutes": req.agg_minutes, "lookback": req.agg_lookback,
+                      "max_missing": req.max_missing, "flow": req.flow, "first": w.first_start.isoformat(),
+                      "last": w.last_start.isoformat(), "missing": [t.isoformat() for t in w.missing],
+                      "used_minutes": w.used_minutes, "fingerprint": w.fingerprint, "rule": AGG_RULE_VERSION}
+        if w.status is not AggStatus.OK:
+            rec["status"] = f"AGG_{w.status.value}"
+            return MinuteInput((), False, rec)
+        return MinuteInput(bars, True, rec, w.bars, w.missing)
 
     def _track(self, s: str, status: WindowStatus, alerts: AlertSink | None, now: datetime, ev_id: str) -> None:
         st = self._missing.setdefault(s, _Missing())

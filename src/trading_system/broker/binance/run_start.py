@@ -189,11 +189,13 @@ class M2RunConnector:
     def __call__(self, *, api_key: SecretLike, secret: SecretLike, symbols: Sequence[str], account: str,
                  now: Callable[[], datetime], sleep: Callable[[float], None], orders_enabled: bool, sink: SpotSink,
                  on_alert: Alert, on_stream_state: Callable[[str, str], None], halts: HaltControl,
-                 minute_plan: tuple[int, int, int] | None = None, minute_sink: MinuteSink | None = None) -> M2Run | str:
+                 minute_plan: tuple[int, int, int] | None = None, minute_sink: MinuteSink | None = None,
+                 backfill_per_minute: int = 0) -> M2Run | str:
         """준비 실패면 거부 사유(문자열) — 호출자는 시작 거부(종료 코드 2).
 
         minute_plan = (판정 주기 N분, 판정 창 봉 수, 확정 여유 초) — 1m klines 조회(CP-037 D-220). 기본 None = 조회 없음.
-        app이 설정 `[minute] enabled = true`와 승인 A-ID를 확인했을 때만 넘긴다. 호출 예산 시작 검사를 넘지 못하면 거부."""
+        app이 설정 `[minute] enabled = true`와 승인 A-ID를 확인했을 때만 넘긴다. 호출 예산 시작 검사를 넘지 못하면 거부.
+        backfill_per_minute > 0 = 이력 채우기 분당 상한(CP-040 D-261) — 예산 시작 검사에 그 몫을 더한다(기본 0 = 채우기 없음)."""
         minute: MinutePlan | None = None
         if minute_plan is not None:
             if minute_sink is None:
@@ -214,7 +216,8 @@ class M2RunConnector:
         except SpotStartRefused as exc:
             return str(exc)
         if minute is not None:
-            problem = minute_budget_problem(session.rate_limits, len(symbols), minute)
+            problem = minute_budget_problem(session.rate_limits, len(symbols), minute,
+                                            backfill_per_minute=backfill_per_minute)
             if problem is not None:
                 return problem
         feed = BinanceFeed(session.client, sink, symbols, now=now, alert=on_alert, halts=halts, account=account,
