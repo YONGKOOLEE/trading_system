@@ -203,7 +203,8 @@ class BinanceSpotAdapter:
             self._events.append(OrderEvent(
                 kind="FILL", order_no=str(f.order_id), fill_id=str(f.trade_id), quantity=f.quantity, price=f.price,
                 at=kept.at, account=self._account, commission=f.commission, commission_asset=f.commission_asset,
-                instrument=f.symbol, quote_qty=kept.quote_qty, quote_confirmed=kept.quote_confirmed))
+                instrument=f.symbol, quote_qty=kept.quote_qty, quote_confirmed=kept.quote_confirmed,
+                is_maker=kept.is_maker))
         if rec is Recorded.CONFLICT:
             self._alert("FILL_CONFLICT", f"{f.symbol} 체결 {f.trade_id}: 같은 체결 ID의 값이 다름 — 대조 필요")
 

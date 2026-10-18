@@ -76,7 +76,7 @@ def make_m2_root(tmp: Path, mode: Mode, *, symbols: str = M2_UNIVERSE) -> Path:
     (d / f"app.{m}.toml").write_text(M2_APP.format(acct=acct, broker=broker), encoding="utf-8")
     (d / f"universe.{m}.toml").write_text(symbols, encoding="utf-8")
     if mode is Mode.PAPER:
-        (root / ".env.paper").write_text("TRADE_MODE=PAPER\nBINANCE_PAPER_API_KEY=placeholder\n", encoding="utf-8")
+        (root / ".env.paper").write_text("TRADE_MODE=PAPER\nBINANCE_PAPER_API_KEY=fake-secret-sentinel\n", encoding="utf-8")
     return root
 
 
@@ -129,7 +129,7 @@ def test_m1_paper_run_refused_before_broker_on_m2_db(tmp_path: Path, monkeypatch
         AssertionError("브로커 생성 호출")))
     assert run_main(root, {"TRADE_MODE": "PAPER"}) == 2
     out = capsys.readouterr().out
-    assert "시작 거부(브로커 연결 없음)" in out and "M2" in out and "placeholder" not in out
+    assert "시작 거부(브로커 연결 없음)" in out and "M2" in out and "fake-secret-sentinel" not in out
     assert calls == []
 
 
@@ -170,7 +170,7 @@ def test_m2_startup_check_passes_with_m2_settings(tmp_path: Path, mode: Mode) ->
     assert cfg.account == ("BN-BT-01" if mode is Mode.BACKTEST else "BN-PAPER-01")
     assert cfg.universe.symbols == ("TSTAUSDT", "TSTBUSDT")
     assert not (root / "var").exists()        # 검사는 DB를 만들지 않는다
-    assert "placeholder" not in repr(cfg)
+    assert "fake-secret-sentinel" not in repr(cfg)
 
 
 @pytest.mark.parametrize("change,why", [
@@ -218,7 +218,7 @@ def test_m2_run_refused_after_checks_without_db_or_connection(tmp_path: Path,
     root = make_m2_root(tmp_path, Mode.PAPER)
     assert run_main(root, {"TRADE_MODE": "PAPER"}, market="M2") == 2
     out = capsys.readouterr().out
-    assert "시작 거부(브로커 연결 없음)" in out and "T-M2-14" in out and "placeholder" not in out
+    assert "시작 거부(브로커 연결 없음)" in out and "T-M2-14" in out and "fake-secret-sentinel" not in out
     assert not (root / "var").exists()
 
 

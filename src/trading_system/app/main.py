@@ -545,7 +545,8 @@ def _run_m2(mode: Mode, base: Path, cfg, caps, strategies: list[StrategyInput], 
             from trading_system.broker.fake.broker import FakeSpotFees
             from trading_system.broker.fake.spot import FakeSpotBroker
             broker = FakeSpotBroker(now=clock.now)
-            broker.spot_fees = FakeSpotFees(rate=gate_settings.cost_rates.commission_rate, pairs=pairs)
+            # 체결 수수료 = taker (CP-040 D-267 (3)). 게이트 비용 추정은 gate_settings = max(maker, taker)
+            broker.spot_fees = FakeSpotFees(rate=cfg.market_settings.fees.fill_rate, pairs=pairs)
             broker.ioc_limit = True   # 매수 = IOC 지정가 (D-104)
         clock_monitor = ClockMonitor(repo, clock, list(app.sntp_servers), None, None)
         try:

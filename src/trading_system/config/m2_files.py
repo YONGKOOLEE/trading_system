@@ -6,7 +6,11 @@
 market:
   [gate]   quote_max_age_seconds(정수 초, A-064 60), buy_buffer·sell_buffer(문자열 비율 0 이상 1 미만, A-064·A-065 Q4 0.5%),
            server_time_warn_ms(정수 밀리초, A-064 500)
-  [costs]  commission_rate(문자열 비율, 비용 추정용 — 값은 사용자 확인 항목 CP-024 §2.4, 비차단)
+  [costs]  (CP-040 D-267, T-065) maker_rate·taker_rate(문자열 비율, 둘 다) + rate_source("placeholder" |
+           "account-commission" | "user", 필수). 기존 commission_rate는 maker·taker가 **둘 다 없을 때만** 읽어 maker = taker =
+           그 값으로 본다(현 설정 파일 그대로 동작 — CP-036 D-216 방식). 이때 rate_source는 선택이며 없으면 "placeholder"
+           (현 값 0.001은 "미확정 자리 값", A-115 Q-5 (가)). commission_rate와 maker·taker 키를 함께 쓰면 거부(셋 동시 포함),
+           maker·taker 한쪽만 있어도 거부. 결과: fees(FeeModel), commission_rate = 비용 추정 요율 = max(maker, taker).
   [alerts] reject_surge_count·reject_surge_minutes (M1과 같은 형식)
   [minute] (선택, CP-037 D-220 T-056 전 별도 승인 — 표가 없으면 꺼짐) 테스트넷 1m klines 주기 조회 [DP-71]:
            enabled(bool, 기본 false), period_minutes(1440의 약수 정수 — 판정 격자 N분, 격자 시각 UTC 00:00 + k×N분이
@@ -28,6 +32,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from trading_system.domain.fees import RATE_SOURCES, FeeModel
 from trading_system.domain.minute_series import ORDER_WINDOW, boundaries_in_window
 
 from .errors import ConfigError
@@ -71,8 +76,9 @@ class M2MarketSettings:
     buy_buffer: Decimal
     sell_buffer: Decimal
     server_time_warn_ms: int
-    commission_rate: Decimal
+    commission_rate: Decimal               # 비용 추정 요율 = fees.estimate_rate = max(maker, taker) (D-267 (2))
     alerts: tuple[int, int]
+    fees: FeeModel                         # 메이커·테이커 요율·출처 (D-267). 체결 모델 요율 = fees.fill_rate (taker)
     minute: M2MinuteSettings = M2MinuteSettings()
 
 
@@ -142,6 +148,33 @@ def parse_minute(raw: object) -> M2MinuteSettings:
     return M2MinuteSettings(enabled, period, lookback, margin if margin is not None else 2, approval)
 
 
+COST_KEYS = ("commission_rate", "maker_rate", "taker_rate", "rate_source")
+
+
+def parse_costs(costs: dict, problems: list[str]) -> FeeModel | None:
+    """[costs] → FeeModel (CP-040 D-267 (1)). 문제는 problems에 더하고 None."""
+    new = [k for k in ("maker_rate", "taker_rate") if k in costs]
+    source = costs.get("rate_source", None if new else "placeholder")
+    if source not in RATE_SOURCES:
+        problems.append(f"costs.rate_source: {' | '.join(RATE_SOURCES)} 중 하나 (maker_rate·taker_rate를 쓰면 필수)")
+        source = None
+    if new and "commission_rate" in costs:
+        problems.append("costs: commission_rate와 maker_rate·taker_rate를 함께 쓸 수 없다 — 기존 키는 새 키가 둘 다 없을 "
+                        "때만 읽는다 (D-267)")
+        return None
+    if new:
+        if len(new) != 2:
+            problems.append("costs: maker_rate·taker_rate는 둘 다 있어야 함 (D-267)")
+            return None
+        maker = _ratio(costs.get("maker_rate"), "costs.maker_rate", problems)
+        taker = _ratio(costs.get("taker_rate"), "costs.taker_rate", problems)
+    else:
+        maker = taker = _ratio(costs.get("commission_rate"), "costs.commission_rate", problems)
+    if maker is None or taker is None or source is None:
+        return None
+    return FeeModel(maker, taker, source)
+
+
 def parse_m2_market(raw: dict) -> M2MarketSettings:
     problems: list[str] = []
     for k in raw:
@@ -156,12 +189,12 @@ def parse_m2_market(raw: dict) -> M2MarketSettings:
         costs = {}
     problems += [f"gate.{k}: 알 수 없는 키" for k in gate
                  if k not in ("quote_max_age_seconds", "buy_buffer", "sell_buffer", "server_time_warn_ms")]
-    problems += [f"costs.{k}: 알 수 없는 키" for k in costs if k != "commission_rate"]
+    problems += [f"costs.{k}: 알 수 없는 키" for k in costs if k not in COST_KEYS]
     age = _pos_int(gate.get("quote_max_age_seconds"), "gate.quote_max_age_seconds", problems)
     buy = _ratio(gate.get("buy_buffer"), "gate.buy_buffer", problems)
     sell = _ratio(gate.get("sell_buffer"), "gate.sell_buffer", problems)
     warn = _pos_int(gate.get("server_time_warn_ms"), "gate.server_time_warn_ms", problems)
-    com = _ratio(costs.get("commission_rate"), "costs.commission_rate", problems)
+    fees = parse_costs(costs, problems)
     alerts: tuple[int, int] | None = None
     try:
         alerts = parse_alert_settings(raw)
@@ -172,9 +205,9 @@ def parse_m2_market(raw: dict) -> M2MarketSettings:
         minute = parse_minute(raw.get("minute"))
     except ConfigError as exc:
         problems += exc.problems
-    if problems:
-        raise ConfigError(problems)
-    return M2MarketSettings(age, buy, sell, warn, com, alerts, minute)  # type: ignore[arg-type]
+    if problems or fees is None:
+        raise ConfigError(problems or ["[costs] 해석 실패"])
+    return M2MarketSettings(age, buy, sell, warn, fees.estimate_rate, alerts, fees, minute)  # type: ignore[arg-type]
 
 
 def parse_universe(raw: dict) -> Universe:

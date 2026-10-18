@@ -221,6 +221,8 @@ class OrderEvent:
     instrument: str | None = None
     quote_qty: Decimal | None = None
     quote_confirmed: bool = False
+    # M2 (CP-040 D-267 (4)): 거래소 보고 메이커 여부(executionReport m·myTrades isMaker). 기록만(FILL 감사). None = 보고 없음(M1·FULL 응답)
+    is_maker: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -259,6 +261,7 @@ class FillRecord:
     commission_asset: str | None = None
     quote_qty: Decimal | None = None
     instrument: str | None = None
+    is_maker: bool | None = None    # M2 myTrades isMaker (CP-040 D-267 (4), 기록만). M1은 None
 
 
 @dataclass(frozen=True)

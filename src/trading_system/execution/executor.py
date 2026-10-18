@@ -398,9 +398,11 @@ class Executor:
         # 종결된 주문(취소·만료·정정됨)에 늦게 온 체결은 수량만 기록하고 주문을 다시 열지 않는다
         new_state = ("FILLED" if filled >= order.quantity else "PARTIAL") if order_open else order.state
         self._repo.update_broker_order(order.order_key, filled, new_state)
-        fill_audit = {"quantity": str(ev.quantity), "price": str(ev.price)}
+        fill_audit: dict[str, object] = {"quantity": str(ev.quantity), "price": str(ev.price)}
         if ev.commission_asset is not None:  # M2: 감사에도 수수료·수수료 자산 (원장 기록은 fill_fee 표, T-M2-04)
             fill_audit.update(commission=str(ev.commission), commission_asset=ev.commission_asset)
+        if ev.is_maker is not None:   # M2 거래소 보고 메이커 여부 — 기록만, 추정 수수료와 비교용 (CP-040 D-267 (4), V-338)
+            fill_audit["is_maker"] = ev.is_maker
         self._repo.audit(now, "FILL", "tracker", order.order_key, fill_audit)
         if intent.state.is_terminal or not order_open:
             # INV-11: 종결된 의도는 다시 열지 않는다. 포지션 반영은 대조에서 사람이 정한다 (02 D-035, T-008)
