@@ -252,8 +252,9 @@ class SpotProfile(MarketProfile):
         gaps = ", ".join(d.isoformat() for d in di.missing[-5:]) + (f" 외 {len(di.missing) - 5}일"
                                                                     if len(di.missing) > 5 else "")
         what = "확정 일봉 없음" if not di.exit_bars else f"빈 날 {gaps or '없음'}"
-        self._engine.alerts.alert("WARNING", f"일봉 판정 입력 불완전 {inst} ({owner}): {what} — {held}. 신규 진입·증액 차단, "
-                                             "감액·청산 판정은 빈 날을 건너뛴 확정 봉으로 계속 (DP-82, A-126 ②)", None)
+        self._engine.alerts.alert("WARNING", f"일봉 판정 입력 불완전 {inst} ({owner}): {what} — {held}. 신규 진입·증액은 빈 날 뒤 "
+                                             "연속 구간(어제 봉까지)으로만 판정 — 전략 창이 모자라면 진입 없음, 어제 봉이 없으면 진입 차단. "
+                                             "감액·청산 판정은 빈 날을 건너뛴 확정 봉으로 계속 (DP-82, A-126 ② — 해석 확인 대기)", None)
 
     def sellable_position(self, inst: str, owner: str) -> PositionView | None:
         """[CP-040 T-067] 손절 감시의 청산 수량 = 판정 입력과 같은 보유 표시(청산 가능 수량, dust 제외 — D-102).
