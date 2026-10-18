@@ -1,7 +1,7 @@
 # 보조 기록 — 승인 근거가 아니다. 승인 근거는 docs/approvals.md.
 # 이 파일과 approvals.md가 충돌하면 진행하지 말고 사용자에게 확인한다.
 current_stage: 6            # 구현 — M1 PAPER-0 조건부 통과(A-097, 2026-10-13, 5거래일·무인 2일). 매일 06:45 무인 자동 운영 유지(paper0-verify v2). PAPER-1은 실제 전략 결정 뒤(D-076). 인계: docs/handoff.md
-delivery: M2 우선(CP-037 A-113)   # M1 국내주식: PAPER-0 조건부 통과, 매일 무인 건강 검진, PAPER-1은 전략 대기. M2 크립토: 실행 경로 구현(병합 대기), T-050 관찰 중, PAPER-0(m2-verify) 준비
+delivery: M2 우선(CP-037 A-113)   # M1 국내주식: PAPER-0 조건부 통과, 매일 무인 건강 검진, PAPER-1은 전략 대기. M2 크립토: PAPER-0(m2-verify, 테스트넷) 시작 2026-10-19 00:06 KST(A-125), crypto-trend 공식 판정은 CP-040 T-068 뒤
 business_definition: v0.7 approved   # 근거: A-102 (2026-10-14 계획 문서 묶음). v0.6 superseded
 gates:
   strategy: approved         # 00-strategy.md v0.5, A-102 (v0.4 superseded)
@@ -14,4 +14,4 @@ implementation_start: authorized   # A-022 (2026-10-01). M2 구현 시작 A-071 
 live_order_code: not-authorized
 live_run: not-authorized    # 시장별: M1/M2/M3 모두 없음. PAPER 자동 운영(CP-029)은 PAPER 전용
 commit_policy: D-082 (A-017) + A-030   # 작업 완료·테스트 통과 시 로컬 커밋(문서 포함, A-030), push·main 병합은 지시 시
-last_updated: 2026-10-18   # 세션 49 끝(인계). A-104~A-121. M2 우선, 매매 대상 BTC·ETH(A-120), CP-038 v0.2 승인(A-121), CP-041 draft 승인 대기. LF-8 표본 1분봉 수집 중. 병합 대기 브랜치(handoff). 실전 주문 코드·LIVE 승인 없음
+last_updated: 2026-10-19   # 세션 50 끝. A-122~A-125. M2 PAPER-0 시작, 통합 병합 3회(main 2a81b73). 실전 주문 코드·LIVE 승인 없음
