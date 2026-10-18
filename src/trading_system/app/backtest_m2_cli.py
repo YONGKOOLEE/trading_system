@@ -26,7 +26,8 @@ import argparse
 import csv
 import hashlib
 import json
-from collections.abc import Sequence
+import subprocess
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
@@ -35,6 +36,10 @@ from pathlib import Path
 from trading_system.app.backtest import BacktestError
 from trading_system.app.backtest_m2 import (
     SpotBacktestConfig, dust_summary, fee_model_summary, perturbation_check_m2, render_report_m2, run_backtest_m2,
+)
+from trading_system.app.low_frequency import (
+    NO_SAMPLE_WIRING, UNKNOWN_PAST, LowFrequencyError, LowFrequencyInputs, load_low_frequency_settings,
+    params_hash, parse_declaration,
 )
 from trading_system.app.validation_tool import load_validation_settings
 from trading_system.app.wiring import StrategyInput, load_strategy, period_grid_of, spot_rule_problems
@@ -241,6 +246,70 @@ def backtest_m2_main(argv: Sequence[str], root: Path) -> int:
     return 0
 
 
+GitRun = Callable[[Path, list[str]], "str | None"]
+
+
+def _git_run(root: Path, args: list[str]) -> str | None:
+    """읽기 전용 git 조회(log·status). 실패하면 None — 커밋을 확인하지 못한 것으로 본다(보수)."""
+    try:
+        p = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return p.stdout if p.returncode == 0 else None
+
+
+def build_low_frequency_inputs(root: Path, strategy_id: str, version: int, params: dict[str, object], *, out: Path,
+                               final_from: date, data_start: date, lookback: int,
+                               git: GitRun = _git_run) -> LowFrequencyInputs | None:
+    """[CP-038 T-058] 저빈도 선언 전략이면 판정 입력을 만든다. 명세 docs/strategies/<ID>/strategy.md에 선언 절이 없으면 None
+    (일반 경로 그대로, V-313). 수치는 config/low-frequency.toml에서만(명령줄 옵션 없음, D-237 (1)).
+
+    - E-1 선언 커밋: 명세 파일에 작업 트리 변경이 없을 때 그 파일의 마지막 커밋(해시·시각). 변경이 있거나 git이 없으면 None.
+    - 공식 판정표 docs/strategies/<ID>/validation-v<n>.md가 있으면 처음 추가된 커밋 시각, 커밋 안 됐으면 UNKNOWN_PAST(사후로 간주).
+    - 전체 이력 = 데이터 시작 + 워밍업(⌈lookback/1440⌉일) ~ final_from 전날(C-8·D-163).
+    - LF-8: 표본 목록 해시를 설정 값과 대조만 한다. 표본 1분봉 실행 연결은 T-068 뒤 → 지금은 '판단 불가(표본 데이터 없음)'."""
+    doc = root / "docs" / "strategies" / strategy_id / "strategy.md"
+    if not doc.is_file():
+        return None
+    declaration, problems = parse_declaration(doc.read_text(encoding="utf-8"))
+    if declaration is None and not problems:
+        return None
+    approvals = root / "docs" / "approvals.md"
+    settings = load_low_frequency_settings(root / "config" / "low-frequency.toml",
+                                           approvals_text=approvals.read_text(encoding="utf-8")
+                                           if approvals.is_file() else "")
+    rel = doc.relative_to(root).as_posix()
+    if declaration is not None:
+        commit = committed = None
+        dirty = git(root, ["status", "--porcelain", "--", rel])
+        log = git(root, ["log", "-1", "--format=%H|%cI", "--", rel]) if dirty is not None and not dirty.strip() else None
+        if log and "|" in log.strip():
+            h, _, at = log.strip().partition("|")
+            try:
+                commit, committed = h, datetime.fromisoformat(at)
+            except ValueError:
+                commit = committed = None
+        declaration = replace(declaration, commit=commit, committed_at=committed)
+    official = doc.parent / f"validation-v{version}.md"
+    first_official: datetime | None = None
+    if official.is_file():
+        added = git(root, ["log", "--diff-filter=A", "--format=%cI", "--", official.relative_to(root).as_posix()])
+        stamps = [x for x in (added or "").splitlines() if x.strip()]
+        try:
+            first_official = datetime.fromisoformat(stamps[-1].strip()) if stamps else UNKNOWN_PAST
+        except ValueError:
+            first_official = UNKNOWN_PAST
+    list_path = root / settings.lf8_list_path
+    sha = hashlib.sha256(list_path.read_bytes()).hexdigest() if list_path.is_file() else ""
+    reason = NO_SAMPLE_WIRING if sha == settings.lf8_list_sha256 else (
+        "LF-8 표본 목록 해시 불일치(설정 list_sha256과 다름 또는 파일 없음) — 표본 데이터 없음으로 판단 불가 (D-244 (6))")
+    return LowFrequencyInputs(
+        settings=settings, declaration=declaration, declaration_problems=problems, first_official_at=first_official,
+        history_start=data_start + timedelta(days=-(-lookback // 1440)), history_end=final_from - timedelta(days=1),
+        ledger=out / "low-frequency-ledger.jsonl", lf8=None, lf8_no_data_reason=reason,
+        params_sha256=params_hash(params))
+
+
 def backtest_m2_minute_main(argv: Sequence[str], root: Path) -> int:
     """`backtest --market M2 --interval 1m` (CP-037 T-053, D-221·D-222). 데이터 = A-110 공개 1m CSV(읽기만, 스트리밍).
     전략은 CAP-TRG-02(파라미터 period_minutes) — 판정 일정은 실운영과 같은 주기 격자. `--validate`면 D-222 6창(2020~2025)."""
@@ -321,13 +390,17 @@ def backtest_m2_minute_main(argv: Sequence[str], root: Path) -> int:
             v_out = out / ns.run_id
             if v_out.exists():
                 raise ConfigError(f"같은 실행 ID의 검증 폴더가 이미 있음: {v_out.name}")
+            data_start = first_minute_start(data_path)
+            # [CP-038 T-058] 명세에 저빈도 선언이 있을 때만 (없으면 None → 일반 경로 결과 불변)
+            low = build_low_frequency_inputs(root, strat.spec.strategy_id, strat.spec.version, dict(params), out=out,
+                                             final_from=final_from, data_start=data_start, lookback=ns.lookback)
             res = run_minute_validation(MinuteValidationInputs(
-                template=cfg, out_dir=v_out, data_start=first_minute_start(data_path), skip_variants=ns.skip_variants,
-                command=" ".join(["backtest --market M2 --interval 1m", *argv])))
+                template=cfg, out_dir=v_out, data_start=data_start, skip_variants=ns.skip_variants,
+                command=" ".join(["backtest --market M2 --interval 1m", *argv]), low_frequency=low))
             print(f"검증 완료: {v_out / 'validation.md'} — 판정 {res['verdict']['verdict']}")
             return 0
         result = run_minute_backtest(cfg)
-    except (ConfigError, BacktestError, ValueError, InvalidOperation, OSError) as exc:
+    except (ConfigError, BacktestError, LowFrequencyError, ValueError, InvalidOperation, OSError) as exc:
         print(f"백테스트 거부: {exc}")
         return 2
     days = result.result.days

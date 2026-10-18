@@ -26,6 +26,9 @@ M2 일봉 실행기(app/backtest_m2 — 하루 여러 판정 일봉 근사)는 �
 - 검증 (D-222, A-113 Q-5): 학습 3년·검증 1년·1년 이동, 검증 2020~2025 6창. 데이터 시작(2017-08-17) 전 학습 구간은
   "학습 단축" 표시, 창별 결측 봉 수, C-7(BTCUSDT 단일 심볼 사후 선택) "과대 추정 가능" 표시. 공개 실서버 성과는 테스트넷
   PAPER 성과와 직접 비교하지 않는다(2-M2.6).
+- [CP-038 T-058] 저빈도 예외 경로(run_low_frequency_m2): 저빈도 선언 전략만(MinuteValidationInputs.low_frequency). 일반 판정
+  뒤 적격(E-1~E-5)이면 전체 이력 실행·2배 슬리피지·변형·LF-8 표본 실행 → LF-0~LF-8(app/low_frequency) → D-234 문구.
+  선언이 없으면 결과 파일이 이전과 바이트 단위로 같다(V-313).
 """
 
 from __future__ import annotations
@@ -40,6 +43,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from trading_system.app import low_frequency as lfm
 from trading_system.app.backtest import BacktestError, BacktestResult
 from trading_system.app.backtest_m2 import (
     ACCOUNT, _Account, _ClockOk, _Limits, _Market, _round_trips, _Rules, _Strategies, check_fee_model,
@@ -254,6 +258,10 @@ class MinuteBacktestResult:
     last_close: Decimal | None = None
     seconds: float = 0.0
     extras: dict = field(default_factory=dict)
+    # [CP-038 T-058] 거래별 진입 체결 금액이 있는 왕복 기록·끝까지 열린 왕복·마지막 봉 종가 (보고서·지문에 넣지 않음)
+    trade_records: list = field(default_factory=list)
+    open_lots: dict = field(default_factory=dict)
+    end_close: Decimal | None = None
 
 
 def grid_of(cfg: MinuteBacktestConfig) -> PeriodGrid:
@@ -439,8 +447,8 @@ def run_minute_backtest(cfg: MinuteBacktestConfig) -> MinuteBacktestResult:
         dirty = True
     if dirty:
         held = repo.position(ACCOUNT, sym).quantity
+    px_end = end_bar[0].close if end_bar[0] is not None else last_close
     if cur_day is not None:   # 마지막 날 평가액 = 그날 마지막 봉 종가(마지막 판정 뒤 봉 포함)
-        px_end = end_bar[0].close if end_bar[0] is not None else last_close
         equity.append((cur_day, cash + held * (px_end if px_end is not None else _ZERO)))
     unknown = repo.intents_in_state(IntentState.UNKNOWN)
     repo.close()
@@ -456,6 +464,8 @@ def run_minute_backtest(cfg: MinuteBacktestConfig) -> MinuteBacktestResult:
     out.bars_in_period = counter[0]
     out.missing_bars = len(days) * 1440 - counter[0]
     out.last_close = last_close
+    out.end_close = px_end
+    out.trade_records, out.open_lots = lfm.round_trip_records(broker.fills_for(ACCOUNT), cfg.pairs, cfg.rules)
     out.seconds = round(_time.perf_counter() - t0, 2)
     return out
 
@@ -628,6 +638,7 @@ class MinuteValidationInputs:
     skip_variants: bool = False
     perturbation_days: int = 3          # 창마다 교란 검사 표본 날짜 수
     command: str = ""
+    low_frequency: lfm.LowFrequencyInputs | None = None   # [CP-038] 저빈도 선언 전략만. None = 일반 경로(결과 파일 불변, V-313)
 
 
 def run_minute_validation(inp: MinuteValidationInputs) -> dict:
@@ -643,6 +654,7 @@ def run_minute_validation(inp: MinuteValidationInputs) -> dict:
     slip2_trades: list = []  # type: ignore[type-arg]
     var_trades: dict[str, list] = {v.label: [] for v in variants}  # type: ignore[type-arg]
     all_repro = all_lookahead = True
+    base_runs: list[tuple[Window, MinuteBacktestResult]] = []
     for w in inp.windows:
         def one(label: str, slip: Decimal, params: dict | None = None) -> MinuteBacktestResult:
             return run_minute_backtest(replace(t, run_id=f"w{w.k}-{label}", start=w.val_start, end=w.val_end,
@@ -662,6 +674,7 @@ def run_minute_validation(inp: MinuteValidationInputs) -> dict:
                           "expectancy": _fmt(_expectancy(vr.result.trades)), "note": v.note})
         all_repro &= repro
         all_lookahead &= bad == []
+        base_runs.append((w, base))
         base_trades += base.result.trades
         slip2_trades += slip2.result.trades
         windows_out.append({
@@ -694,16 +707,208 @@ def run_minute_validation(inp: MinuteValidationInputs) -> dict:
         "variants": [{"label": k, "trades": len(v), "expectancy": _fmt(_expectancy(v))} for k, v in var_trades.items()],
         "verdict": verdict, "command": inp.command,
     }
+    if inp.low_frequency is not None:   # [CP-038 D-234] 같은 실행 묶음에서 추가 판정 — 선언 없는 전략은 이 칸 자체가 없다
+        out["low_frequency"] = run_low_frequency_m2(inp, verdict, base_runs, variants, reproducible=all_repro,
+                                                    lookahead_ok=all_lookahead)
+    md = render_minute_validation(out)
+    if not lfm.table_valid(md, out):
+        raise BacktestError("저빈도 예외 표시가 빠진 판정표 — 무효 (CP-038 D-240)")
     inp.out_dir.mkdir(parents=True, exist_ok=True)
     (inp.out_dir / "validation.json").write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
                                                 newline="\n")
-    (inp.out_dir / "validation.md").write_text(render_minute_validation(out), encoding="utf-8", newline="\n")
+    (inp.out_dir / "validation.md").write_text(md, encoding="utf-8", newline="\n")
     return out
+
+
+# --- [CP-038 T-058] 저빈도 예외 경로 (D-234~D-245) -------------------------------------------------------------------
+
+def lf_history_runs(template: MinuteBacktestConfig, *, start: date, end: date, out_dir: Path, slippage_base: Decimal,
+                    multiplier: int, variants: Sequence[object], only_base: bool = False) -> dict[str, MinuteBacktestResult]:
+    """전체 이력(데이터 시작 + 워밍업 ~ final_from 전날) 연속 1회 실행: 기본·슬리피지 배수·±20% 변형(D-165 규칙 그대로).
+    끝 날짜가 final_from 이후면 실행기가 거부한다(C-8·D-163). 원천은 끝 + 1일 전 봉만 넘긴다(2026 행 미전달, V-308)."""
+    def one(label: str, slip: Decimal, params: dict | None = None) -> MinuteBacktestResult:
+        return run_minute_backtest(replace(template, run_id=f"lf-history-{label}", start=start, end=end, slippage=slip,
+                                           out_dir=out_dir, params=dict(template.params if params is None else params)))
+    out = {"base": one("base", slippage_base)}
+    if only_base:
+        return out
+    out["slip2x"] = one("slip2x", slippage_base * multiplier)
+    for v in variants:
+        out[v.label] = one(v.label, slippage_base, v.params)  # type: ignore[attr-defined]
+    return out
+
+
+@dataclass
+class Lf8RunResult:
+    trades: list
+    hold_return: Decimal | None
+    blocked_entries: int = 0
+    delisted: int = 0          # 보유 중 데이터 끝 → 마지막 종가 × haircut 청산으로 집계한 거래 수
+    open_at_end: int = 0       # 전체 이력 끝(2025-12-31) 보유 — C-2와 같이 미청산 제외
+
+
+def _usdt_base(symbol: str) -> str:
+    return symbol[:-4] if symbol.endswith("USDT") and len(symbol) > 4 else symbol
+
+
+def run_lf8_sample(template: MinuteBacktestConfig, settings: lfm.LowFreqSettings, *, alias: str, symbol: str,
+                   sample: lfm.Lf8Sample, history_end: date, slippage: Decimal, out_dir: Path,
+                   label: str = "base") -> Lf8RunResult:
+    """D-244 (3)~(5): 표본 심볼 하나를 단독 계좌로. 배포 전략과 같은 코드·파라미터·한도 프로필, 표본 봉을 배포 심볼 이름
+    (alias — 전략 유니버스 안)으로 넣는다(전략 코드 무변경, DP-86). 목록 해 밖 신규 진입·증액 차단, 보유는 청산 신호까지.
+    데이터가 전체 이력 끝 전에 끝나면 남은 보유를 마지막 종가 × haircut으로 청산한 거래로 집계(D-244 (4))."""
+    start = max(date(min(sample.years), 1, 1), sample.data_start)
+    end = min(sample.data_end, history_end)
+    wrapper = lfm.EntryYears(template.strategy, sample.years)
+    cfg = replace(template, run_id=f"lf8-{alias}-{symbol}-{label}", symbol=alias,
+                  rules={alias: lfm.continuous_rules(alias)}, pairs={alias: (_usdt_base(symbol), "USDT")},
+                  source=sample.source, start=start, end=end, slippage=slippage, out_dir=out_dir,
+                  strategy=wrapper)  # type: ignore[arg-type]
+    out = run_minute_backtest(cfg)
+    res = Lf8RunResult(list(out.trade_records), None, wrapper.blocked)
+    lot = out.open_lots.get(alias)
+    if lot is not None:
+        if sample.data_end < history_end and out.end_close is not None:
+            res.trades.append(lfm.close_out(lot, out.end_close, cfg.cost_rates.commission_rate,
+                                            settings.lf8_delist_haircut, end))
+            res.delisted = 1
+        else:
+            res.open_at_end = 1
+    hold = buy_hold_return(out.first_open, out.end_close, slippage, cfg.cost_rates.commission_rate)
+    res.hold_return = None if hold is None else Decimal(hold)
+    return res
+
+
+def _c5_plus(r: MinuteBacktestResult, slippage: Decimal, fee: Decimal, initial: Decimal) -> dict:
+    """C-5+ 참고(판정 제외): 전략 vs 단순 보유 총수익률·MDD·보유일 비율(근사)·진입 비중 중앙/최대."""
+    eq = dict(r.result.equity)
+    days = len(r.result.days) or 1
+    weights: list[Decimal] = []
+    held_days = 0
+    for t in r.trade_records:
+        prev = eq.get(t.entry_day - timedelta(days=1), initial)
+        if prev > 0:
+            weights.append(t.entry_amount / prev)
+        held_days += (t.exit_day - t.entry_day).days + 1
+    weights.sort()
+    med = weights[len(weights) // 2] if weights else None
+    q = Decimal("0.0001")
+    return {"total_return": r.result.metrics["total_return"], "max_drawdown": r.result.metrics["max_drawdown"],
+            "buy_hold_return": buy_hold_return(r.first_open, r.last_close, slippage, fee),
+            "held_day_ratio": format((Decimal(held_days) / Decimal(days)).quantize(q), "f"),
+            "held_day_ratio_note": "진입일~청산일 포함 일수 합 ÷ 기간 일수(근사 — 같은 날 왕복도 1일)",
+            "entry_weight_median": None if med is None else format(med.quantize(q), "f"),
+            "entry_weight_max": format(weights[-1].quantize(q), "f") if weights else None}
+
+
+def run_low_frequency_m2(inp: MinuteValidationInputs, verdict: dict, base_runs: list[tuple[Window, MinuteBacktestResult]],
+                         variants: Sequence[object], *, reproducible: bool, lookahead_ok: bool) -> dict:
+    """D-234: 일반 판정 뒤 (C-2만 판단 불가 + E-1~E-5) → 전체 이력·변형·LF-8 표본 실행 → LF-0~LF-8 → 문구. 적격이면
+    verdict["verdict"]를 종합 문구로 바꾸고 일반 판정은 general_verdict에 남긴다. 적격이 아니면 verdict는 그대로."""
+    low = inp.low_frequency
+    assert low is not None
+    s, t = low.settings, inp.template
+    spec = t.strategy.spec
+    lfm.check_ledger(low.ledger, spec.strategy_id, spec.version, low.params_sha256, s.sha256)
+    head = {"label": lfm.LABEL, "cp": s.cp, "cp_version": s.cp_version, "approved_by": s.approved_by,
+            "settings_sha256": s.sha256, "history_period": [low.history_start.isoformat(), low.history_end.isoformat()],
+            "declaration": None if low.declaration is None else {
+                "version": low.declaration.version, "annual_range": [str(low.declaration.annual_min),
+                                                                     str(low.declaration.annual_max)],
+                "reasons": list(low.declaration.reasons), "commit": low.declaration.commit,
+                "committed_at": None if low.declaration.committed_at is None
+                else low.declaration.committed_at.isoformat()}}
+    kw = dict(market=low.market, strategy_id=spec.strategy_id, version=spec.version, declaration=low.declaration,
+              declaration_problems=low.declaration_problems, first_official_at=low.first_official_at, general=verdict,
+              reproducible=reproducible, lookahead_ok=lookahead_ok, limits_profile=t.account_limits.profile,
+              limits_approved_by=t.account_limits.approved_by, windows=len(inp.windows))
+    elig = lfm.check_eligibility(s, history_trades=None, history_days=None, **kw)  # type: ignore[arg-type]
+
+    def done(result: dict) -> dict:
+        lfm.record_ledger(low.ledger, spec.strategy_id, spec.version, low.params_sha256, s.sha256, s.cp_version)
+        return result
+    if not elig["pre_ok"]:
+        return done({"applied": False, **head, "eligibility": elig})
+    hist_dir = inp.out_dir / "runs"
+    first = lf_history_runs(t, start=low.history_start, end=low.history_end, out_dir=hist_dir,
+                            slippage_base=inp.slippage_base, multiplier=s.lf6_slippage_multiplier, variants=[],
+                            only_base=True)["base"]
+    hist_days = (low.history_end - low.history_start).days + 1
+    elig = lfm.check_eligibility(s, history_trades=len(first.trade_records), history_days=hist_days,
+                                 **kw)  # type: ignore[arg-type]
+    history_info = {"trades": len(first.trade_records), "days": hist_days, "missing_bars": first.missing_bars,
+                    "digest": first.result.digest}
+    if not elig["eligible"]:
+        return done({"applied": False, **head, "eligibility": elig, "history": history_info})
+    rest = {v.label: run_minute_backtest(replace(t, run_id=f"lf-history-{v.label}", start=low.history_start,  # type: ignore[attr-defined]
+                                                 end=low.history_end, slippage=inp.slippage_base, out_dir=hist_dir,
+                                                 params=dict(v.params)))  # type: ignore[attr-defined]
+            for v in variants}
+    slip2 = run_minute_backtest(replace(t, run_id="lf-history-slip2x", start=low.history_start, end=low.history_end,
+                                        slippage=inp.slippage_base * s.lf6_slippage_multiplier, out_dir=hist_dir,
+                                        params=dict(t.params)))
+    fee = t.cost_rates.commission_rate
+    windows = [_window_lf_simple(w, r, inp.slippage_base, fee, t.initial_cash) for w, r in base_runs]
+    runs8: dict[str, dict[str, lfm.Lf8SymbolResult]] | None = None
+    lf8_counts: dict[str, int] = {}
+    if low.lf8 is not None and low.lf8.samples:
+        runs8 = {}
+        mult = s.lf8_slippage_multiplier
+        for alias in low.lf8.aliases:
+            runs8[alias] = {}
+            for sym, smp in sorted(low.lf8.samples.items()):
+                a = run_lf8_sample(t, s, alias=alias, symbol=sym, sample=smp, history_end=low.history_end,
+                                   slippage=inp.slippage_base, out_dir=inp.out_dir / "lf8", label="base")
+                b = run_lf8_sample(t, s, alias=alias, symbol=sym, sample=smp, history_end=low.history_end,
+                                   slippage=inp.slippage_base * mult, out_dir=inp.out_dir / "lf8", label="slip2x")
+                runs8[alias][sym] = lfm.Lf8SymbolResult(a.trades, b.trades, a.hold_return)
+                for k, n in (("blocked_entries", a.blocked_entries), ("delisted", a.delisted),
+                             ("open_at_end", a.open_at_end)):
+                    lf8_counts[k] = lf8_counts.get(k, 0) + n
+    reason = low.lf8_no_data_reason or (lfm.NO_MINUTE_SAMPLE if "CAP-TRG-02" in spec.capabilities else "")
+    lf8 = lfm.judge_lf8(s, runs8, deployed=first.trade_records,
+                        list_sha256=low.lf8.list_sha256 if low.lf8 is not None else None, no_data_reason=reason)
+    if lf8_counts:
+        lf8["counts"] = lf8_counts
+        lf8["notes"] = ["표본 수량은 연속값(단위 1e-8)·최소 주문 5 USDT — 실제 거래 규칙 아님(D-244 (5))",
+                        "표본 봉은 배포 심볼 이름으로 넣어 같은 코드·파라미터로 실행(DP-86)"]
+    assert low.declaration is not None
+    judged = lfm.judge_lf(s, declaration=low.declaration, windows=windows, history=first.trade_records,
+                          history_slip2=slip2.trade_records, variants={k: v.trade_records for k, v in rest.items()},
+                          variants_run=not inp.skip_variants, lf8=lf8, c7=True)
+    boot = lfm.bootstrap_reference(s, [x.log_return for x in first.trade_records],
+                                   lfm.seed_of(spec.strategy_id, spec.version))
+    verdict["general_verdict"] = verdict["verdict"]
+    verdict["verdict"] = judged["verdict"]
+    verdict["label"] = lfm.LABEL
+    history_info.update({"slip2x_trades": len(slip2.trade_records),
+                         "variants": {k: len(v.trade_records) for k, v in rest.items()},
+                         "c5_plus": _c5_plus(first, inp.slippage_base, fee, t.initial_cash)})
+    return done({"applied": True, **head, "eligibility": elig, "history": history_info, "items": judged["items"],
+                 "lf8": lf8, "LF-R": boot, "verdict": judged["verdict"], "reasons": judged["reasons"],
+                 "windows_c5_plus": [{"k": w.k, **_c5_plus(r, inp.slippage_base, fee, t.initial_cash)}
+                                     for w, r in base_runs]})
+
+
+def _window_lf_simple(w: Window, r: MinuteBacktestResult, slippage: Decimal, fee: Decimal,
+                      initial: Decimal) -> lfm.WindowLF:
+    """창별 LF 입력: 그 창에서 청산된 거래(창 실행 거래), 단순 보유 수익률(C-5 방식), 창 끝 미청산 평가 손익
+    = 마지막 평가액 − 초기 자금 − 청산 거래 손익 합 (표시만)."""
+    hold = buy_hold_return(r.first_open, r.last_close, slippage, fee)
+    pnl = sum((x.pnl for x in r.trade_records), _ZERO)
+    final = r.result.equity[-1][1] if r.result.equity else initial
+    return lfm.WindowLF(w.k, list(r.trade_records), None if hold is None else Decimal(hold),
+                        (final - initial - pnl).quantize(Decimal("0.00000001")))
 
 
 def render_minute_validation(o: dict) -> str:
     v = o["verdict"]
-    lines = [f"# M2 1분봉 검증 판정표 — {o['strategy']} v{o['version']} ({o['symbol']})", "",
+    low = o.get("low_frequency")
+    applied = bool(low and low.get("applied"))
+    banner = ([f"- **{lfm.LABEL}** — C-7 생존편향 표시: {v['C-7']} / {low['cp']} {low['cp_version']}(승인 "
+               f"{low['approved_by']}) 설정 SHA-256 `{low['settings_sha256']}` / 일반 판정 {v['general_verdict']} "
+               "(C-2만 미달) → 대체 증거 경로. 일반 '통과'와 섞어 세지 않는다(D-240)"] if applied else [])
+    lines = [f"# M2 1분봉 검증 판정표 — {o['strategy']} v{o['version']} ({o['symbol']})", "", *banner,
              f"- 창(D-222, A-113 Q-5): 학습 3년·검증 1년·1년 이동, 검증 2020~2025 — 데이터 시작 {o['data_start']}, "
              f"최종 확인 구간 {o['final_from']} 이후 미사용(D-163)",
              f"- 판정 격자 {o['period_minutes']}분, 분봉 창 {o['lookback_bars']}봉, 슬리피지 {o['slippage_base']}"
@@ -730,12 +935,63 @@ def render_minute_validation(o: dict) -> str:
               f"- C-7 생존편향: {v['C-7']}",
               "- C-8 최종 확인: 이 실행에서 미사용 — 해당 없음",
               f"- 창별 결측 분 합계 {p['missing_bars']}, 손실 창 {p['loss_windows']}/{len(o['windows'])}",
-              f"- **판정: {v['verdict']}**", *[f"- 사유: {x}" for x in v["reasons"]],
+              f"- **판정: {v['verdict']}**" + (f" ({lfm.LABEL})" if applied else ""),
+              *[f"- 사유: {x}" for x in v["reasons"]],
               "- 공개 실서버 성과는 테스트넷 PAPER 성과와 직접 비교하지 않는다(2-M2.6). PAPER 신호 일치율은 PAPER 중 저장한 "
               "테스트넷 봉으로 다시 계산(D-222)."]
+    if low:
+        lines += render_low_frequency(low, v)
     return "\n".join(lines) + "\n"
 
 
+def _status_line(k: str, item: dict) -> str:
+    extra = {kk: vv for kk, vv in item.items() if kk not in ("status", "reason", "variants", "windows", "items",
+                                                             "by_alias", "reference", "notes", "counts")}
+    tail = f" — {item['reason']}" if item.get("reason") else ""
+    return f"| {k} | {item.get('status')} | {json.dumps(extra, ensure_ascii=False, default=str)}{tail} |"
+
+
+def render_low_frequency(low: dict, v: dict) -> list[str]:
+    """[CP-038 D-240] 판정표의 저빈도 예외 절. 적용(적격)이면 LF-0~LF-8·LF-R·C-5+, 아니면 적격 검사 결과만."""
+    e = low["eligibility"]
+    head = [f"- {low['cp']} {low['cp_version']}(승인 {low['approved_by']}) · 설정 SHA-256 `{low['settings_sha256']}` · "
+            f"전체 이력 {low['history_period'][0]}~{low['history_period'][1]}",
+            f"- 적격 검사(D-235): {e['result']} — " + ", ".join(f"{k} {x}" for k, x in e["items"].items())
+            + (f" / 전체 이력 연평균 거래 {e['annual_trades']} (기준 < {e['threshold']})" if e.get("annual_trades") else ""),
+            *[f"- 적격 사유: {x}" for x in e["reasons"]]]
+    if not low.get("applied"):
+        return ["", f"## {lfm.LABEL} — 열지 않음 (일반 판정 그대로)", "", *head]
+    items = low["items"]
+    out = ["", f"## {lfm.LABEL} 경로 (D-234·D-236 — 기록·제안, 전환 승인은 사용자)", "", *head,
+           f"- 일반 판정(04 §2.9): {v['general_verdict']} / **종합: {v['verdict']}**", "",
+           "| 항목 | 결과 | 값 |", "|---|---|---|", *[_status_line(k, x) for k, x in items.items()], ""]
+    lf5 = items.get("LF-5", {})
+    for w in lf5.get("windows", []):
+        out.append(f"- LF-5 창 {w['k']}: 단순 보유 {w['hold_return']}, 거래 {w['trades']}건 로그 합 {w['log_sum']} "
+                   f"vs ln(1+보유) {w['threshold']} — {'충족' if w['met'] else '미충족'}, 창 끝 미청산 평가 손익 "
+                   f"{w['open_pnl']}")
+    for r in items.get("LF-7", {}).get("variants", []):
+        out.append(f"- LF-7 {r['label']}: 거래 {r['trades']}건, 로그 평균 {r['mean_log']}, 손익 평균 {r['mean_pnl']} — "
+                   f"{r['status']}")
+    lf8 = low["lf8"]
+    out.append(f"- LF-8 교차 자산(D-244·D-245, 역할 {lf8['role']}): {lf8['status']}"
+               + (f" — {lf8['reason']}" if lf8.get("reason") else "")
+               + f" / 표본 목록 SHA-256 `{lf8.get('list_sha256') or '없음'}`")
+    if lf8.get("items"):
+        out.append("  - " + ", ".join(f"{k} {x}" for k, x in lf8["items"].items())
+                   + f" / 참고 배포 ÷ 표본 거래당 로그 수익 {lf8['reference']['deployed_over_sample']}")
+    for n in lf8.get("notes", []):
+        out.append(f"  - {n}")
+    b = low["LF-R"]
+    out += [f"- LF-R 부트스트랩(참고 — 판정 제외, D-242): 시드 `{b['seed']}`, {b['draws']}회, n {b['n']}, p⁺ {b['p_plus']}, "
+            f"거래당 평균 로그 수익 {b['quantile']} 분위 {b['q_mean']} — {b['limits']}",
+            f"- C-5+ 단순 보유 확장(참고 — 판정 제외): 전체 이력 {json.dumps(low['history']['c5_plus'], ensure_ascii=False)}",
+            "- 보완 통제(D-238~D-240): PAPER-1 최소 90 UTC일 + 왕복 1건(상한 180일), LIVE 첫 규모 일반의 50% 이하. "
+            "이 판정표는 PAPER·LIVE 승인이 아니다."]
+    return out
+
+
 __all__ = ["MINUTE_COLUMNS", "MinuteBacktestConfig", "MinuteBacktestResult", "MinuteReadStats", "MinuteValidationInputs",
-           "decision_points", "first_minute_start", "iter_binance_minute_csv", "m2_windows", "perturbation_check_minute",
-           "render_minute_report", "run_minute_backtest", "run_minute_validation", "summary_of"]
+           "decision_points", "first_minute_start", "iter_binance_minute_csv", "lf_history_runs", "m2_windows",
+           "perturbation_check_minute", "render_minute_report", "run_lf8_sample", "run_low_frequency_m2",
+           "run_minute_backtest", "run_minute_validation", "summary_of"]
