@@ -31,6 +31,8 @@ if TYPE_CHECKING:
     from .engine import Engine
 
 TOKEN_KEY, CHAT_KEY = "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"
+# [CP-036 D-213] M2 전용 봇 — M2 체크아웃 .env.paper의 다른 키 이름. M1 봇 키를 복사해 넣어도 M2 run이 쓰지 않는다(D-117)
+M2_TOKEN_KEY, M2_CHAT_KEY = "M2_TELEGRAM_BOT_TOKEN", "M2_TELEGRAM_CHAT_ID"
 NOTIFY_EVERY = 2.0      # 초
 ERROR_WAIT = 5.0        # 수신 실패 뒤 대기 (초)
 NOTIFY_FAULTS_TO_K11 = 3   # CP-028 D-146: 알림 전송 처리 예외 연속 3회 → K11 (01 §2.7 "최대 3회"와 같은 값)
@@ -39,15 +41,16 @@ NOTIFY_FAULTS_TO_K11 = 3   # CP-028 D-146: 알림 전송 처리 예외 연속 3�
 def telegram_threads(engine: "Engine", repo: Repository, enabled: bool, secrets: SecretStore | None, clock: Clock,
                      kill_file: Path, stop: threading.Event, *, base_url: str = "https://api.telegram.org",
                      notify_every: float = NOTIFY_EVERY, poll_timeout: int = POLL_SECONDS,
-                     log_dir: Path | None = None, market: str = "M1") -> list[threading.Thread]:
+                     log_dir: Path | None = None, market: str = "M1",
+                     keys: tuple[str, str] = (TOKEN_KEY, CHAT_KEY)) -> list[threading.Thread]:
     """enabled면 시작 전 스레드 2개를 만들어 돌려준다(시작은 호출자). 비밀값이 없으면 시작 거부(ConfigError).
     market: 메시지 시장 표시·/exit·/reduce 수량 단위 (CP-024 D-117). 봇 토큰은 그 체크아웃의 비밀 설정에서 읽는다."""
     if not enabled:
         return []
-    check_telegram_secrets(secrets)
+    check_telegram_secrets(secrets, keys)
     assert secrets is not None
-    token = secrets.get(TOKEN_KEY)
-    chat = secrets.get(CHAT_KEY).reveal().strip()
+    token = secrets.get(keys[0])
+    chat = secrets.get(keys[1]).reveal().strip()
     api = TelegramApi(token.reveal, base_url, market=market)
     halts = QueuedHalts(engine)
 
@@ -76,14 +79,16 @@ def telegram_threads(engine: "Engine", repo: Repository, enabled: bool, secrets:
             threading.Thread(target=poll_loop, name="telegram-poll", daemon=True)]
 
 
-def check_telegram_secrets(secrets: SecretStore | None) -> None:
-    """[telegram] enabled일 때 비밀값 확인 — 브로커 접속 전에 부른다. 오류 메시지에 값을 담지 않는다."""
-    missing = [k for k in (TOKEN_KEY, CHAT_KEY) if secrets is None or not secrets.has(k)]
+def check_telegram_secrets(secrets: SecretStore | None, keys: tuple[str, str] = (TOKEN_KEY, CHAT_KEY)) -> None:
+    """[telegram] enabled일 때 비밀값 확인 — 브로커 접속 전에 부른다. 오류 메시지에 값을 담지 않는다.
+    keys: (토큰 키, 채팅 키) — M1 기본, M2는 M2_TOKEN_KEY·M2_CHAT_KEY (CP-036 D-213)."""
+    token_key, chat_key = keys
+    missing = [k for k in (token_key, chat_key) if secrets is None or not secrets.has(k)]
     if missing:
         raise ConfigError(f"[telegram] enabled = true인데 .env.paper에 없는 키: {', '.join(missing)}")
     assert secrets is not None
-    if not secrets.get(CHAT_KEY).reveal().strip().lstrip("-").isdigit():
-        raise ConfigError(f".env.paper {CHAT_KEY}: 숫자(채팅 ID)여야 함")
+    if not secrets.get(chat_key).reveal().strip().lstrip("-").isdigit():
+        raise ConfigError(f".env.paper {chat_key}: 숫자(채팅 ID)여야 함")
 
 
 class NotifyFaults:

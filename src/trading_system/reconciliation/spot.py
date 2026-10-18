@@ -68,6 +68,8 @@ class SpotReconciler(Reconciler):
         self._balances: dict[str, dict[str, tuple[Decimal, Decimal]]] = {}
         self._open_alerted: set[str] = set()
         self._scope_alerted: dict[str, dict[str, str]] = {}
+        # [CP-036 D-201 (6)] 잔고 조회 결과를 받을 곳 (계좌, 자산 → (free, locked)) — 엔진 조립이 M2 계좌 사실(현금)을 연결
+        self.balance_listeners: list[Callable[[str, Mapping[str, tuple[Decimal, Decimal]]], None]] = []
 
     # --- 조회 ---------------------------------------------------------------------------
     def _query(self, account: str) -> tuple[list, list, list]:  # type: ignore[type-arg]
@@ -77,6 +79,8 @@ class SpotReconciler(Reconciler):
             orders = self._broker.query_orders(account)
             fills = self._broker.query_fills(account)
         self._balances[account] = balances
+        for fn in list(self.balance_listeners):
+            fn(account, balances)
         positions = [BrokerPosition(inst, self._total(balances, base), _ZERO)
                      for inst, (base, _q) in sorted(self._universe.items())]
         return positions, orders, fills
@@ -352,6 +356,55 @@ def confirm_reset(repo: Repository, clock: Clock, broker: BrokerAdapter, account
                     "basis": "D-099 리셋 확인 — 자동 기준선 재설정 없음, 사람 확인"})
         repo.audit(now, "PAPER_PERIOD_RESTART", operator, account,
                    {"at": now.isoformat(), "reason": "테스트넷 리셋 — PAPER 기간은 이 시점부터 다시 계산 (A-062①)"})
+    return ResetReport(resolved, quote_total, positions)
+
+
+def initial_baseline(repo: Repository, clock: Clock, balances: Mapping[str, tuple[Decimal, Decimal]], account: str, *,
+                     universe: Mapping[str, tuple[str, str]], quote_asset: str,
+                     existing_baseline: Decimal | None, set_baseline: Callable[[str, Decimal, datetime], None],
+                     operator: str) -> ResetReport:
+    """최초 시작 기준선 확정 (사람이 실행, CP-036 D-210·CP-024 D-103). confirm_reset과 같은 규칙에 "PAPER 기간 시작" 기록.
+
+    - 이미 기준선이 있으면 거부 — 리셋은 reset-confirm(D-099). 활성 의도·열린 내부 주문이 있으면 거부.
+    - 유니버스 기초 자산 = 거래소 free + locked를 내부 포지션으로, 남은 보유는 수동 보유(manual — 전략 신호 금지, B-1:
+      지급 BTC는 Q-1 (가)대로 사람이 /exit로 정리). USDT 기준선 = 거래소 free + locked. 범위 밖 자산은 스냅샷만(감사).
+    - 열린 대조 항목은 BASELINE_CONFIRMED로 해소(기준선이 없어 생긴 항목). K4는 풀지 않는다 — 다음 대조 일치 + 사용자 재개."""
+    if existing_baseline is not None:
+        raise ResetError("기준선이 이미 있다 — 테스트넷 리셋 뒤에는 reset-confirm (D-099)")
+    active = [i for i in repo.intents() if i.account == account and not i.state.is_terminal]
+    if active:
+        raise ResetError(f"활성 의도 {len(active)}건 — 결과 불명·미체결을 먼저 해소한 뒤 기준선 확정")
+    if repo.open_orders(account):
+        raise ResetError("열린 내부 주문이 있음 — 먼저 해소한 뒤 기준선 확정")
+    now = clock.now()
+    in_scope = {quote_asset} | {base for base, _q in universe.values()}
+    outside = {a: str(f + lk) for a, (f, lk) in sorted(balances.items()) if a not in in_scope and f + lk != 0}
+    quote_total = SpotReconciler._total(balances, quote_asset)
+    resolved: list[str] = []
+    positions: dict[str, str] = {}
+    with repo.tx():
+        for item in repo.open_recon_items(account):
+            repo.resolve_recon_item(item["item_id"], "BASELINE_CONFIRMED", operator, now)
+            resolved.append(item["item_id"])
+        for inst, (base, _q) in sorted(universe.items()):
+            qty = SpotReconciler._total(balances, base)
+            own = repo.active_ownership(account, inst)
+            if own is not None and (own.owner != MANUAL_OWNER or qty == 0):
+                repo.set_ownership_state(own.ownership_id, "RELEASED", "기준선 확정", now)
+                own = None
+            repo.set_position(account, inst, qty, _ZERO)
+            if qty > 0 and own is None:
+                repo.insert_ownership(account, inst, MANUAL_OWNER, None, now)
+                new_own = repo.active_ownership(account, inst)
+                if new_own is not None:
+                    repo.set_ownership_state(new_own.ownership_id, "CONFIRMED", None)
+            positions[inst] = str(qty)
+        set_baseline(account, quote_total, now)
+        repo.audit(now, "INITIAL_BASELINE_CONFIRMED", operator, account,
+                   {"resolved_items": resolved, "positions": positions, "quote_baseline": str(quote_total),
+                    "out_of_scope": outside, "basis": "D-103 최초 시작 기준선은 사람이 확정 (CP-036 D-210)"})
+        repo.audit(now, "PAPER_PERIOD_START", operator, account,
+                   {"at": now.isoformat(), "reason": "M2 기준선 확정 — PAPER 기간은 이 시점부터 계산"})
     return ResetReport(resolved, quote_total, positions)
 
 

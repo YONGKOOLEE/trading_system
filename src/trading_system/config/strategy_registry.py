@@ -45,6 +45,9 @@ _SIGNAL_STATES = {
 _RISK_UP = (RequestType.ENTRY, RequestType.INCREASE)
 # PAPER-0 검증 전략이 쓸 수 있는 능력: 정해진 시각 판정·일봉·시장가·국내 상장주식 (04 §4.1 "1주 단위 시장가")
 PAPER0_CAPABILITIES = frozenset({"CAP-TRG-01", "CAP-DAT-01", "CAP-ORD-01", "CAP-INS-01"})
+# [CP-036 D-212 (2)] M2판 PAPER-0 예외: UTC 판정·1d 봉·시장가 매도·IOC 지정가·크립토 현물. M1 예외는 위 그대로
+PAPER0_M2_CAPABILITIES = frozenset({"CAP-TRG-01", "CAP-DAT-01", "CAP-ORD-01", "CAP-ORD-02", "CAP-INS-05"})
+PAPER0_M2_SIZING = ("S-1", "S-4")
 
 
 REPLACE_REFUSAL = "보유 중 교체 금지 (A-104, CP-035 D-200)"
@@ -68,8 +71,32 @@ class RegistrationResult:
     reg_id: str | None = None
 
 
+def _paper0_m2_problems(spec: StrategySpec, target_mode: Mode, approval: str) -> list[str]:
+    """M2 PAPER-0 검증 전략 예외의 범위 (CP-036 D-212 (2)): markets M2만, sizing S-1·S-4, 능력 ⊆ PAPER0_M2_CAPABILITIES,
+    종목 목록 U-A, l7 필수, 사용자 승인 A-ID. 하나라도 어긋나면 예외를 쓰지 않고 거부한다."""
+    p: list[str] = []
+    if target_mode is not Mode.PAPER:
+        p.append(f"PAPER-0 검증 승인은 PAPER 대상에만 쓴다 ({target_mode.value} 대상 불가)")
+    if not _APPROVAL.fullmatch(approval or ""):
+        p.append("PAPER-0 검증 승인: 사용자 승인 A-ID(A-숫자)가 필요하다")
+    if spec.sizing not in PAPER0_M2_SIZING:
+        p.append("M2 PAPER-0 검증 전략: sizing은 S-1 또는 S-4만 (CP-036 D-212)")
+    if spec.universe_method != "U-A" or not spec.universe:
+        p.append("M2 PAPER-0 검증 전략: universe_method는 종목 목록 U-A만")
+    extra = sorted(set(spec.capabilities) - PAPER0_M2_CAPABILITIES)
+    if extra:
+        p.append(f"M2 PAPER-0 검증 전략: 허용되지 않는 능력 {', '.join(extra)} "
+                 f"(허용: {', '.join(sorted(PAPER0_M2_CAPABILITIES))})")
+    if spec.limits.l7_max_order_amount is None:
+        p.append("M2 PAPER-0 검증 전략: limits.l7_max_order_amount(1회 주문 금액 상한) 필수")
+    return p
+
+
 def _paper0_problems(spec: StrategySpec, target_mode: Mode, approval: str) -> list[str]:
-    """PAPER-0 검증 전략 예외의 범위 (DP-24 a). 하나라도 어긋나면 예외를 쓰지 않고 거부한다."""
+    """PAPER-0 검증 전략 예외의 범위 (DP-24 a). 하나라도 어긋나면 예외를 쓰지 않고 거부한다.
+    markets가 정확히 ("M2",)이면 M2판 범위(CP-036 D-212), 그 밖은 기존 M1 범위 그대로."""
+    if tuple(spec.markets) == ("M2",):
+        return _paper0_m2_problems(spec, target_mode, approval)
     p: list[str] = []
     if target_mode is not Mode.PAPER:
         p.append(f"PAPER-0 검증 승인은 PAPER 대상에만 쓴다 ({target_mode.value} 대상 불가)")

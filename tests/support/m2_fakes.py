@@ -20,6 +20,7 @@ from pathlib import Path
 from tests.support.gate_fakes import FakeAccount, FakeClockHealth, FakeLimits, FakeStrategies
 from trading_system.broker.fake.broker import FakeSpotFees
 from trading_system.broker.fake.spot import FakeSpotBroker
+from trading_system.app.wiring import spot_execution
 from trading_system.domain.clock import FixedClock
 from trading_system.domain.enums import Mode
 from trading_system.domain.limits import AccountLimits
@@ -212,13 +213,11 @@ def build_m2_env(tmp_path: Path, broker_env: str = "fake", *, limits: AccountLim
                         spot_rules=rules if spot_rules else None)
     gate = Gate(repo, clock, inputs, M2_POLICY)
     kill_file = tmp_path / "KILL"
-    executor = Executor(repo, broker, clock, kill_file, asset_pair=asset_pair, client_ids=True)
-    halts = HaltManager(repo, gate, executor, clock,
-                        reference_time_of=lambda a: (lim.daily_reference_time
-                                                     if (lim := limits.by_account.get(a)) else None),
-                        market_time=M2_TIME)
-    # dust 처리 (D-102, T-M2-04): 청산 전 판정·-1013 거부 후 확정. 규칙·참조가·시세는 위 가상 공급자
-    dust = DustHandler(repo, clock, AuditAlertSink(repo, clock, actor="dust"), rules_of=rules.rules,
-                       market_prices_of=rules.market_prices, quote_of=market.quote, policy=M2_ORDER_POLICY)
-    executor.reject_listeners.append(dust.after_reject)
+    # 실행기(고객 주문 ID·순 수령)·정지 관리(UTC)·dust 처리(D-102, T-M2-04)는 실운영 M2 조립과 같은 함수로 만든다
+    # (CP-036 D-202, app/wiring.spot_execution). 규칙·참조가·시세는 위 가상 공급자
+    executor, halts, dust = spot_execution(
+        repo, broker, clock, kill_file, gate, asset_pair=asset_pair,
+        reference_time_of=lambda a: (lim.daily_reference_time if (lim := limits.by_account.get(a)) else None),
+        rules_of=rules.rules, market_prices_of=rules.market_prices, quote_of=market.quote,
+        order_policy=M2_ORDER_POLICY)
     return M2Env(repo, clock, broker, gate, executor, halts, kill_file, market, account, rules, dust)

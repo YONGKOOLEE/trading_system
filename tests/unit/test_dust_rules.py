@@ -42,9 +42,11 @@ def test_sellable_quantity_floors_to_market_step_normally_and_lot_step_when_stal
     assert sellable_quantity(D("0.12345"), r, stale=True) == D("0.1234")
 
 
-def test_sellable_quantity_market_step_zero_means_no_flooring() -> None:
-    """MARKET_LOT_SIZE stepSize 0의 의미는 미확인 — 위험 축소라 미리 깎지 않는다(D-106 보수 방향 = 막지 않음)."""
-    assert sellable_quantity(D("0.12345"), rules(market_step=D("0")), stale=False) == D("0.12345")
+def test_sellable_quantity_market_step_zero_floors_to_lot_step() -> None:
+    """[CP-036 D-208, A-106 Q-4 (가)] 기대값 변경: MARKET_LOT_SIZE stepSize 0이면 LOT_SIZE stepSize로 내림(잔량 dust).
+    종전 기대값(0.12345 그대로 — "깎지 않음")은 어댑터가 단위 배수 아님으로 전송 전 실패시켜 매일 청산이 실패하는
+    충돌(CP-036 §2 #8, B-6)이라 승인된 D-208로 바꿨다. 영향: V-131·V-160 판정 수량, V-282."""
+    assert sellable_quantity(D("0.12345"), rules(market_step=D("0")), stale=False) == D("0.1234")
 
 
 # --- (가) 수량 dust ----------------------------------------------------------------------------------------

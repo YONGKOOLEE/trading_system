@@ -234,10 +234,16 @@ def m2_spec(**over: object):  # type: ignore[no-untyped-def]
 
 
 def test_v85_m2_current_capability_table_refuses_m2_registration() -> None:
+    """[T-049 기대값 변경] CP-036 D-212 (3)(A-106)로 capabilities.md M2 열에 TRG-01·DAT-01·ORD-01·ORD-02 "검증 중"과
+    CAP-INS-05 행이 들어갔다 — 이제 M2 열은 "미지원"이 아니라 "검증 중"이므로 PAPER 등록은 그 사유로 거부되고(PAPER-0
+    예외 없이), BACKTEST는 능력 상태로는 거부되지 않는다. 가상 상품 능력(CAP-INS-X1)은 여전히 정의되지 않은 능력으로 거부.
+    영향 V-85·V-289."""
     caps = load_capabilities(ROOT / "docs" / "capabilities.md")
-    for mode in (Mode.BACKTEST, Mode.PAPER):
-        problems = validate_spec(m2_spec(), caps, m2_limits(), mode)
-        assert any("M2에서 미지원" in p for p in problems), problems
+    paper = validate_spec(m2_spec(), caps, m2_limits(), Mode.PAPER)
+    assert any("M2에서 검증 중" in p for p in paper), paper
+    backtest = validate_spec(m2_spec(), caps, m2_limits(), Mode.BACKTEST)
+    assert not any("M2에서" in p for p in backtest), backtest
+    for problems in (paper, backtest):
         assert any("CAP-INS-X1: 정의되지 않은 능력" in p for p in problems), problems
 
 

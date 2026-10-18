@@ -1,0 +1,10 @@
+# m2-verify v1 파라미터 (R-19, T-M2-15 확정안 — 미승인, A-110 ①). 값을 바꾸면 전략 버전을 올린다(D-011).
+# 명세: docs/strategies/m2-verify/strategy.md. 시각은 UTC(M2 D-108·CP-036 D-207). 소수는 문자열(부동소수 금지).
+# 시작 때 validate_rules(CP-036 D-209)가 qty_step = 거래소 LOT_SIZE stepSize, notional >= 2 x minNotional을 확인한다.
+strategy = "m2-verify"
+version = 1
+
+[params]
+notional = "10"         # 1회 진입 목표 금액 USDT (권장안 — 사용자 결정 항목 ③). minNotional 5의 2배
+qty_step = "0.00001"    # BTCUSDT LOT_SIZE stepSize (테스트넷 실측 2026-10-14, broker-specs/binance-spot.md §12)
+split_time = "02:30"    # UTC. 01:00 판정 = 진입만, 04:00 판정 = 청산만 (권장안 — 사용자 결정 항목 ①②)

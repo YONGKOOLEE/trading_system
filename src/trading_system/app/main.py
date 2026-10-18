@@ -50,7 +50,7 @@ from trading_system.storage.repository import ModeMismatch, Repository
 
 from .engine import Engine
 from .instance_lock import InstanceLocked, acquire_instance_lock
-from .startup import LiveNotAvailable, check_m2_startup, check_startup
+from .startup import LiveNotAvailable, check_m2_startup, check_startup, m2_paper_problems
 from .supervisor import QueuedHalts, Supervisor, write_fallback
 from .wiring import StrategyInput, build_engine, load_strategy
 
@@ -222,10 +222,11 @@ def _m1_hosts(mode: Mode) -> frozenset[str]:
 
 
 def run_main(root: Path, environ: dict[str, str] | None = None, max_seconds: float | None = None,
-             market: str = "M1") -> int:
+             market: str = "M1", *, m2_connector=None) -> int:  # type: ignore[no-untyped-def]
     """market: 실행할 시장 (CP-024 D-097). 기본 M1 = 기존 경로(config/*.<mode>.toml) 그대로.
-    M2는 config/m2/ 검사(설정·시작 일치 표·DB 메타)까지만 하고 거부한다 — M2 엔진 조립·바이낸스 연결은 아직 없다
-    (테스트넷 연결은 T-M2-14 별도 승인)."""
+    M2는 run_m2_main (CP-036 T-045·T-048): BACKTEST = fake 현물 브로커로 엔진을 돌린다. PAPER(바이낸스 테스트넷)는
+    m2_connector(scripts/run-m2.py가 주입하는 바이낸스 연결 묶음)와 연결 전 조건(접속·주문 전송 스위치, 비밀 키)이
+    모두 있어야 시작한다 — 없으면 빠진 것을 모두 출력하고 거부(기본 설정 = 거부)."""
     env = os.environ if environ is None else environ
     try:
         mode = read_trade_mode(env, root / ".env")
@@ -235,14 +236,7 @@ def run_main(root: Path, environ: dict[str, str] | None = None, max_seconds: flo
         return 2
     base = root / "var" / mode.value.lower()
     if mkt is Market.M2:
-        try:
-            env_file = None if mode is Mode.BACKTEST else root / f".env.{mode.value.lower()}"
-            check_m2_startup(mode, root, base / "trading.db", env_file)
-            raise ConfigError("M2 시작 검사 통과 — M2 실행 경로(엔진 조립·바이낸스 연결)는 아직 없다. "
-                              "테스트넷 연결은 T-M2-14 별도 승인 뒤")
-        except (LiveNotAvailable, ConfigError) as exc:
-            print(f"시작 거부(브로커 연결 없음): {exc}")
-            return 2
+        return run_m2_main(root, mode, base, max_seconds, connector=m2_connector)
     try:
         env_file = None if mode is Mode.BACKTEST else root / f".env.{mode.value.lower()}"
         startup = check_startup(mode, root, base / "trading.db", env_file)
@@ -378,6 +372,256 @@ def _run(root: Path, mode: Mode, base: Path, startup, app: AppSettings, gate_set
             except Exception:  # noqa: BLE001 — 종료 중 오류는 무시
                 pass
         repo.close()
+
+
+def _m2_inputs(root: Path, mode: Mode, base: Path, connector=None):  # type: ignore[no-untyped-def]
+    """M2 시작 검사·설정 (CP-036 D-209 앞부분). 브로커 연결·DB 생성 없음. 실패하면 ConfigError.
+    PAPER: 연결 전 조건(접속 스위치·비밀 키 존재·주문 전송 스위치 D-204)을 모두 모아 거부 사유로 보여 준다. 바이낸스 연결
+    묶음(어댑터·사용자 스트림·시세 공급)은 scripts/run-m2.py가 주입한다(app은 바이낸스 패키지를 모름, D-119)."""
+    from datetime import timedelta
+
+    from trading_system.config.capabilities import load_capabilities
+    from trading_system.domain.market import CostRates, GateSettings
+    from trading_system.domain.trading_rules import SpotOrderPolicy
+    env_file = None if mode is Mode.BACKTEST else root / f".env.{mode.value.lower()}"
+    cfg = check_m2_startup(mode, root, base / "trading.db", env_file)
+    switch = None
+    if mode is not Mode.BACKTEST:
+        problems, switch = m2_paper_problems(cfg)
+        if problems:
+            raise ConfigError(problems)
+        if cfg.app.telegram_enabled:   # [CP-036 D-213] M2 전용 봇 키 — 브로커 접속 전에 확인
+            from .telegram_run import M2_CHAT_KEY, M2_TOKEN_KEY, check_telegram_secrets
+            check_telegram_secrets(cfg.secrets, (M2_TOKEN_KEY, M2_CHAT_KEY))
+        if connector is None:
+            raise ConfigError("M2 PAPER는 바이낸스 연결 묶음이 필요하다 — scripts/run-m2.py로 실행 "
+                              "(app은 바이낸스 패키지를 import하지 않는다, D-119)")
+        check_start_scope(mode, Market.M2, cfg.broker, cfg.account, connector.hosts)   # 테스트넷 REST·WS API만
+    check_strategy_slots(cfg.app.strategies, cfg.limits.l6_max_positions)   # [CP-034 D-197] 연결 전
+    caps = load_capabilities(root / "docs" / "capabilities.md")
+    strategies = _strategies(cfg.app)
+    ms = cfg.market_settings
+    pairs = {s: (cfg.universe.base_asset(s) or "", cfg.universe.quote_asset) for s in cfg.universe.symbols}
+    # 비용 추정 올림 단위 = 호가 자산 자릿수(D-118). fake는 가상값, PAPER는 exchangeInfo quoteAssetPrecision으로 바꾼다
+    gate_settings = GateSettings(ms.quote_max_age_seconds, M2_PRICE_LIMIT_PLACEHOLDER,
+                                 CostRates(ms.commission_rate, Decimal("0"), M2_FAKE_QUOTE_QUANTUM))
+    policy = SpotOrderPolicy(ms.buy_buffer, ms.sell_buffer, timedelta(seconds=ms.quote_max_age_seconds))
+    return cfg, caps, strategies, pairs, gate_settings, policy, switch
+
+
+# M2에는 가격제한폭·시장가 매수가 없다(D-104) — 게이트 정책의 자리 값(시장가 매도는 예약 가격 계산 대상 아님, m2_fakes와 같음)
+M2_PRICE_LIMIT_PLACEHOLDER = Decimal("0.05")
+M2_FAKE_QUOTE_QUANTUM = Decimal("0.00000001")
+
+
+def _m2_exchange_rules(mode: Mode, symbols: tuple[str, ...]):  # type: ignore[no-untyped-def]
+    """BACKTEST(fake) 거래 규칙 (D-209) → (심볼 → SymbolRules, 실패 사유 또는 None) = 가상 규칙.
+    PAPER는 바이낸스 연결 묶음(exchangeInfo·rateLimits 예산)이 시작 때 적재한다(T-047·T-048)."""
+    from trading_system.broker.fake.spot import virtual_symbol_rules
+    if mode is not Mode.BACKTEST:
+        return {}, "테스트넷 거래 규칙은 바이낸스 연결 묶음이 적재한다"
+    return {s: virtual_symbol_rules(s) for s in symbols}, None
+
+
+def run_m2_main(root: Path, mode: Mode, base: Path, max_seconds: float | None, connector=None) -> int:  # type: ignore[no-untyped-def]
+    """`run --market M2` (CP-036 D-202·D-209). 시작 순서: check_m2_startup(설정·시작 일치 표·DB 메타) → PAPER 연결 전
+    조건(접속 스위치·비밀 키·주문 전송 스위치 D-204·주입 연결·접속 도메인) → 실행 잠금 → [PAPER: 서버 시각 → exchangeInfo
+    (규칙·rateLimits — 실패하면 시작 거부) → 예산·어댑터] → 전략 규칙 검사 → DB(SYMBOL 식별·M2 메타) → build_engine(M2)
+    (등록) → engine.start(): 판정 기록 복원 → 결과 불명 재시작 정리 → K8 → 잔고 조회 → 시작 대조 → [PAPER: 시세 공급·
+    사용자 스트림 스레드]. K8은 사용자 재개로만. BACKTEST = fake 현물 브로커 연습 실행."""
+    try:
+        cfg, caps, strategies, pairs, gate_settings, policy, switch = _m2_inputs(root, mode, base, connector)
+    except (LiveNotAvailable, ConfigError) as exc:
+        print(f"시작 거부(브로커 연결 없음): {exc}")
+        return 2
+    try:
+        lock = acquire_instance_lock(base)
+    except InstanceLocked as exc:
+        print(f"시작 거부(브로커 연결 없음): {exc}")
+        return 2
+    if take_stop_request(base):
+        print(f"이전 정지 요청 파일을 지움: {base / STOP_REQUEST}")
+    fatal_log = base / "logs" / "fatal.log"
+    prev_hook = threading.excepthook
+
+    def thread_died(args: threading.ExceptHookArgs) -> None:
+        if args.exc_value is not None:
+            record_fatal(fatal_log, args.exc_value)
+        prev_hook(args)
+
+    threading.excepthook = thread_died
+    try:
+        return _run_m2(mode, base, cfg, caps, strategies, pairs, gate_settings, policy, max_seconds,
+                       connector=connector, switch=switch)
+    except BaseException as exc:
+        record_fatal(fatal_log, exc)
+        raise
+    finally:
+        threading.excepthook = prev_hook
+        lock.release()
+
+
+def _m2_connect(cfg, pairs, clock, facts, relay, switch, connector, minute_book=None):  # type: ignore[no-untyped-def]
+    """PAPER 바이낸스 연결 묶음 (D-209): 서버 시각 → exchangeInfo(규칙·rateLimits) → 예산 → 어댑터·스트림·공급.
+    비밀 값은 Secret 그대로 넘긴다(읽어 출력하지 않음). 준비 실패면 거부 사유(문자열).
+    minute_book: [CP-037 D-220] 설정 [minute] enabled일 때만 — 1m klines 조회 계획(N분·창·여유)과 받는 쪽을 넘긴다."""
+    from .startup import BINANCE_SECRET_KEYS
+    s = cfg.secrets
+    m = cfg.market_settings.minute
+    minute = ({"minute_plan": (m.period_minutes, m.lookback_bars, m.confirm_margin_seconds),
+               "minute_sink": minute_book} if minute_book is not None else {})
+    return connector(api_key=s.get(BINANCE_SECRET_KEYS[0]), secret=s.get(BINANCE_SECRET_KEYS[1]),
+                     symbols=tuple(pairs), account=cfg.app.account, now=clock.now, sleep=time.sleep,
+                     orders_enabled=bool(switch is not None and switch.enabled), sink=facts, on_alert=relay.alert,
+                     on_stream_state=relay.stream_state, halts=relay, **minute)
+
+
+def _run_m2(mode: Mode, base: Path, cfg, caps, strategies: list[StrategyInput], pairs, gate_settings,  # type: ignore[no-untyped-def]
+            policy, max_seconds: float | None, *, connector=None, switch=None) -> int:
+    from dataclasses import replace as dc_replace
+
+    from trading_system.app.m2_relay import M2Relay
+    from trading_system.app.wiring import SpotInputs, spot_rule_problems
+    from trading_system.marketdata.spot_facts import SpotFactsStore
+    from trading_system.monitoring.sntp import ClockMonitor
+    from trading_system.storage.repository import OrderIdentity
+    app = cfg.app
+    clock = SystemClock()
+    facts = SpotFactsStore(now=clock.now, universe=tuple(pairs))
+    relay = M2Relay(app.account)
+    minute_cfg = cfg.market_settings.minute
+    minute_book = minutes = None
+    if minute_cfg.enabled and mode is not Mode.PAPER:
+        # [DP-77] BACKTEST는 바이낸스 연결이 없어 1m klines를 조회하지 않는다 — "켜짐"처럼 보이지 않게 알리고 분봉 경로를
+        # 만들지 않는다(CAP-DAT-02 전략 분봉 입력 = DISABLED, 신호 무효).
+        print(f"분봉 조회 없음: 모드 {mode.value} — 설정 [minute] enabled는 PAPER에서만 1m klines를 조회한다 "
+              "(CAP-DAT-02 전략 분봉 입력은 DISABLED, DP-77)")
+    elif minute_cfg.enabled:   # [CP-037 D-220] 1분봉 주기 조회 — 기본 꺼짐, 켜려면 승인 A-ID(시작 검사 m2_paper_problems)
+        from datetime import timedelta
+
+        from trading_system.marketdata.spot_minute import SpotMinuteBook
+
+        from .m2_minutes import M2MinuteInput
+        margin = timedelta(seconds=minute_cfg.confirm_margin_seconds)
+        minute_book = SpotMinuteBook(tuple(pairs), margin=margin, account=app.account)
+        minutes = M2MinuteInput(minute_book, lookback_bars=minute_cfg.lookback_bars, margin=margin)
+    run = None
+    if mode is Mode.PAPER:
+        run = _m2_connect(cfg, pairs, clock, facts, relay, switch, connector, minute_book)
+        if isinstance(run, str):
+            print(f"시작 거부(주문 없음): {run} (D-209)")
+            return 2
+        relay.on_ip_ban_cleared = run.resume_after_ban
+        rules, error = run.rules, None
+        gate_settings = dc_replace(gate_settings, cost_rates=dc_replace(gate_settings.cost_rates,
+                                                                        cost_quantum=run.quote_quantum))
+    else:
+        rules, error = _m2_exchange_rules(mode, tuple(pairs))
+    # 거래 규칙 적재 (D-209): 실패하거나 유니버스 심볼 하나라도 규칙이 없으면 시작 거부 (DB·주문 없음)
+    missing = facts.load_rules(rules) if error is None else list(pairs)
+    if error is not None or missing:
+        print(f"시작 거부(주문 없음): 거래 규칙 적재 실패 — {error or '규칙 없는 심볼 ' + ', '.join(missing)} (D-209)")
+        return 2
+    # 전략 규칙 검사 (D-209, B-8): 거래소 규칙과 전략 파라미터(수량 단위·최소 주문 금액)가 맞지 않으면 시작 거부
+    problems = spot_rule_problems(strategies, rules, pairs)
+    if problems:
+        print("시작 거부(주문 없음): 전략·거래소 규칙 불일치 (D-209) — " + "; ".join(problems))
+        return 2
+    existed = cfg.storage_path.exists()
+    repo = Repository(cfg.storage_path, mode, order_identity=OrderIdentity.SYMBOL)   # M2 주문 식별 (D-110)
+    try:
+        bind_market(repo.connection, Market.M2, cfg.broker, created=not existed)
+    except ModeMismatch as exc:
+        repo.close()
+        print(f"시작 거부(브로커 연결 없음): {exc}")
+        return 2
+    stop = threading.Event()
+    threads: list[threading.Thread] = []
+    try:
+        if run is not None:
+            broker = run.adapter
+        else:
+            from trading_system.broker.fake.broker import FakeSpotFees
+            from trading_system.broker.fake.spot import FakeSpotBroker
+            broker = FakeSpotBroker(now=clock.now)
+            broker.spot_fees = FakeSpotFees(rate=gate_settings.cost_rates.commission_rate, pairs=pairs)
+            broker.ioc_limit = True   # 매수 = IOC 지정가 (D-104)
+        clock_monitor = ClockMonitor(repo, clock, list(app.sntp_servers), None, None)
+        try:
+            engine = build_engine(mode=mode, repo=repo, clock=clock, broker=broker, store=None, account=app.account,
+                                  account_limits=cfg.limits, gate_settings=gate_settings, caps=caps,
+                                  strategies=strategies, kill_file=base / "KILL", clock_health=clock_monitor,
+                                  alert_thresholds=cfg.market_settings.alerts,
+                                  fallback_log=base / "logs" / "alerts-fallback.log",
+                                  reconcile_every=_minutes(app.reconcile_minutes),
+                                  requery_wait=lambda: time.sleep(REQUERY_WAIT_SECONDS), market=Market.M2.value,
+                                  spot=SpotInputs(facts, pairs, cfg.universe.quote_asset, policy, minutes=minutes))
+        except ConfigError as exc:
+            print(f"시작 거부(주문 없음): {exc}")
+            return 2
+        engine.fallback_file = base / "logs" / "engine-fallback.log"
+        engine.log_dir = base / "logs"
+        relay.attach(engine)                           # 어댑터·스트림·공급 경보 → 판정·실행 스레드 (D-215)
+        clock_monitor._halts, clock_monitor._alerts = engine.halts, engine.alerts  # noqa: SLF001 — 조립 지점
+        clock_monitor.check()
+        clock_monitor._halts = QueuedHalts(engine)    # noqa: SLF001 — 이후 점검은 감시 스레드 → 정지는 큐로 (D-215)
+        facts.halts = QueuedHalts(engine)              # 공급 품질 실패(K10)는 큐 경유 (D-215, RV-22)
+        if minute_book is not None:   # 1분봉 품질 실패는 정지 없음 — 분봉 입력 무효·감사·묶음 경고 (DP-72 개정)
+            print(f"분봉 조회 켜짐: {minute_cfg.period_minutes}분 격자, 창 {minute_cfg.lookback_bars}봉, 확정 여유 "
+                  f"{minute_cfg.confirm_margin_seconds}초, 승인 {minute_cfg.approval} (CP-037 D-220)")
+        io_threads = run.threads(stop) if run is not None else []
+        from .telegram_run import M2_CHAT_KEY, M2_TOKEN_KEY, telegram_threads
+        io_threads += telegram_threads(engine, repo, mode is Mode.PAPER and app.telegram_enabled, cfg.secrets, clock,
+                                       base / "KILL", stop, log_dir=base / "logs", market=Market.M2.value,
+                                       keys=(M2_TOKEN_KEY, M2_CHAT_KEY))   # D-213: M2 전용 봇, 기본 꺼짐
+        if switch is not None:
+            _record_order_switch(engine, switch)
+            print(f"주문 전송 스위치: {switch.describe()}")
+        if run is not None:
+            print(f"바이낸스 서버 시각 오차 {run.server_offset_ms}ms (경고 기준 {cfg.market_settings.server_time_warn_ms}ms)")
+        halting = [(t, M2_THREAD_LABELS[t.name]) for t in io_threads if t.name in M2_THREAD_LABELS]
+        _h, watched_k11, watched_alert_only = watched_threads(io_threads, None)   # 텔레그램: 알림 K11·수신 알림만
+        sup = Supervisor(engine, heartbeat=base / "heartbeat", fallback=engine.fallback_file,
+                         clock_monitor=clock_monitor, watched=halting, watched_k11=watched_k11,
+                         watched_alert_only=watched_alert_only)
+        sup_thread = threading.Thread(target=sup.run, args=(stop,), name="supervisor", daemon=True)
+        sup_thread.start()
+        threads.append(sup_thread)
+        rep = engine.start()
+        print(f"시작: 시장 M2, 모드 {mode.value}, 계좌 {app.account}, 복구 판정 {'통과' if rep.ok else '실패'} "
+              f"— K8 재개: scripts/resume.py --mode {mode.value} --market M2 K8")
+        print(start_summary(engine, rep))
+        for t in io_threads:                           # 시작 대조 뒤 공급·스트림 시작 (D-209)
+            t.start()
+            threads.append(t)
+        signal.signal(signal.SIGINT, lambda *_: stop.set())
+        started = time.monotonic()
+        while not stop.is_set():
+            engine.tick()
+            if take_stop_request(base):
+                print("정지 요청 파일 확인 — 정상 종료 (Ctrl+C와 같은 순서)")
+                stop.set()
+                break
+            if max_seconds is not None and time.monotonic() - started > max_seconds:
+                break
+            stop.wait(float(app.loop_seconds))
+        return 0
+    finally:
+        stop.set()
+        for t in threads:
+            t.join(10)
+        repo.close()
+
+
+# 감시 스레드가 생존을 보는 M2 입출력 스레드 — 죽으면 긴급 알림 + K5 (D-215)
+M2_THREAD_LABELS = {"binance-feed": "바이낸스 시세 공급", "binance-user-stream": "바이낸스 사용자 스트림"}
+
+
+def _record_order_switch(engine: Engine, switch) -> None:  # type: ignore[no-untyped-def]
+    """주문 전송 스위치 상태·승인 A-ID를 감사에 남긴다 (D-204 (2))."""
+    with engine.repo.tx():
+        engine.repo.audit(engine.clock.now(), "ORDER_SWITCH", "startup", engine.account,
+                          {"orders_enabled": switch.enabled, "approval": switch.approval, "decision": "D-204"})
 
 
 def _minutes(n: int):  # type: ignore[no-untyped-def]
@@ -594,8 +838,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     ns, rest = p.parse_known_args(argv)
     root = Path(ns.root).resolve()
     if ns.command == "backtest":
+        if ns.market == "M2":   # T-M2-15 (A-111 Q-1): 바이낸스 공개 일봉, 하루 여러 판정(DP-42 근사)
+            from trading_system.app.backtest_m2_cli import backtest_m2_main
+            return backtest_m2_main(rest, root)
         if ns.market != "M1":
-            p.error("backtest는 M1만 (M2 백테스트는 T-M2-12)")
+            p.error("backtest는 M1·M2만")
         return backtest_main(rest, root)
     if rest:
         p.error(f"알 수 없는 인자: {' '.join(rest)}")

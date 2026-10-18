@@ -50,7 +50,9 @@ CLOCK_WARN_MS = 500
 _LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 WEIGHT = {"order": 1, "query_order": 4, "my_trades": 20, "all_orders": 20, "time": 1,
           # T-M2-14 조회 (BN §3·§6·§7): ping 1, exchangeInfo 20, 계좌 20, 미체결(심볼 지정) 6
-          "ping": 1, "exchange_info": 20, "account": 20, "open_orders": 6}
+          "ping": 1, "exchange_info": 20, "account": 20, "open_orders": 6,
+          # T-048 시세 공급 (BN §6·§8): klines 2·avgPrice 2 확인값. ticker/price(심볼 지정) 2는 **미확인(추정)**
+          "klines": 2, "avg_price": 2, "ticker_price": 2}
 
 Alert = Callable[[str, str], None]
 
@@ -209,6 +211,26 @@ class BinanceSpotClient:
         path = "/api/v3/exchangeInfo"
         _, body = self._query(path, self._symbol(symbol), WEIGHT["exchange_info"], CallPriority.RECONCILE,
                               signed=False)
+        return body
+
+    def ticker_price(self, symbol: str) -> object:
+        """`GET /api/v3/ticker/price?symbol=` 본문(서명 없음, 시세 우선순위 — 최하위, D-113·D-116). 해석은 facts."""
+        _, body = self._query("/api/v3/ticker/price", self._symbol(symbol), WEIGHT["ticker_price"], CallPriority.MARKET,
+                              signed=False)
+        return body
+
+    def avg_price(self, symbol: str) -> object:
+        """`GET /api/v3/avgPrice?symbol=` 본문(서명 없음, 시세 우선순위). 시장가 명목가 참조가(D-102)."""
+        _, body = self._query("/api/v3/avgPrice", self._symbol(symbol), WEIGHT["avg_price"], CallPriority.MARKET,
+                              signed=False)
+        return body
+
+    def klines(self, symbol: str, interval: str, *, limit: int) -> object:
+        """`GET /api/v3/klines?symbol=&interval=&limit=` 본문(서명 없음, 시세 우선순위, timeZone 기본 0 = UTC)."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise BinanceQueryError("klines limit은 1~1000", QueryKind.FAILED)
+        params = self._symbol(symbol) + [("interval", interval), ("limit", str(limit))]
+        _, body = self._query("/api/v3/klines", params, WEIGHT["klines"], CallPriority.MARKET, signed=False)
         return body
 
     def account(self) -> AccountInfo:

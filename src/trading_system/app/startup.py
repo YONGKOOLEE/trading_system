@@ -11,6 +11,7 @@ TRADE_MODE·저장소 경로·자격정보 파일·브로커 환경이 모두 �
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -138,6 +139,80 @@ def check_m2_startup(mode: Mode, repo_root: Path, storage_path: Path, env_file: 
                            broker=app.broker, account=app.account, limits=parsed.limits, app=app,
                            market_settings=market_settings, universe=universe, warnings=parsed.warnings,
                            secrets=secrets)
+
+
+BINANCE_SECRET_KEYS = ("BINANCE_TESTNET_API_KEY", "BINANCE_TESTNET_SECRET_KEY")
+_APPROVAL_ID = re.compile(r"A-\d{3,}")
+_APPROVAL_ROW = re.compile(r"^\|\s*(A-\d{3,})\s*\|")
+APPROVALS_FILE = Path("docs") / "approvals.md"
+
+
+def recorded_approval_ids(path: Path) -> frozenset[str]:
+    """승인 기록 표(docs/approvals.md)의 A-ID 열 — 표 행의 첫 칸만 읽는다(읽기 전용, 본문 언급은 세지 않음).
+    파일이 없거나 읽을 수 없으면 빈 집합(= 어떤 A-ID도 확인되지 않음)."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return frozenset()
+    return frozenset(m.group(1) for line in text.splitlines() if (m := _APPROVAL_ROW.match(line)))
+
+
+@dataclass(frozen=True)
+class OrderSwitch:
+    """M2 테스트넷 주문 전송 스위치 판정 (CP-036 D-204). enabled False = 주문 차단 run(주문 계열 전송 전 차단)."""
+
+    enabled: bool
+    approval: str | None = None
+
+    def describe(self) -> str:
+        if self.enabled:
+            return f"주문 전송 허용 (승인 {self.approval}, D-204)"
+        return "주문 차단 run — 주문 계열 요청은 보내기 전에 막는다 (orders_approved 꺼짐, D-204)"
+
+
+def check_order_switch(app: AppSettings, *, deployed_strategies: int, approvals_file: Path) -> OrderSwitch:
+    """D-204: (a) 꺼짐 + 전략 배포 → 시작 거부 (b) 꺼짐 + 전략 없음 → 주문 차단 run (c) 켜짐 + 승인 A-ID 없음·형식 오류
+    → 시작 거부 (d) 켜짐 + A-ID → 주문 허용. 스위치·A-ID는 사용자가 config/m2/app.paper.toml [paper]에 직접 쓴다.
+    [DP-66, D-204 보수 해석] (d)의 A-ID는 그 체크아웃 승인 기록 표(approvals_file = <root>/docs/approvals.md)에 행으로
+    있어야 한다 — 형식만 맞는 임의 문자열로 주문 전송을 켜지 못하게. 행의 내용(승인 범위)까지 판정하지는 않는다."""
+    if not app.paper_orders_approved:
+        if deployed_strategies:
+            raise ConfigError("주문 전송 스위치 꺼짐(config/m2/app.paper.toml [paper] orders_approved = true 아님)인데 "
+                              f"전략 {deployed_strategies}개가 배포됨 — 주문 차단 run에는 전략을 배포하지 않는다 (D-204)")
+        return OrderSwitch(False)
+    a = app.paper_orders_approval
+    if a is None or not _APPROVAL_ID.fullmatch(a):
+        raise ConfigError("orders_approved = true인데 orders_approval(주문 전송 승인 A-ID, 예 \"A-123\")이 없거나 "
+                          "형식이 아니다 (D-204)")
+    if a not in recorded_approval_ids(approvals_file):
+        raise ConfigError(f"orders_approval {a}가 승인 기록 표({approvals_file})의 A-ID 행에 없다 — 사용자 승인이 기록된 "
+                          "A-ID만 주문 전송을 켠다 (D-204, DP-66)")
+    return OrderSwitch(True, a)
+
+
+def m2_paper_problems(cfg: M2StartupConfig) -> tuple[list[str], OrderSwitch | None]:
+    """M2 PAPER run 연결 전 조건 (CP-036 D-204·D-209) — 빠진 것을 모두 돌려준다(값은 출력하지 않음, 키 이름만).
+    비어 있으면 연결해도 된다. 주문 스위치 판정 결과도 함께."""
+    out: list[str] = []
+    if not cfg.app.paper_connection_approved:
+        out.append("config/m2/app.paper.toml [paper] connection_approved = true 아님 — 테스트넷 접속은 사용자가 직접 켠다 "
+                   "(run의 사용자 스트림·시세 조회는 T-M2-14 조회 승인과 별도로 T-050 연결 범위 승인 뒤)")
+    s = cfg.secrets
+    missing = [k for k in BINANCE_SECRET_KEYS if s is None or not s.has(k) or not s.get(k).reveal()]
+    if missing:
+        out.append(f".env.paper에 없거나 빈 키: {', '.join(missing)}")
+    switch = None
+    try:
+        switch = check_order_switch(cfg.app, deployed_strategies=len(cfg.app.strategies),
+                                    approvals_file=cfg.repo_root / APPROVALS_FILE)
+    except ConfigError as exc:
+        out.extend(exc.problems if getattr(exc, "problems", None) else [str(exc)])
+    minute = cfg.market_settings.minute
+    if minute.enabled and minute.approval not in recorded_approval_ids(cfg.repo_root / APPROVALS_FILE):
+        # [CP-037 D-220, DP-71] 테스트넷 1m klines 주기 조회는 별도 승인 — 기록된 A-ID만 켠다(주문 스위치 DP-66과 같은 방식)
+        out.append(f"config/m2/market.paper.toml [minute] approval {minute.approval}가 승인 기록 표"
+                   f"({cfg.repo_root / APPROVALS_FILE})의 A-ID 행에 없다 — 1분봉 주기 조회는 기록된 승인으로만 켠다")
+    return out, switch
 
 
 def check_startup(mode: Mode, repo_root: Path, storage_path: Path, env_file: Path | None,
