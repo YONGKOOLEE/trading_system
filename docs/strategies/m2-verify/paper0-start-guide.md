@@ -115,11 +115,11 @@ C:\AI\trading_system\trading_system\.venv\Scripts\python.exe scripts\run-m2.py
 ### 4-7. K4·K8 재개 → 지급 BTC 1개 매도 (KST 10:00 전)
 기준선 확정(4-5)은 열린 대조 항목만 닫고 **K4 정지는 풀지 않는다**(관찰 run에서 걸린 K4 — [t050-observation.md](t050-observation.md)). run 시작 뒤 1~2분 기다려 대조가 일치한 다음 순서대로 푼다.
 텔레그램 **M2 봇**에서:
-1. `/status` → "열린 대조 불일치 0건"(또는 대조 MATCH)과 정지 K4·K8 확인. 불일치가 남아 있으면 멈추고 출력을 보낸다.
+1. `/status` → "대조 불일치: 0건"과 정지 K4·K8(AWAITING_RESUME) 확인. 불일치가 남아 있으면 멈추고 출력을 보낸다. (텔레그램 `/status`는 정지·결과 불명·불일치만 보여 주고 **보유는 안 나온다** — 보유는 PC `status.py`, 아래 §5)
 2. `/resume K4` → 회신에 나온 `/confirm <코드>`를 60초 안에 보냄. 기대: "K4 재개 완료".
 3. `/resume K8` → `/confirm <코드>`. 기대: "K8 재개 완료".
-4. `/status` → 정지 없음, BTCUSDT 1 수동 보유 확인.
-5. `/exit BTCUSDT 1` → `/confirm <코드>`. 기대: 시장가 매도 체결 알림, 이후 보유 0.
+4. `/status` → "정지 0건: 없음".
+5. `/exit BTCUSDT 1` → `/confirm <코드>`. 기대: "원격 명령 EXIT DONE: 의도 … ACCEPTED". **체결마다 오는 알림은 없다** — `/review`(오늘 체결 목록) 또는 PC `status.py`로 보유 0 확인.
 - 텔레그램이 안 되면 PC의 다른 PowerShell 창에서(같은 순서, K4 먼저):
 ```
 Set-Location C:\AI\trading_system\m2-binance
@@ -132,8 +132,8 @@ C:\AI\trading_system\trading_system\.venv\Scripts\python.exe scripts\resume.py -
 ## 5. 매일 확인
 | 시각(KST) | 어디서 | 정상 |
 |---|---|---|
-| 10:00 무렵 | 텔레그램 M2 | 매수 체결 알림(체결 0이면 EXPIRED — 그날 매수 없음, 이상 아님) |
-| 13:00 무렵 | 텔레그램 M2 | 매도 체결 알림 |
+| 10:05 무렵 | 텔레그램 M2 `/review` | "오늘 체결 1건 — BTCUSDT 매수 …"(IOC라 체결 0일 수 있음 — 그날 매수 없음, 이상 아님). 체결마다 오는 알림은 없다 |
+| 13:05 무렵 | 텔레그램 M2 `/review` | 매도 체결이 더해져 2건 |
 | 아무 때 | 텔레그램 M2 | `/status`, `/review` |
 | 저녁(PC) | 아래 명령 | 활성 정지 없음, 결과 불명 0, 대조 MATCH, BTCUSDT 잔량 0.00001 미만 |
 ```
