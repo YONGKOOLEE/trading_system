@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import UTC, date, datetime, time, timedelta, tzinfo
+from datetime import UTC, date, datetime, time, tzinfo
 from decimal import Decimal
 from typing import TYPE_CHECKING, Protocol
 
