@@ -8,7 +8,7 @@
 ## 지금 돌고 있는 것
 | 항목 | 상태 |
 |---|---|
-| **LF-8 표본 1분봉 수집**(A-121) | 이 세션 백그라운드에서 10-18 10:25 시작. 29심볼, 첫 목록 해 직전 12-25 ~ 2025-12-31, 실서버 공개 GET만. 예상 수 시간(BTC 9년치 1분봉에 약 21분 걸렸음). 결과 위치 `var\backtest\data\binance-public-lf8-1m-20261018\`(`meta\collect-results.csv`, 수집용 목록, 스크립트 사본). **확인 방법**: `meta\collect-results.csv`에서 exit≠0인 줄, 폴더에 `.tmp` 파일이 남았는지. 중단됐으면 같은 스크립트로 다시 실행 — 완성된 파일은 건너뜀(`--skip-existing`) |
+| **LF-8 표본 1분봉 수집**(A-121) | **완료** 10-18 10:25~15:09, 29심볼 모두 성공·실패 0, 약 9.8GB, `varacktest\datainance-public-lf8-1m-20261018\`(meta\README.txt). 2025-12-31 전에 데이터가 끝난 4개(EOS·BTT·MATIC·FTM)는 이름 변경·토큰 전환 추정 — D-244 (4) '데이터 끝 = 종가 × 0.9 청산'이 과하게 불리할 수 있어 T-073 때 사용자 확인 |
 | M1 PV-11 주말 run | `main` 체크아웃, 사용자가 10-17 17:26 재시작(수동, **K8 유지 — 주문 0**). 정지 예정 **10-18(일) 21:00~22:30** |
 | M2 T-050 관찰 run | `C:\AI\trading_system\m2-binance` 브랜치 m2/run2(406ab6a), 10-17 20:27 시작. 주문 스위치 꺼짐, 배포 전략 없음, HMAC 사용자 스트림 구독 성공 |
 | M1 운영 상태 | 정지 K8·K9만, 보유 005930 1주(v2 소유, 월요일 14:30 매도 예정), 열린 불일치 0. 0056724 EXTERNAL "미체결" 표시만 남음(아래 3) |
@@ -19,11 +19,11 @@
 
 ## 다음 세션 첫 행동 — 오늘 밤 사용자 "PV-11 정지" 뒤 (월요일 06:45 전에 끝낼 것)
 1. **정지·기록**: `ops-stop.py --mode PAPER` → `backup.py` → `paper-review.py --mode PAPER` → `status.py`로 정지가 K8·K9뿐인지 확인 → DB 읽기 전용으로 `audit_event` `TOKEN_ISSUED`(INITIAL·REFRESH) 확인 → **07 §12H**에 PV-11 결과 기록(토큰 갱신 성공 여부, 시계, 07:53 K5 주말 재현, 자원). 절차서 `docs/strategies/paper0-verify/pv11-weekend-run.md` §8.
-2. **병합은 통합 브랜치에서**: `git checkout -b integ/2026-10-18 main` → ① `feat/T-051-m2-minute`(040cf59, T-045~T-051 체인 전체) ② `feat/btc-trend-v1-review`(66d2781) ③ `fix/external-resolve`(3a2b23e) ④ `feat/a110-binance-klines`(e9a3935). **넣지 않음**: ⑤ `feat/T-052-053-m2-periodic`(434211a — 독립 재검토·DP-78~81 확인 전), ⑥ `feat/crypto-trend-v1-review`(b8fb28c — ⑤ 위에 있음). 충돌 예상: `docs/decisions-pending.md`(행 모두 보존), `docs/capabilities.md`(M1 칸 불변 확인). 전체 시험 `.venv\Scripts\python -m pytest -q`(약 25분, -m 없음). 부하에 민감한 시험 2개(`test_r3_soak_market_hours_no_false_halts`, `test_dead_binance_feed_and_user_stream_threads_raise_k5`)만 실패하면 단독 재실행 → 통과하면 `git checkout main; git merge --ff-only integ/2026-10-18`. 실패하면 main을 그대로 두고 원인을 조사(월요일 운영 보호). **수집이 아직 돌고 있으면 전체 시험이 부하로 흔들릴 수 있음** — 수집이 끝난 뒤 실행 권장.
+2. **병합은 통합 브랜치에서**: `git checkout -b integ/2026-10-18 main` → ① `feat/T-051-m2-minute`(040cf59, T-045~T-051 체인 전체) ② `feat/btc-trend-v1-review`(66d2781) ③ `fix/external-resolve`(3a2b23e) ④ `feat/a110-binance-klines`(e9a3935). **넣지 않음**: ⑤ `feat/T-052-053-m2-periodic`(434211a — 독립 재검토·DP-78~81 확인 전), ⑥ `feat/crypto-trend-v1-review`(b8fb28c — ⑤ 위에 있음). 충돌 예상: `docs/decisions-pending.md`(행 모두 보존), `docs/capabilities.md`(M1 칸 불변 확인). 전체 시험 `.venv\Scripts\python -m pytest -q`(약 25분, -m 없음). 부하에 민감한 시험 2개(`test_r3_soak_market_hours_no_false_halts`, `test_dead_binance_feed_and_user_stream_threads_raise_k5`)만 실패하면 단독 재실행 → 통과하면 `git checkout main; git merge --ff-only integ/2026-10-18`. 실패하면 main을 그대로 두고 원인을 조사(월요일 운영 보호). (LF-8 수집은 끝났음)
 3. **사용자 실행**(병합 뒤): `& C:\AI\trading_system\trading_system\.venv\Scripts\python.exe C:\AI\trading_system\trading_system\scripts\fix-external-order.py --mode PAPER --account KR-PAPER-01 0056724` → 기대 "정정 완료 … ACCEPTED 0/1 → FILLED 1/1" → status에서 미체결 0.
 4. **M2 PAPER-0 준비**(사용자와 함께, 관찰 run을 Ctrl+C로 멈춘 뒤): `git -C C:\AI\trading_system\m2-binance checkout -b m2/run3 main`(사용자 로컬 수정 `config/m2/app.paper.toml` connection_approved=true가 따라오는지 확인) → m2-verify 등록·전환(A-112, `docs/strategies/m2-verify/strategy.md` 절차) → `reconcile-resolve.py initial-baseline --mode PAPER --market M2` → M2 텔레그램 키(사용자가 BotFather로 만들어 자격정보 파일에 직접 입력) → **T-M2-15 테스트넷 주문 승인 요청**(지급 BTC `/exit` 포함, `orders_approved`·`orders_approval`은 사용자가 설정) → M2 PAPER-0 시작.
 5. 월요일 06:50 M1 텔레그램 "시작 점검 통과"·"K8 자동 재개 완료" 확인(사용자).
-6. **수집 결과 확인** → `meta\README.txt` 작성(심볼·행 수·빈 구간·실패) → 사용자에게 보고. 수집용 목록은 공식 목록이 아님 — T-073이 만든 공식 목록과 다르면 보충 수집.
+6. 수집 결과는 확인·보고 완료(README 작성). 수집용 목록은 공식 목록이 아님 — T-073 공식 목록과 다르면 보충 수집.
 
 ## 사용자 결정 대기
 1. **CP-041**(M2 BTC+ETH 2종목, draft v0.1 — `docs/changes/CP-041-m2-multi-symbol.md`): 승인 여부와 Q-1 한도(권장: A-064 그대로)·Q-2 슬롯(권장: 지금 정하지 않음)·Q-3 일봉 출처(권장: 거래소 1d 파일)·Q-4 저빈도 기준(권장: 28일 창 왕복 0건 비율 ≥ 25%)·Q-5 ETH 반영 시점(권장: crypto-trend PAPER 준비 때). **10-18 "권장대로"는 CP-038에 대한 답으로 기록함** — CP-041도 같은 뜻인지 확인 필요.
