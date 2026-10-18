@@ -1,0 +1,34 @@
+# CP-038 저빈도 예외 경로 수치 (D-234~D-245, §3 — Q-1 (가)·Q-4 (가), 승인 A-121). T-058.
+# 검증 실행기는 이 파일에서만 읽는다. 명령줄로 바꿀 수 없다(D-237 (1)). 값 변경은 CP로만(D-237 (2)) — 변경 승인 A-ID를
+# approved_by에 적고, 변경 승인 뒤 처음 공식 검증하는 버전부터 적용한다(이미 결과를 본 버전은 원장이 거부).
+# 판정표에는 cp_version과 이 파일의 SHA-256을 적는다(D-237 (3)). 모든 키가 필요하고 모르는 키는 거부한다.
+cp = "CP-038"
+cp_version = "v0.2"
+approved_by = "A-121"
+markets = ["M2"]                       # Q-3 (가): A-091 Q-5 M2 한정 재결정 — M1은 일반 경로만
+
+[eligibility]
+c2_min_trades = 100                    # E-2: 전체 이력 연평균 거래 < c2_min_trades ÷ 검증 창 수 (C-2와 같은 식, D-235)
+
+[lf]
+lf1_min_window_trades = 30             # LF-1 검증 창 합산 거래 ≥ 30
+lf2_min_history_trades = 50            # LF-2 전체 이력 거래 ≥ 50
+lf3_max_zero_windows = 1               # LF-3 거래 0건 창 ≤ 1
+lf3_positive_numerator = 2             # LF-3 기대값 > 0 창 ≥ ⌈m × 2/3⌉
+lf3_positive_denominator = 3
+lf4_k_min = 3                          # LF-4 k = max(3, ⌈n × 5%⌉)
+lf4_k_ratio = "0.05"
+lf6_slippage_multiplier = 2            # LF-6 슬리피지 2배(0.2%)
+
+[lf8]
+role = "required"                      # Q-4 (가) 필수 조건 ("reference" = Q-4 (나) 참고 표시만)
+min_trades = 100                       # LF-8.1
+min_positive_symbol_ratio = "0.50"     # LF-8.3
+slippage_multiplier = 2                # LF-8.2 2배 슬리피지
+delist_haircut = "0.9"                 # D-244 (4) 보유 중 데이터 끝 → 마지막 종가 × 0.9 청산
+list_path = "docs/strategies/lf8/lf8-list.csv"     # T-073 산출물 (D-244 (6))
+list_sha256 = "432cf0cf09bd700570cc48ea0ef69a06e7c6b2f9bdd10e38568e42842b0a5761"
+
+[bootstrap]
+draws = 10000                          # LF-R (D-242) 참고 표시 — 판정 제외
+quantile = "0.05"
