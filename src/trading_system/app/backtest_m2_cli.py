@@ -269,7 +269,8 @@ def lf8_symbols(list_path: Path) -> dict[str, frozenset[int]]:
 
 
 def build_lf8_inputs(list_path: Path, list_sha: str, minute_dir: Path, *, aliases: tuple[str, ...], final_from: date,
-                     daily_dir: Path | None = None, daily_needed: bool = False) -> tuple[Lf8Inputs | None, str]:
+                     daily_dir: Path | None = None, daily_needed: bool = False,
+                     incomplete: dict[str, set[datetime]] | None = None) -> tuple[Lf8Inputs | None, str]:
     """[T-068 — CP-038 D-244 (7), DP-86] LF-8 표본 실행 입력. 표본 1분봉 = `<minute_dir>/<SYMBOL>-1m.csv`(A-110 수집 형식,
     읽기만 — 스트리밍), 일봉 전략이면 `<daily_dir>/<SYMBOL>-1d.csv`도 필요. 목록의 표본 심볼 파일이 하나라도 없으면 전부
     쓰지 않는다(일부 표본으로 판정하지 않음 — 보수, 임시 판단). (입력, 쓰지 못한 사유)."""
@@ -294,7 +295,8 @@ def build_lf8_inputs(list_path: Path, list_sha: str, minute_dir: Path, *, aliase
         if daily_needed and daily_dir is not None:
             daily = tuple(b for b in load_binance_daily_csv(daily_dir / f"{s}-1d.csv", incomplete=[])
                           if b.at < final_from)   # type: ignore[operator]
-        samples[s] = Lf8Sample(source=partial(iter_binance_minute_csv, path, final_from=final_from), years=ys,
+        inc = incomplete.setdefault(s, set()) if incomplete is not None else None   # --skip-incomplete-minutes
+        samples[s] = Lf8Sample(source=partial(iter_binance_minute_csv, path, final_from=final_from, incomplete=inc), years=ys,
                                data_start=first_minute_start(path), data_end=last_minute_start(path), daily=daily)
     return Lf8Inputs(list_sha256=list_sha, aliases=aliases, samples=samples), ""
 
@@ -303,7 +305,8 @@ def build_low_frequency_inputs(root: Path, strategy_id: str, version: int, param
                                final_from: date, data_start: date, lookback: int,
                                git: GitRun = _git_run, lf8_minute_dir: Path | None = None,
                                lf8_daily_dir: Path | None = None, aliases: tuple[str, ...] = (),
-                               daily_needed: bool = False) -> LowFrequencyInputs | None:
+                               daily_needed: bool = False,
+                               incomplete: dict[str, set[datetime]] | None = None) -> LowFrequencyInputs | None:
     """[CP-038 T-058] 저빈도 선언 전략이면 판정 입력을 만든다. 명세 docs/strategies/<ID>/strategy.md에 선언 절이 없으면 None
     (일반 경로 그대로, V-313). 수치는 config/low-frequency.toml에서만(명령줄 옵션 없음, D-237 (1)).
 
@@ -351,7 +354,7 @@ def build_low_frequency_inputs(root: Path, strategy_id: str, version: int, param
         reason = NO_SAMPLE_WIRING
     else:
         lf8, reason = build_lf8_inputs(list_path, sha, lf8_minute_dir, aliases=aliases, final_from=final_from,
-                                       daily_dir=lf8_daily_dir, daily_needed=daily_needed)
+                                       daily_dir=lf8_daily_dir, daily_needed=daily_needed, incomplete=incomplete)
     return LowFrequencyInputs(
         settings=settings, declaration=declaration, declaration_problems=problems, first_official_at=first_official,
         history_start=data_start + timedelta(days=-(-lookback // 1440)), history_end=final_from - timedelta(days=1),
@@ -419,6 +422,9 @@ def backtest_m2_minute_main(argv: Sequence[str], root: Path) -> int:
     p.add_argument("--ledger", default="var/backtest/final-usage.json", help="최종 구간 사용 장부(M1·백테스트 FINAL과 공용)")
     p.add_argument("--lf8-minute-dir", default=None, help="저빈도 LF-8 표본 1분봉 폴더 (<SYMBOL>-1m.csv, 읽기만)")
     p.add_argument("--lf8-daily-dir", default=None, help="저빈도 LF-8 표본 1d 폴더 (<SYMBOL>-1d.csv, 일봉 전략만)")
+    p.add_argument("--skip-incomplete-minutes", action="store_true",
+                   help="거래소 거래 중단으로 분 안에서 일찍 끝난 불완전 1분봉을 결측으로 건너뜀(기본 거부, 일봉 A-112 선례). "
+                        "건너뛴 시각은 결과 폴더 incomplete-minutes.json에 기록")
     ns = p.parse_args(argv)
     try:
         if ns.margin_seconds < 0 or ns.margin_seconds > 59:
@@ -497,7 +503,9 @@ def backtest_m2_minute_main(argv: Sequence[str], root: Path) -> int:
             initial_cash=Decimal(ns.cash), out_dir=out, slippage=Decimal(ns.slippage), lookback_bars=ns.lookback,
             margin=timedelta(seconds=ns.margin_seconds), caps=caps)
         ext = minute_request(cfg0).flow   # 흐름 열 선언 전략만 확장 열 해석 (D-260)
-        sources = {s: partial(iter_binance_minute_csv, files[s], final_from=read_until, ext=ext) for s in syms}
+        skipped_min: dict[str, set[datetime]] | None = {} if ns.skip_incomplete_minutes else None
+        sources = {s: partial(iter_binance_minute_csv, files[s], final_from=read_until, ext=ext,
+                              incomplete=skipped_min.setdefault(s, set()) if skipped_min is not None else None) for s in syms}
         if len(syms) > 1 and not ns.validate:   # [D-275 (1)] 실행 기간을 모든 심볼 데이터가 덮어야 함
             lo, hi = (final_from, end) if ns.final_check else (start, end)
             short = [s for s in syms if first_minute_start(files[s]) > lo or last_minute_start(files[s]) < hi]
@@ -507,11 +515,14 @@ def backtest_m2_minute_main(argv: Sequence[str], root: Path) -> int:
                       daily=daily, buy_buffer=market.buy_buffer, sell_buffer=market.sell_buffer,
                       quote_max_age=timedelta(seconds=market.quote_max_age_seconds), final_from=final_from,  # type: ignore[arg-type]
                       data_version=", ".join(f"{files[s].parent.name}/{files[s].name}" for s in syms) + f" {size}B",
-                      data_source=source + daily_note, fees=fees)
+                      data_source=source + daily_note + (" · 불완전 1분봉 결측 처리(--skip-incomplete-minutes, "
+                                                         "incomplete-minutes.json)" if skipped_min is not None else ""),
+                      fees=fees)
         if ns.final_check:
             v_out = out / ns.run_id
             res = run_minute_final_check(cfg, v_out, final_from=final_from, end=end, ledger=root / ns.ledger,
                                          confirmed_by=ns.confirmed_by)
+            _write_incomplete(v_out, skipped_min)
             print(f"최종 확인 완료: {v_out / 'final-check.json'} — 거래 {res['final-base']['trades']}건")
             return 0
         if ns.validate:
@@ -525,10 +536,11 @@ def backtest_m2_minute_main(argv: Sequence[str], root: Path) -> int:
                 data_start=data_start, lookback=ns.lookback,
                 lf8_minute_dir=Path(ns.lf8_minute_dir) if ns.lf8_minute_dir else None,
                 lf8_daily_dir=Path(ns.lf8_daily_dir) if ns.lf8_daily_dir else None, aliases=tuple(syms),
-                daily_needed=DAILY_CAPABILITY in strat.spec.capabilities)
+                daily_needed=DAILY_CAPABILITY in strat.spec.capabilities, incomplete=skipped_min)
             res = run_minute_validation(MinuteValidationInputs(
                 template=cfg, out_dir=v_out, data_start=data_start, skip_variants=ns.skip_variants,
                 command=" ".join(["backtest --market M2 --interval 1m", *argv]), low_frequency=low))
+            _write_incomplete(v_out, skipped_min)
             print(f"검증 완료: {v_out / 'validation.md'} — 판정 {res['verdict']['verdict']}")
             return 0
         result = run_minute_backtest(cfg)
@@ -550,9 +562,21 @@ def backtest_m2_minute_main(argv: Sequence[str], root: Path) -> int:
     (run_dir / "summary.json").write_text(json.dumps(summary_of(cfg, result, reproducible=reproducible,
                                                                 lookahead_bad=bad), ensure_ascii=False, indent=2)
                                           + "\n", encoding="utf-8", newline="\n")
+    _write_incomplete(run_dir, skipped_min)
     print(f"백테스트 완료: {run_dir / 'report.md'} (판정 {result.decisions}회, 거래 {len(result.result.trades)}건, "
           f"{result.seconds}초)")
     return 0
+
+
+def _write_incomplete(folder: Path, skipped: dict[str, set[datetime]] | None) -> None:
+    """--skip-incomplete-minutes로 건너뛴 불완전 1분봉 시작 시각(심볼별, 정렬)을 결과 폴더에 남기고 개수를 알린다."""
+    if skipped is None:
+        return
+    data = {s: sorted(t.strftime("%Y-%m-%dT%H:%M:%SZ") for t in ts) for s, ts in sorted(skipped.items())}
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "incomplete-minutes.json").write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                                                   encoding="utf-8", newline="\n")
+    print("불완전 1분봉 결측 처리: " + ", ".join(f"{s} {len(v)}개" for s, v in data.items()))
 
 
 __all__ = ["backtest_m2_main", "backtest_m2_minute_main", "load_binance_daily_csv", "TESTNET_RULES"]
