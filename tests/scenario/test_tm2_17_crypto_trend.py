@@ -9,15 +9,15 @@ eval_times 빈 목록·period_minutes 60·M2를 요구. v1 시험 이력은 9fdb
 
 검증 범위(구조·적재·등록 가능 여부만 — 재현·성과 판정은 장중 엔진 T-068 확장 뒤):
 - validate_symbol_rules(D-270): 실측 규칙 통과(BTCUSDT 테스트넷 §12, ETHUSDT §15 값), 거부 4종(STEPS 밖 심볼·규칙 심볼 이름 다름·
-  LOT_SIZE 단위 다름·MARKET_LOT_SIZE 단위 배수 아님), MARKET step 0·배수 통과. 운영 시작 검사(app.wiring.spot_rule_problems)는 아직
-  validate_rules만 부른다(T-070 몫) — F-3 xfail strict는 그 때문에 남는다.
+  LOT_SIZE 단위 다름·MARKET_LOT_SIZE 단위 배수 아님), MARKET step 0·배수 통과. 운영 시작 검사(app.wiring.spot_rule_problems)는
+  CP-041 T-070 뒤 validate_symbol_rules만 부른다(D-271 (2)) — F-3 시험은 xfail을 떼고 정상 시험이 됐다(T-070 완료 기준).
 - 파라미터 파일 2개(config/strategies/crypto-trend-v3.toml, -paper.toml)가 명세로 적재·검증되는지(period_minutes 60 포함).
 - 명세 능력: CAP-TRG-02·CAP-DAT-01·CAP-ORD-01·CAP-INS-05만(CAP-INS-01·CAP-DAT-02·CAP-HLD-02 없음). 코드가 실제로 읽는
   입력이 확정 일봉(daily_bars)·판정 시세(last_price)·상태 입력뿐인지 — AST와 동작으로 확인.
 - 등록(docs/capabilities.md M2 열, 이 브랜치): BACKTEST 통과(CAP-TRG-02 "검증 중"), PAPER 거부(능력 4개 "검증 중").
 - M2 조립 검사(이 브랜치 T-052 D-219): 주기 격자 통과(60분 23회, 실운영 등록 경로 _register_strategies 포함), validate_deploy
-  ([]·60·M2 통과 / 23개·15분·M1 거부), 유니버스 밖 ETHUSDT 거부(A-096 — A-119 ③은 F-3 반영 뒤), validate_rules 종목 구분
-  없음은 F-3 xfail strict(A-119 ② CP 대기).
+  ([]·60·M2 통과 / 23개·15분·M1 거부), 유니버스 밖 ETHUSDT 거부(A-096 운영 유니버스 — CP-041 Q-5 (다) 반영은 나중), 기존
+  validate_rules 종목 구분 없음은 전략 메서드 자체의 기록(운영 시작 검사는 T-070 뒤 새 형식만 부른다).
 - 재현 가능 여부: 1분봉 실행기(T-053)는 이제 이 전략을 받아 끝까지 돌지만 일봉 입력을 주지 않아(daily_bars ()) 신호 0 — 재현 아님.
 - 규칙 동작 최소 확인(가상 봉): 돌파 + 게이트 진입·수량 내림·손절가, 게이트 차단, EXIT-1, EXIT-2 우선, 수동 보유 무시, 두 종목 독립.
 가격·잔고는 가상값이다. 네트워크 없음. 파라미터 파일은 전략실 원본과 바이트 단위로 같고, 전략 코드는 CRLF → LF 변환(D-063)만
@@ -45,6 +45,7 @@ from trading_system.app.wiring import (
 from trading_system.config.capabilities import load_capabilities
 from trading_system.config.errors import ConfigError
 from trading_system.config.limits_file import load_limits_file
+from trading_system.config.m2_files import load_universe
 from trading_system.config.strategy_params import load_params_file
 from trading_system.config.strategy_registry import StrategyRegistry, validate_spec
 from trading_system.domain.enums import Mode, OrderType, RequestType
@@ -130,11 +131,15 @@ def test_registration_backtest_passes_with_trg02_verifying_and_paper_refused() -
 
 def test_m2_assembly_refuses_ethusdt_outside_universe_a096() -> None:
     """운영 M2 유니버스(A-096, config/m2/universe.paper.toml)는 BTCUSDT만 → ETHUSDT는 조립 단계 거부.
-    A-119 ③(ETHUSDT 추가)은 F-3 반영 뒤 설정 변경(순서 고정) — 이 브랜치는 유니버스·거래 규칙 무변경."""
+    ETHUSDT 유니버스 반영은 CP-041 D-272 순서(T-070·T-071 뒤, Q-5 (다) — 나중). [T-070 개정] 이전에는 백테스트 CLI의 PAIRS를
+    운영 유니버스 대용으로 썼으나, T-070(D-270)이 그 표에 ETHUSDT(BN §15)를 넣었으므로 설정 파일을 직접 읽는다."""
+    universe = load_universe(ROOT / "config" / "m2" / "universe.paper.toml")
+    assert universe.symbols == (BTC,)
+    pairs = {s: (universe.base_asset(s), universe.quote_asset) for s in universe.symbols}
     si = [StrategyInput(CryptoTrendV3(), params("crypto-trend-v3-paper.toml"), ())]
-    [problem] = _spot_strategy_problems(si, PAIRS)
+    [problem] = _spot_strategy_problems(si, pairs)
     assert "유니버스 밖 심볼 ETHUSDT" in problem
-    assert ETH not in TESTNET_RULES   # 이 브랜치의 1분봉 실행기 거래 규칙 표는 BTCUSDT만
+    assert ETH in TESTNET_RULES   # 백테스트 거래 규칙 표에는 T-070에서 ETHUSDT 추가(운영 유니버스와 별개)
 
 
 @pytest.mark.parametrize("name", ["crypto-trend-v3.toml", "crypto-trend-v3-paper.toml"])
@@ -201,20 +206,20 @@ def test_period_15_passes_grid_but_validate_deploy_refuses() -> None:
     assert CryptoTrendV3().validate_deploy(p, ()) != []
 
 
-@pytest.mark.xfail(strict=True, reason="F-3: 운영 시작 검사(app.wiring.spot_rule_problems)가 아직 종목 없는 validate_rules만 "
-                   "불러 BTCUSDT에 ETH 단위 0.0001이 와도 통과 — 전략 쪽 validate_symbol_rules(v3)는 거부한다(아래 시험). "
-                   "호출부 전환은 CP-041 T-070(D-270·D-271)")
 def test_f3_start_rule_check_refuses_other_symbols_step() -> None:
+    """F-3 해소(CP-041 T-070, D-270·D-271 (2)): 운영 시작 검사가 validate_symbol_rules를 심볼마다 불러 BTCUSDT에 ETH 단위
+    0.0001이 오면 거부한다. [T-070 개정] xfail(strict) 제거 — T-070 완료로 통과해야 하는 시험. 단언은 그대로(!= [])."""
     p = params("crypto-trend-v3-paper.toml")
     si = [StrategyInput(CryptoTrendV3(), p, ())]
     assert spot_rule_problems(si, {BTC: replace(RULES, lot_step=D("0.0001"))}, PAIRS) != []
 
 
 def test_start_rule_check_current_behaviour() -> None:
-    """현재 validate_rules: 어느 종목의 고정 단위와도 다르면 거부, 같으면(종목 무관) 통과. 실측 BTC 단위는 통과."""
+    """기존 validate_rules(전략 메서드): 어느 종목의 고정 단위와도 다르면 거부, 같으면(종목 무관) 통과. 실측 규칙은 시작 검사 통과.
+    [T-070 개정] 시작 검사 입력을 거래 규칙 표 전체로 바꿈 — 표·PAIRS에 ETHUSDT가 들어가 범위가 두 심볼이 됐다."""
     p = params("crypto-trend-v3-paper.toml")
     assert crypto_trend.STEPS[BTC] == RULES.lot_step == D("0.00001")
-    assert spot_rule_problems([StrategyInput(CryptoTrendV3(), p, ())], {BTC: RULES}, PAIRS) == []
+    assert spot_rule_problems([StrategyInput(CryptoTrendV3(), p, ())], TESTNET_RULES, PAIRS) == []
     [problem] = CryptoTrendV3.validate_rules(p, D("0.001"), RULES.min_notional)
     assert "0.001" in problem
     assert CryptoTrendV3.validate_rules(p, D("0.0001"), RULES.min_notional) == []   # F-3 (종목 구분 없음)
@@ -223,8 +228,9 @@ def test_start_rule_check_current_behaviour() -> None:
 # --- v3 종목별 시작 규칙 검사 validate_symbol_rules (CP-041 D-270·D-271, A-122) ----------------------------
 
 # ETHUSDT 테스트넷 규칙 (main 655b47d binance-spot.md §15, 2026-10-18): LOT step 0.0001·minQty 0.0001·maxQty 9000,
-# MARKET_LOT minQty 0·stepSize 0, tick 0.01, minNotional 5·applyMinToMarket True. 이 브랜치의 TESTNET_RULES에는 ETH가 없다
-# (T-070 몫) — 시험에서만 만든다. MARKET maxQty·maxNotional은 §15에 기록이 없어 BTCUSDT 값을 빌린 가상값(검사에 쓰이지 않음).
+# MARKET_LOT minQty 0·stepSize 0, tick 0.01, minNotional 5·applyMinToMarket True. 이 시험은 TESTNET_RULES에 ETH가 없던
+# 때(T-070 전) 만든 값이다 — 운영 표 TESTNET_RULES[ETH](T-070)와의 일치는 test_t070_symbol_rules가 본다. MARKET maxQty·maxNotional은
+# §15에 기록이 없어 BTCUSDT 값을 빌린 가상값(검사에 쓰이지 않음).
 ETH_RULES = replace(RULES, instrument=ETH, lot_min_qty=D("0.0001"), lot_max_qty=D("9000"), lot_step=D("0.0001"),
                     market_min_qty=D("0"), market_step=D("0"), tick_size=D("0.01"), min_notional=D("5"),
                     apply_min_to_market=True)
@@ -293,13 +299,15 @@ def test_symbol_rules_market_step_multiple(sym: str, market_step: str, ok: bool)
         assert problem.startswith(f"{sym}:") and "MARKET_LOT_SIZE" in problem and "배수가 아님" in problem
 
 
-def test_operational_start_check_still_uses_legacy_form_until_t070() -> None:
-    """현재 운영 시작 검사(app.wiring.spot_rule_problems)는 validate_rules만 부른다 — validate_symbol_rules가 거부할 규칙을
-    줘도 기존 형식 결과(통과)가 나온다. T-070(D-271 (2))에서 바뀔 동작의 현재 기록. 이 작업은 wiring을 고치지 않는다."""
+def test_operational_start_check_uses_symbol_form_after_t070() -> None:
+    """운영 시작 검사(app.wiring.spot_rule_problems)는 T-070 뒤 두 형식을 가진 전략에 validate_symbol_rules만 부른다(D-271 (2)).
+    [T-070 개정] 이전 시험(…still_uses_legacy_form_until_t070)은 T-070 전 동작(통과)의 기록이었다 — 요구사항(CP-041 A-122)대로
+    거부로 바꾼다. 영향 ID: D-270·D-271·V-341."""
     si = [StrategyInput(CryptoTrendV3(), params("crypto-trend-v3-paper.toml"), ())]
     bad = replace(RULES, lot_step=D("0.0001"))
     assert CryptoTrendV3.validate_symbol_rules({}, BTC, bad) != []
-    assert spot_rule_problems(si, {BTC: bad}, PAIRS) == []
+    [problem] = spot_rule_problems(si, {**TESTNET_RULES, BTC: bad}, PAIRS)
+    assert problem.startswith(f"crypto-trend:3 {BTC}: ")
 
 
 # --- 재현 가능 여부: 1분봉 실행기 (T-053) ------------------------------------------------------------
