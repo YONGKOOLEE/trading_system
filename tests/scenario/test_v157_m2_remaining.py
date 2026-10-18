@@ -266,15 +266,20 @@ def test_v76_m2_missing_latest_day_no_signal(tmp_path: Path) -> None:
 
 
 def test_v76_m2_gap_inside_window_invalidates_signal(tmp_path: Path) -> None:
-    """확정 봉 사이 빈 날(DAY−3) → 판정 입력은 빈 날 뒤 연속 구간(DAY−2·DAY−1)만(domain.daily_input, DP-82 임시) →
-    창 5봉이 필요한 전략은 판정하지 않음 → 주문 0. 빈 날을 가로지르는 창으로 판정하지 않는다."""
+    """확정 봉 사이 빈 날(DAY−3) → 진입용 판정 입력은 빈 날 뒤 연속 구간(DAY−2·DAY−1)만 → 창 5봉이 필요한 전략은 진입
+    판정하지 않음 → 주문 0. 빈 날을 가로지르는 창으로 진입하지 않는다.
+    [T-068 개정 — DP-82 확정 A-126 ②] 일봉이 불완전하면 판정 실행기가 전략을 한 번 더(청산용, 빈 날을 건너뛴 확정 봉 전체)
+    부른다. 그 판정에서 나온 진입 신호는 실행기가 버린다(감액·청산만 씀). 그래서 전략 기록은 두 번이고, 두 번째 입력은
+    DAY−3이 빠진 확정 봉 전체(진입 결정이 나와도 주문 0). 종전 기대값(기록 1회·연속 구간 2봉)은 DP-82 (가) 결정으로 바뀐 동작."""
     raw = raw_days(DAY - timedelta(days=30), DAY, high_close=DAY - timedelta(days=1),
                    skip=frozenset({DAY - timedelta(days=3)}))
     w = _v76_run(tmp_path, raw, need=5)
     try:
-        assert w.sent() == []
-        [(bars, ok, decide)] = w_strategy_seen(w)
-        assert [b.at for b in bars] == [DAY - timedelta(days=2), DAY - timedelta(days=1)] and ok and not decide
+        assert w.sent() == [] and w.intents() == []
+        [(bars, ok, decide)] = w_strategy_seen(w)       # 같은 판정 시각 키 — 마지막(청산용) 입력이 남는다
+        assert DAY - timedelta(days=3) not in [b.at for b in bars] and len(bars) == 29 and ok and decide
+        msgs = [json.loads(e["summary"])["message"] for e in w.audits("ALERT")]
+        assert any("일봉 판정 입력 불완전" in m and "보유 없음" in m for m in msgs)
     finally:
         w.close()
 

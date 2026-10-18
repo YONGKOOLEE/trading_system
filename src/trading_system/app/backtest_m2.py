@@ -363,10 +363,11 @@ def run_backtest_m2(cfg: SpotBacktestConfig) -> BacktestResult:
                 pending = bool(repo.active_new_intents(ACCOUNT, inst, Side.BUY.value)
                                or repo.active_new_intents(ACCOUNT, inst, Side.SELL.value))
                 qt = market.quote(inst)
-                bars, daily_ok = m2_daily_input(cfg.data[inst], now, final_bars)   # 실시간과 같은 함수 (D-088, DP-82)
-                views.append(InstrumentView(inst, daily_bars=bars,
+                di = m2_daily_input(cfg.data[inst], now, final_bars)   # 실시간과 같은 함수 (D-088, DP-82)
+                views.append(InstrumentView(inst, daily_bars=di.bars,
                                             last_price=qt.price if qt else None, position=pv,
-                                            has_pending_order=pending, data_ok=qt is not None and daily_ok))
+                                            has_pending_order=pending, data_ok=qt is not None,
+                                            daily_ok=di.ok, daily_exit=di.daily_exit))
             snap = EvaluationSnapshot(ev_id, "M2", ACCOUNT, now, base, tuple(views),
                                       next_evaluation_at=_next_eval(day, k, times))
             result = run_evaluation(cfg.strategy, snap, cfg.params,
@@ -498,10 +499,10 @@ def perturbation_check_m2(cfg: SpotBacktestConfig, check_days: list[date]) -> li
             views = []
             for inst in sorted(data):
                 today = next((b for b in data[inst] if b.at == day), None)
-                bars, daily_ok = m2_daily_input(data[inst], now, final_bars)
-                views.append(InstrumentView(inst, daily_bars=bars,
+                di = m2_daily_input(data[inst], now, final_bars)
+                views.append(InstrumentView(inst, daily_bars=di.bars,
                                             last_price=today.open if today else None,
-                                            data_ok=today is not None and daily_ok))
+                                            data_ok=today is not None, daily_ok=di.ok, daily_exit=di.daily_exit))
             ev = evaluation_id_of(spec.strategy_id, spec.version, "M2", f"{day.isoformat()}T{et:%H:%M}Z")
             snap = EvaluationSnapshot(ev, "M2", ACCOUNT, now, cfg.initial_cash, tuple(views),
                                       next_evaluation_at=_next_eval(day, k, times))
@@ -560,6 +561,8 @@ def render_report_m2(cfg: SpotBacktestConfig, result: BacktestResult, *, reprodu
         *(fee_model_lines(cfg.fees, result.costs) if cfg.fees is not None else
           [f"- 비용: 수수료율 {cfg.cost_rates.commission_rate}(받는 자산에서 차감, D-101), 매도세 0, 비용 합계 {result.costs} USDT"]),
         f"- K2 다음 날 재개 가정: {result.k2_resumes}회",
+        "- L4 장중 측정 불가 — K2 영향 과소: 1분 데이터 없이 판정 시점에만 일일 손실을 잰다(CP-040 D-265 (4)). "
+        "일봉 결측 뒤에는 신규 진입·증액만 막고 감액·청산은 빈 날을 건너뛴 봉으로 판정(DP-82)",
         "",
         "## 지표 (비용 반영 후, 연환산 365일)",
         "| 지표 | 값 |",

@@ -605,7 +605,14 @@ def test_v313_general_path_bytes_unchanged(tmp_path: Path) -> None:
     o = json.loads((tmp_path / "val" / "validation.json").read_text(encoding="utf-8"))
     for w in o["windows"]:
         w.pop("seconds")
-    assert hashlib.sha256(md).hexdigest() == "6f078b3372acfa7517d7c4a1dfd5b827761e2654c03bcade7938b513705eceb9"
+        w.pop("intraday")                     # [T-068] 창별 장중 L4·손절 칸 (CP-040 T-068 보고서 칸)
+    for k in ("symbols", "intraday_note"):    # [T-068] 여러 심볼·장중 측정 표시 칸
+        o.pop(k)
+    for k in ("k2_days", "k2_close_days", "stop_excess"):
+        o["pooled"].pop(k)
+    # [T-068 개정] 판정표 md는 T-068 보고서 칸(장중 L4·손절 줄, C-4·C-8 문구)이 더해져 해시가 바뀐다(이전 6f078b33…).
+    # JSON은 T-068이 더한 칸을 빼면 종전 해시와 같아야 한다 — 일반 경로 판정 결과 불변(V-313·V-347)
+    assert hashlib.sha256(md).hexdigest() == "facbfc2dc4a2f7c7be885aaef21b9bb172852da82a67e574a2a63bc6faf6aea0"
     assert hashlib.sha256(json.dumps(o, ensure_ascii=False, sort_keys=True).encode()).hexdigest() == \
         "d78d10169edc263f0f26def2cb2a3a5c2280214f0a1a1233871d69a98336b03a"
 

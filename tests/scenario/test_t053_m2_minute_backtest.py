@@ -379,10 +379,12 @@ def test_cli_minute_refuses_final_period_and_non_periodic(tmp_path: Path, capsys
 
 
 def test_cli_minute_validate_six_windows(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """[T-068 개정] 판정 주기 720 → 60: 공식 판정(--validate)은 실운영 등록과 같은 15·60분만 허용(DP-88 (1), CP-040 D-258).
+    시험 의도(6창 구조·학습 단축·결측 표시)는 그대로."""
     data = minute_csv(tmp_path / "BTCUSDT-1m.csv", date(2021, 6, 1), 1)      # 대부분 결측 — 구조만 본다
     from trading_system.app.backtest_m2_cli import backtest_m2_main
     code = backtest_m2_main(["--interval", "1m", "--strategy", "tests.support.minute_strategies:SessionRangeBreakout",
-                             "--params", str(example_params(tmp_path / "p.toml", n=720)), "--data", str(data),
+                             "--params", str(example_params(tmp_path / "p.toml", n=60)), "--data", str(data),
                              "--run-id", "v1", "--lookback", "31", "--slippage", "0.001", "--validate",
                              "--skip-variants", "--out", str(tmp_path / "out")], ROOT)
     assert code == 0, capsys.readouterr().out

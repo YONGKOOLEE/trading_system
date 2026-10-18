@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Protocol
 from trading_system.broker.base import BrokerQueryError
 from trading_system.broker.ratelimit import Priority, call_priority
 from trading_system.domain.clock import KST, last_kst_time_at_or_before
-from trading_system.domain.daily_input import final_daily, m2_daily_input
+from trading_system.domain.daily_input import DailyInput, final_daily, m2_daily_input
 from trading_system.domain.enums import OrderType, Side
 from trading_system.domain.limits import AccountLimits
 from trading_system.domain.market import SessionInfo
@@ -112,6 +112,7 @@ class SpotProfile(MarketProfile):
         self.dust = dust
         self.schedule = schedule
         self.cycle: SpotReconcileCycle | None = None   # 조립 지점이 대조기와 함께 연결
+        self._daily_alerted: dict[tuple[str, str], tuple] = {}   # [DP-82 (나)] (종목, 전략) → 마지막으로 알린 결측 상태
 
     # --- 시각·세션 (D-108) -------------------------------------------------------------------
     def last_at_or_before(self, at: datetime, t: time) -> datetime:
@@ -207,22 +208,52 @@ class SpotProfile(MarketProfile):
     def _view(self, inst: str, owner: str, now: datetime, minute: MinuteInput | None = None) -> InstrumentView:
         e = self._engine
         rules = self.facts.rules(inst)
-        bars, daily_ok = m2_daily_input(self.facts.daily_bars(inst), now)   # 백테스트와 같은 함수 (D-088, DP-82)
+        di = m2_daily_input(self.facts.daily_bars(inst), now)   # 백테스트와 같은 함수 (D-088, DP-82)
         q = self.facts.quote(inst)
         statuses = self.facts.trading_status(inst)
         pending = bool(e.repo.active_new_intents(e.account, inst, Side.BUY.value)
                        or e.repo.active_new_intents(e.account, inst, Side.SELL.value))
-        data_ok = rules is not None and statuses is not None and daily_ok
+        # [DP-82 (가), A-126 ②] 일봉 결측은 data_ok가 아니라 daily_ok·daily_exit로 전달한다 — 판정 실행기가 진입·증액만 버리고
+        # 감액·청산은 빈 날을 건너뛴 확정 봉으로 판정한다(전략에게 진입용 입력은 종전과 같게 data_ok AND daily_ok로 보인다).
+        data_ok = rules is not None and statuses is not None
+        position = self._position(inst, owner, rules)
+        self._daily_warning(inst, owner, di, position)
         # [DP-78 — DP-75 (6) 해소, CLAUDE.md §8-3] 1분봉 누락·결측·품질·저장 실패·조회 시한 초과·공급 꺼짐(D-220)은 data_ok가
         # 아니라 minute_ok False로 전달한다(minute_bars ()). 판정 실행기가 이 종목 신규 진입·증액을 버리고, 청산·감액은 분봉 외
         # 입력(data_ok)으로만 검사한다 — 분봉이 무효라고 위험 축소 신호까지 조용히 막지 않는다.
-        return InstrumentView(inst, daily_bars=bars, minute_bars=minute.bars if minute is not None else (),
+        return InstrumentView(inst, daily_bars=di.bars, minute_bars=minute.bars if minute is not None else (),
                               last_price=q.price if q is not None and q.at <= now else None,
-                              statuses=statuses or frozenset(), position=self._position(inst, owner, rules),
+                              statuses=statuses or frozenset(), position=position,
                               has_pending_order=pending, data_ok=data_ok,
                               minute_ok=minute.ok if minute is not None else True,
                               agg_bars=minute.agg_bars if minute is not None else (),
-                              agg_missing=minute.agg_missing if minute is not None else ())
+                              agg_missing=minute.agg_missing if minute is not None else (),
+                              daily_ok=di.ok, daily_exit=di.daily_exit)
+
+    def _daily_warning(self, inst: str, owner: str, di: DailyInput, position: PositionView | None) -> None:
+        """[DP-82 (나)] 일봉 판정 입력이 불완전하면 텔레그램 경고(WARNING — 감사 ALERT를 텔레그램이 보냄) 1건, 보유 여부 포함.
+        반복 억제: 같은 (종목·전략)에 대해 빠진 날짜·보유 상태가 바뀔 때만 다시 알린다. 완전해지면 회복 INFO 1건."""
+        key = (inst, owner)
+        if di.complete:
+            if self._daily_alerted.pop(key, None) is not None:
+                self._engine.alerts.alert("INFO", f"일봉 판정 입력 회복 {inst} ({owner}): 빈 날 없음 — 신규 진입 판정 재개 "
+                                                  "(DP-82)", None)
+            return
+        if position is None:
+            held = "보유 없음"
+        elif position.owned_by_me:
+            held = f"보유 있음(이 전략 소유, 수량 {position.quantity})"
+        else:
+            held = f"보유 있음(이 전략 소유 아님, 수량 {position.quantity})"
+        state = (di.missing, held, len(di.exit_bars) == 0)
+        if self._daily_alerted.get(key) == state:
+            return
+        self._daily_alerted[key] = state
+        gaps = ", ".join(d.isoformat() for d in di.missing[-5:]) + (f" 외 {len(di.missing) - 5}일"
+                                                                    if len(di.missing) > 5 else "")
+        what = "확정 일봉 없음" if not di.exit_bars else f"빈 날 {gaps or '없음'}"
+        self._engine.alerts.alert("WARNING", f"일봉 판정 입력 불완전 {inst} ({owner}): {what} — {held}. 신규 진입·증액 차단, "
+                                             "감액·청산 판정은 빈 날을 건너뛴 확정 봉으로 계속 (DP-82, A-126 ②)", None)
 
     def sellable_position(self, inst: str, owner: str) -> PositionView | None:
         """[CP-040 T-067] 손절 감시의 청산 수량 = 판정 입력과 같은 보유 표시(청산 가능 수량, dust 제외 — D-102).

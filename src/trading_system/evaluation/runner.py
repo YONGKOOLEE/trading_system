@@ -12,11 +12,15 @@
 - [CP-037 DP-78] 종목 입력의 `minute_ok`가 False(CAP-DAT-02 전략의 1분봉 창 무효 — 누락·결측·품질·저장 실패·조회 시한
   초과·공급 꺼짐)면 그 종목 신규 진입·증액만 버린다. 청산·감액은 data_ok(분봉 외 입력)로만 검사한다(CLAUDE.md §8-3).
   minute_ok 기본값은 True — M1·분봉 미선언 전략은 기존 동작 그대로.
+- [DP-82, A-126 ②] M2 일봉 결측: 종목 입력의 daily_ok가 False면 그 종목 신규 진입·증액을 버린다. daily_exit가 있으면(일봉
+  불완전) 전략을 두 번 부른다 — ① 진입용(daily_bars = 빈 날 뒤 연속 구간, data_ok AND daily_ok — 종전 입력 그대로)에서
+  진입·증액 신호, ② 청산용(daily_bars = 빈 날을 건너뛴 확정 봉, data_ok = 일봉 외 입력)에서 그 종목 감액·청산 신호만 쓴다.
+  어느 쪽이든 전략 오류면 그 판정 신호는 없다. 모든 종목이 완전(daily_exit None, daily_ok True)이면 종전처럼 한 번만 부른다.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from decimal import Decimal
 
@@ -53,10 +57,11 @@ def run_evaluation(strategy: Strategy, snapshot: EvaluationSnapshot, params: Par
     spec = strategy.spec
     result = EvaluationResult()
     try:
-        raw = list(strategy.evaluate(snapshot, params))
+        raw, pre_dropped = _evaluate(strategy, snapshot, params)
     except Exception as exc:  # noqa: BLE001 — 전략 오류는 판정 실패로 기록, 신호 없음
         result.error = f"전략 실행 오류: {type(exc).__name__}: {exc}"
         return result
+    result.dropped.extend(pre_dropped)
 
     rules = {r.rule_id: r for r in spec.rules}
     priorities = {r.rule_id: r.priority for r in spec.rules}
@@ -74,6 +79,8 @@ def run_evaluation(strategy: Strategy, snapshot: EvaluationSnapshot, params: Par
                 reason = "U-B 적용 목록 밖 종목 — 신규 진입·증액 불가, 청산·감액만 (D-198)"
             elif view is not None and not view.minute_ok:
                 reason = "1분봉 판정 입력 무효 — 신규 진입·증액 불가, 청산·감액만 (CP-037 D-220, DP-78)"
+            elif view is not None and not view.daily_ok:
+                reason = "일봉 판정 입력 불완전(빈 날·어제 봉 없음) — 신규 진입·증액 불가, 청산·감액만 (DP-82)"
         if reason:
             result.dropped.append(Dropped(getattr(s, "instrument", "?"), getattr(s, "rule_id", "?"), reason))
         else:
@@ -92,6 +99,35 @@ def run_evaluation(strategy: Strategy, snapshot: EvaluationSnapshot, params: Par
     chosen.sort(key=lambda s: (0 if s.kind in reducing else 1, s.instrument))
     result.signals = chosen
     return result
+
+
+_RISK_DOWN = (RequestType.EXIT, RequestType.REDUCE)
+
+
+def _evaluate(strategy: Strategy, snapshot: EvaluationSnapshot, params: ParamValues) -> tuple[list[object], list[Dropped]]:
+    """[DP-82] 일봉이 불완전한 종목이 있으면 진입용·청산용 두 번 판정해 합친다. 없으면 종전처럼 한 번."""
+    views = snapshot.instruments
+    if all(v.daily_ok and v.daily_exit is None for v in views):
+        return list(strategy.evaluate(snapshot, params)), []
+    gap = {v.instrument for v in views if v.daily_exit is not None}
+    entry_views = tuple(replace(v, data_ok=v.data_ok and v.daily_ok, daily_exit=None) for v in views)
+    raw = list(strategy.evaluate(replace(snapshot, instruments=entry_views), params))
+    if not gap:
+        return raw, []
+    exit_views = tuple(replace(v, daily_bars=v.daily_exit, daily_exit=None) if v.instrument in gap else ev
+                       for v, ev in zip(views, entry_views, strict=True))
+    second = list(strategy.evaluate(replace(snapshot, instruments=exit_views), params))
+    kept = [s for s in raw if not (isinstance(s, Signal) and s.instrument in gap and s.kind in _RISK_DOWN)]
+    dropped: list[Dropped] = []
+    for s in second:
+        if not isinstance(s, Signal) or s.instrument not in gap:
+            continue
+        if s.kind in _RISK_DOWN:
+            kept.append(s)
+        else:
+            dropped.append(Dropped(s.instrument, s.rule_id, "일봉 판정 입력 불완전 — 빈 날을 건너뛴 봉의 판정에서는 감액·청산만 "
+                                                            "쓴다, 신규 진입·증액 불가 (DP-82)"))
+    return kept, dropped
 
 
 def _check(s: object, spec, snapshot: EvaluationSnapshot, rules: dict, universe: set[str],  # type: ignore[no-untyped-def]

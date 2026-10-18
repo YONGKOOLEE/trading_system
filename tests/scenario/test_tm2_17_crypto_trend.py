@@ -314,25 +314,42 @@ def test_operational_start_check_uses_symbol_form_after_t070() -> None:
 
 # --- 재현 가능 여부: 1분봉 실행기 (T-053) ------------------------------------------------------------
 
-def test_minute_backtest_cli_now_accepts_but_gives_no_signal(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """v3(v2와 같음)는 1분봉 실행기의 실운영 같은 일정 검사(주기 격자·validate_deploy·거래 규칙)를 통과해 끝까지 돈다. 그러나 이
-    실행기는 일봉 입력을 주지 않으므로(daily_bars ()) 가격이 계속 올라도 신호 0 — 재현이 아니다(T-068 확장 범위, A-119 ②).
-    가상 1분봉 2일(매분 +0.01 상승)."""
+def test_minute_backtest_cli_needs_daily_and_runs_two_symbols(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """[T-068 개정 — 종전 시험 '일봉 입력이 없어 신호 0'] T-068(CP-041 D-275·D-276)로 1분봉 실행기가 여러 심볼 한 계좌·확정
+    일봉 입력을 받는다. 일봉 선언(CAP-DAT-01) 전략은 --daily 없이는 거부(입력이 실운영과 다르면 돌리지 않음), --minute·--daily로
+    BTC·ETH 두 심볼을 주면 끝까지 돌고 상승 가상 데이터에서 진입 신호가 나온다(재현 가능한 입력 모양). 가상 1분봉 2일·1d 260일."""
     first = datetime(2025, 3, 3, tzinfo=UTC)
-    rows = []
-    for i in range(1440 * 2):
-        c = str(D("60000.00") + D("0.01") * i)
-        rows.append(mrow(first + timedelta(minutes=i), o=c, h=c, lo=c, c=c))
-    data = write_csv(tmp_path / "BTCUSDT-1m.csv", rows)
-    code = backtest_m2_minute_main(
-        ["--strategy", "trading_system.strategy.crypto_trend:CryptoTrendV3",
-         "--params", "config/strategies/crypto-trend-v3-paper.toml", "--data", str(data),
-         "--start", "2025-03-03", "--end", "2025-03-04", "--run-id", "t", "--lookback", "60",
-         "--slippage", "0.001", "--out", str(tmp_path / "out")], ROOT)
+    files: dict[str, tuple[Path, Path]] = {}
+    for sym in (BTC, ETH):
+        rows = []
+        for i in range(1440 * 2):
+            c = str(D("60000.00") + D("0.01") * i)
+            rows.append(mrow(first + timedelta(minutes=i), o=c, h=c, lo=c, c=c))
+        m = write_csv(tmp_path / f"{sym}-1m.csv", rows)
+        d = tmp_path / f"{sym}-1d.csv"
+        lines = ["open_time_utc,open,high,low,close,volume,close_time_utc\n"]
+        for k in range(260):
+            day = date(2025, 3, 4) - timedelta(days=260 - k)
+            c = D("30000") + D("110") * k
+            o = datetime(day.year, day.month, day.day, tzinfo=UTC)
+            lines.append(f"{o.isoformat()},{c - 50},{c + 100},{c - 100},{c},1000,"
+                         f"{(o + timedelta(days=1) - timedelta(milliseconds=1)).isoformat()}\n")
+        d.write_text("".join(lines), encoding="utf-8", newline="\n")
+        files[sym] = (m, d)
+    base = ["--strategy", "trading_system.strategy.crypto_trend:CryptoTrendV3",
+            "--params", "config/strategies/crypto-trend-v3-paper.toml",
+            "--start", "2025-03-03", "--end", "2025-03-04", "--lookback", "60", "--slippage", "0.001",
+            "--out", str(tmp_path / "out")]
+    minute = [x for s in (ETH, BTC) for x in ("--minute", f"{s}={files[s][0]}")]
+    assert backtest_m2_minute_main([*base, *minute, "--run-id", "n"], ROOT) == 2
+    assert "CAP-DAT-01" in capsys.readouterr().out
+    daily = [x for s in (BTC, ETH) for x in ("--daily", f"{s}={files[s][1]}")]
+    code = backtest_m2_minute_main([*base, *minute, *daily, "--run-id", "t"], ROOT)
     assert code == 0, capsys.readouterr().out
     s = json.loads((tmp_path / "out" / "t" / "summary.json").read_text(encoding="utf-8"))
     assert (s["version"], s["period_minutes"], s["decisions"]) == (3, 60, 2 * 23)
-    assert s["signals"] == 0 and s["round_trips"] == 0 and s["fills"] == {"BUY": 0, "SELL": 0}
+    assert s["symbols"] == [BTC, ETH] and s["signals"] >= 2 and s["reproducible"] is True and s["lookahead_bad"] == []
+    assert s["daily_check"][BTC]["minute_incomplete"] == 0
 
 
 def test_minute_engine_input_shape_gives_no_signal() -> None:

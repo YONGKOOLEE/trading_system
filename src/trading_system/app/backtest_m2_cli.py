@@ -38,8 +38,8 @@ from trading_system.app.backtest_m2 import (
     SpotBacktestConfig, dust_summary, fee_model_summary, perturbation_check_m2, render_report_m2, run_backtest_m2,
 )
 from trading_system.app.low_frequency import (
-    NO_SAMPLE_WIRING, UNKNOWN_PAST, LowFrequencyError, LowFrequencyInputs, load_low_frequency_settings,
-    params_hash, parse_declaration,
+    NO_SAMPLE_WIRING, UNKNOWN_PAST, Lf8Inputs, Lf8Sample, LowFrequencyError, LowFrequencyInputs,
+    load_low_frequency_settings, params_hash, parse_declaration,
 )
 from trading_system.app.validation_tool import load_validation_settings
 from trading_system.app.wiring import StrategyInput, load_strategy, period_grid_of, spot_rule_problems
@@ -258,9 +258,52 @@ def _git_run(root: Path, args: list[str]) -> str | None:
     return p.stdout if p.returncode == 0 else None
 
 
+def lf8_symbols(list_path: Path) -> dict[str, frozenset[int]]:
+    """LF-8 표본 목록(T-073 산출물 lf8-list.csv: year,symbol,…,rank,excluded_reason) → 표본 심볼별 목록 해(순위가 있는 행만)."""
+    out: dict[str, set[int]] = {}
+    with list_path.open(encoding="utf-8-sig", newline="") as f:
+        for r in csv.DictReader(f):
+            if (r.get("rank") or "").strip() and not (r.get("excluded_reason") or "").strip():
+                out.setdefault(r["symbol"].strip(), set()).add(int(r["year"]))
+    return {s: frozenset(y) for s, y in sorted(out.items())}
+
+
+def build_lf8_inputs(list_path: Path, list_sha: str, minute_dir: Path, *, aliases: tuple[str, ...], final_from: date,
+                     daily_dir: Path | None = None, daily_needed: bool = False) -> tuple[Lf8Inputs | None, str]:
+    """[T-068 — CP-038 D-244 (7), DP-86] LF-8 표본 실행 입력. 표본 1분봉 = `<minute_dir>/<SYMBOL>-1m.csv`(A-110 수집 형식,
+    읽기만 — 스트리밍), 일봉 전략이면 `<daily_dir>/<SYMBOL>-1d.csv`도 필요. 목록의 표본 심볼 파일이 하나라도 없으면 전부
+    쓰지 않는다(일부 표본으로 판정하지 않음 — 보수, 임시 판단). (입력, 쓰지 못한 사유)."""
+    from functools import partial
+
+    from trading_system.app.backtest_m2_minute import first_minute_start, iter_binance_minute_csv, last_minute_start
+    years = lf8_symbols(list_path)
+    if not years:
+        return None, "LF-8 표본 목록에 표본 심볼 없음 (D-244)"
+    missing = [s for s in years if not (minute_dir / f"{s}-1m.csv").is_file()]
+    if daily_needed:
+        if daily_dir is None:
+            return None, "일봉 전략인데 LF-8 표본 1d 위치(--lf8-daily-dir)를 주지 않음 — 표본 데이터 없음 (D-244·D-276)"
+        missing += [f"{s}-1d" for s in years if not (daily_dir / f"{s}-1d.csv").is_file()]
+    if missing:
+        return None, (f"LF-8 표본 파일 없음 {len(missing)}개({', '.join(missing[:5])}{' …' if len(missing) > 5 else ''}) — "
+                      "표본 데이터 없음으로 판단 불가 (D-244 (6)(7))")
+    samples: dict[str, Lf8Sample] = {}
+    for s, ys in years.items():
+        path = minute_dir / f"{s}-1m.csv"
+        daily = None
+        if daily_needed and daily_dir is not None:
+            daily = tuple(b for b in load_binance_daily_csv(daily_dir / f"{s}-1d.csv", incomplete=[])
+                          if b.at < final_from)   # type: ignore[operator]
+        samples[s] = Lf8Sample(source=partial(iter_binance_minute_csv, path, final_from=final_from), years=ys,
+                               data_start=first_minute_start(path), data_end=last_minute_start(path), daily=daily)
+    return Lf8Inputs(list_sha256=list_sha, aliases=aliases, samples=samples), ""
+
+
 def build_low_frequency_inputs(root: Path, strategy_id: str, version: int, params: dict[str, object], *, out: Path,
                                final_from: date, data_start: date, lookback: int,
-                               git: GitRun = _git_run) -> LowFrequencyInputs | None:
+                               git: GitRun = _git_run, lf8_minute_dir: Path | None = None,
+                               lf8_daily_dir: Path | None = None, aliases: tuple[str, ...] = (),
+                               daily_needed: bool = False) -> LowFrequencyInputs | None:
     """[CP-038 T-058] 저빈도 선언 전략이면 판정 입력을 만든다. 명세 docs/strategies/<ID>/strategy.md에 선언 절이 없으면 None
     (일반 경로 그대로, V-313). 수치는 config/low-frequency.toml에서만(명령줄 옵션 없음, D-237 (1)).
 
@@ -301,31 +344,63 @@ def build_low_frequency_inputs(root: Path, strategy_id: str, version: int, param
             first_official = UNKNOWN_PAST
     list_path = root / settings.lf8_list_path
     sha = hashlib.sha256(list_path.read_bytes()).hexdigest() if list_path.is_file() else ""
-    reason = NO_SAMPLE_WIRING if sha == settings.lf8_list_sha256 else (
-        "LF-8 표본 목록 해시 불일치(설정 list_sha256과 다름 또는 파일 없음) — 표본 데이터 없음으로 판단 불가 (D-244 (6))")
+    lf8: Lf8Inputs | None = None
+    if sha != settings.lf8_list_sha256:
+        reason = "LF-8 표본 목록 해시 불일치(설정 list_sha256과 다름 또는 파일 없음) — 표본 데이터 없음으로 판단 불가 (D-244 (6))"
+    elif lf8_minute_dir is None:
+        reason = NO_SAMPLE_WIRING
+    else:
+        lf8, reason = build_lf8_inputs(list_path, sha, lf8_minute_dir, aliases=aliases, final_from=final_from,
+                                       daily_dir=lf8_daily_dir, daily_needed=daily_needed)
     return LowFrequencyInputs(
         settings=settings, declaration=declaration, declaration_problems=problems, first_official_at=first_official,
         history_start=data_start + timedelta(days=-(-lookback // 1440)), history_end=final_from - timedelta(days=1),
-        ledger=out / "low-frequency-ledger.jsonl", lf8=None, lf8_no_data_reason=reason,
+        ledger=out / "low-frequency-ledger.jsonl", lf8=lf8, lf8_no_data_reason=reason,
         params_sha256=params_hash(params))
 
 
+def _pairs_arg(items: Sequence[str], flag: str) -> dict[str, Path]:
+    """`SYM=경로` 반복 인자 → {심볼: 경로}. 같은 심볼 두 번은 거부."""
+    out: dict[str, Path] = {}
+    for item in items:
+        sym, sep, path = item.partition("=")
+        sym = sym.strip().upper()
+        if not sep or not sym or not path.strip():
+            raise ConfigError(f"{flag} 형식: SYMBOL=경로 (예: {flag} BTCUSDT=data/BTCUSDT-1m.csv)")
+        if sym in out:
+            raise ConfigError(f"{flag}: 같은 심볼 {sym}을 두 번 지정")
+        out[sym] = Path(path.strip())
+    return out
+
+
 def backtest_m2_minute_main(argv: Sequence[str], root: Path) -> int:
-    """`backtest --market M2 --interval 1m` (CP-037 T-053, D-221·D-222). 데이터 = A-110 공개 1m CSV(읽기만, 스트리밍).
-    전략은 CAP-TRG-02(파라미터 period_minutes) — 판정 일정은 실운영과 같은 주기 격자. `--validate`면 D-222 6창(2020~2025)."""
+    """`backtest --market M2 --interval 1m` (CP-037 T-053, D-221·D-222 / CP-040 T-068·CP-041 D-275·D-276). 데이터 = A-110
+    공개 1m CSV(읽기만, 스트리밍). 전략은 CAP-TRG-02(파라미터 period_minutes) — 판정 일정은 실운영과 같은 주기 격자.
+    `--validate`면 D-222 6창(2020~2025), `--final-check`면 최종 확인 구간 1회(DP-81). 공식 판정 경로(--validate·--final-check)는
+    판정 주기 15·60분만(DP-88 (1), CP-040 D-258 — 탐색 실행은 1440의 약수 그대로).
+    - 한 심볼: `--data 파일 [--symbol BTCUSDT]`(종전). 여러 심볼 한 계좌: `--minute SYM=파일` 반복(D-275 — 인자 순서 무관).
+    - 확정 일봉(CAP-DAT-01 전략): `--daily SYM=1d파일` 반복(D-276 — 1d 로더·불완전 봉 제외는 일봉 경로와 같음).
+    - LF-8 표본(저빈도 선언 전략, T-058 연결): `--lf8-minute-dir`(`<SYMBOL>-1m.csv`)·일봉 전략은 `--lf8-daily-dir`
+      (`<SYMBOL>-1d.csv`). 주지 않으면 LF-8 '판단 불가(표본 데이터 없음)' 그대로."""
     from functools import partial
 
     from trading_system.app.backtest_m2_minute import (
-        MinuteBacktestConfig, MinuteValidationInputs, first_minute_start, iter_binance_minute_csv,
-        perturbation_check_minute, render_minute_report, run_minute_backtest, run_minute_validation, summary_of,
+        DAILY_CAPABILITY, MinuteBacktestConfig, MinuteValidationInputs, first_minute_start, iter_binance_minute_csv,
+        last_minute_start, minute_request, perturbation_check_minute, render_minute_report, run_minute_backtest,
+        run_minute_final_check, run_minute_validation, summary_of,
     )
+    from trading_system.app.validation import ValidationError
     p = argparse.ArgumentParser(prog="python -m trading_system.app backtest --market M2 --interval 1m")
     p.add_argument("--strategy", required=True, help="패키지.모듈:클래스 (CAP-TRG-02 주기 판정 전략)")
     p.add_argument("--params", required=True, help="파라미터 파일 (저장소 기준 또는 절대 경로)")
-    p.add_argument("--data", required=True, help="바이낸스 공개 1m klines CSV (A-110 형식, 읽기만)")
-    p.add_argument("--symbol", default="BTCUSDT", help="심볼 (거래 규칙이 있는 심볼만: BTCUSDT, ETHUSDT)")
+    p.add_argument("--data", default=None, help="바이낸스 공개 1m klines CSV (A-110 형식, 읽기만) — 한 심볼")
+    p.add_argument("--symbol", default="BTCUSDT", help="--data의 심볼 (거래 규칙이 있는 심볼만: BTCUSDT, ETHUSDT)")
+    p.add_argument("--minute", action="append", default=[], metavar="SYM=PATH",
+                   help="여러 심볼 한 계좌(D-275): 심볼별 1m CSV, 반복 지정 (--data 대신)")
+    p.add_argument("--daily", action="append", default=[], metavar="SYM=PATH",
+                   help="확정 일봉 입력(D-276): 심볼별 공개 1d CSV, 반복 지정 (CAP-DAT-01 전략은 필수)")
     p.add_argument("--start", default=None, help="시작 UTC 날짜 (--validate가 아니면 필수)")
-    p.add_argument("--end", default=None, help="끝 UTC 날짜 (final_from 전, --validate가 아니면 필수)")
+    p.add_argument("--end", default=None, help="끝 UTC 날짜 (final_from 전 — --final-check면 최종 확인 끝 날짜)")
     p.add_argument("--run-id", required=True)
     p.add_argument("--cash", default="10000", help="초기 USDT")
     p.add_argument("--lookback", required=True, type=int, help="판정 창 1분봉 수 (설정 [minute] lookback_bars와 같은 의미)")
@@ -339,68 +414,126 @@ def backtest_m2_minute_main(argv: Sequence[str], root: Path) -> int:
     p.add_argument("--data-source", default="", help="보고서 데이터 출처 문구 (기본: 파일 이름·크기)")
     p.add_argument("--validate", action="store_true", help="D-222 검증 6창(2020~2025) 실행 — --start/--end 무시")
     p.add_argument("--skip-variants", action="store_true", help="검증: ±20%% 파라미터 변형(C-4) 생략 — 판정표에 미실행 표시")
+    p.add_argument("--final-check", action="store_true", help="최종 확인 실행(D-163, DP-81): 전략 확정 뒤 버전당 1회")
+    p.add_argument("--confirmed-by", default="", help="--final-check 때 전략 확정 사용자 선언 A-ID")
+    p.add_argument("--ledger", default="var/backtest/final-usage.json", help="최종 구간 사용 장부(M1·백테스트 FINAL과 공용)")
+    p.add_argument("--lf8-minute-dir", default=None, help="저빈도 LF-8 표본 1분봉 폴더 (<SYMBOL>-1m.csv, 읽기만)")
+    p.add_argument("--lf8-daily-dir", default=None, help="저빈도 LF-8 표본 1d 폴더 (<SYMBOL>-1d.csv, 일봉 전략만)")
     ns = p.parse_args(argv)
     try:
         if ns.margin_seconds < 0 or ns.margin_seconds > 59:
             raise ConfigError("--margin-seconds: 0~59")
+        if ns.validate and ns.final_check:
+            raise ConfigError("--validate와 --final-check는 함께 쓰지 않는다")
         strat, params = load_strategy(StrategyDeploy(ns.strategy, (root / ns.params).resolve(), ()))
         if "CAP-TRG-02" not in strat.spec.capabilities:
             raise ConfigError("1분봉 백테스트는 CAP-TRG-02 주기 판정 전략만 (파라미터 period_minutes, CP-037 D-219)")
-        # 실운영 조립 지점과 같은 일정 검사 (M2·주기 격자·주문 창 — app.wiring.period_grid_of, DP-79). 등록 범위(15·60분,
-        # CP-040 D-258)는 실운영 등록에만 — 백테스트는 1440의 약수 그대로(공식 판정 경로 적용 여부는 T-068 몫)
-        period_grid_of(StrategyInput(strat, params, ()), Market.M2.value, margin=timedelta(seconds=ns.margin_seconds),
-                       registration=False)
+        official = ns.validate or ns.final_check
+        # 실운영 조립 지점과 같은 일정 검사 (M2·주기 격자·주문 창 — app.wiring.period_grid_of, DP-79). [DP-88 (1)] 공식 판정
+        # 경로는 실운영 등록과 같은 판정 주기 범위(15·60분, CP-040 D-258), 탐색 실행은 1440의 약수 그대로
+        try:
+            period_grid_of(StrategyInput(strat, params, ()), Market.M2.value, margin=timedelta(seconds=ns.margin_seconds),
+                           registration=official)
+        except ConfigError as exc:
+            raise ConfigError([f"{x} — 공식 판정(--validate·--final-check)은 판정 주기 15·60분만 (DP-88 (1))"
+                               for x in exc.problems] if official else exc.problems) from None
         check = getattr(strat, "validate_deploy", None)
         problems = check(params, ()) if check is not None else []
         if problems:
             raise ConfigError([f"배포 검사: {x}" for x in problems])
-        if ns.symbol not in TESTNET_RULES:
-            raise ConfigError(f"거래 규칙이 없는 심볼: {ns.symbol}")
-        rules, pairs = {ns.symbol: TESTNET_RULES[ns.symbol]}, {ns.symbol: PAIRS[ns.symbol]}
+        if ns.minute and ns.data:
+            raise ConfigError("--data(한 심볼)와 --minute(여러 심볼)는 함께 쓰지 않는다")
+        files = _pairs_arg(ns.minute, "--minute") if ns.minute else (
+            {ns.symbol: Path(ns.data)} if ns.data else {})
+        if not files:
+            raise ConfigError("1분봉 데이터가 없음 — --data 또는 --minute SYM=경로")
+        for sym in files:
+            if sym not in TESTNET_RULES:
+                raise ConfigError(f"거래 규칙이 없는 심볼: {sym}")
+        syms = sorted(files)
+        rules, pairs = {s: TESTNET_RULES[s] for s in syms}, {s: PAIRS[s] for s in syms}
         # [CP-041 D-271 (1)(5)] 일봉 경로와 같은 검사 범위
         problems = spot_rule_problems([StrategyInput(strat, params, ())], TESTNET_RULES, PAIRS)
         if problems:
             raise ConfigError([f"거래 규칙 검사: {x}" for x in problems])
+        for path in files.values():
+            if not path.is_file():
+                raise ConfigError(f"데이터 파일 없음: {path.name}")
         market = load_m2_market(root / ns.market_config)
         limits = load_limits_file(root / ns.limits, market=Market.M2).limits
         caps = load_capabilities(root / "docs" / "capabilities.md")
         final_from = load_validation_settings(root / "config" / "validation.toml")["final_from"]
-        data_path = Path(ns.data)
-        if not data_path.is_file():
-            raise ConfigError(f"데이터 파일 없음: {data_path.name}")
-        size = data_path.stat().st_size
-        source = ns.data_source or f"바이낸스 공개 1m klines CSV `{data_path.name}` ({size} 바이트, A-110)"
+        read_until = date(9999, 1, 1) if ns.final_check else final_from   # 최종 확인 실행만 final_from 이후 행을 읽는다
+        size = sum(path.stat().st_size for path in files.values())
+        source = ns.data_source or ("바이낸스 공개 1m klines CSV " + ", ".join(
+            f"`{path.name}` ({path.stat().st_size} 바이트)" for path in files.values()) + " (A-110)")
+        daily_files = _pairs_arg(ns.daily, "--daily")
+        daily: dict[str, tuple[Bar, ...]] | None = None
+        daily_note = ""
+        if daily_files:
+            if set(daily_files) != set(syms):
+                raise ConfigError(f"--daily 심볼({', '.join(sorted(daily_files))})이 1분봉 심볼({', '.join(syms)})과 다름")
+            daily = {}
+            for sym, path in daily_files.items():
+                skipped: list[date] = []
+                rows = load_binance_daily_csv(path, incomplete=skipped)
+                daily[sym] = tuple(b for b in rows if ns.final_check or b.at < final_from)   # type: ignore[operator]
+                if skipped:
+                    daily_note += f" {sym} 1d 불완전 봉 {len(skipped)}개 제외(결측 — DP-82 규칙)."
+        elif DAILY_CAPABILITY in strat.spec.capabilities:
+            raise ConfigError("CAP-DAT-01(일봉) 선언 전략은 --daily SYM=1d파일이 필요 (CP-041 D-276)")
         fees = _fees(ns.fee, market.fees)
         out = Path(ns.out) if Path(ns.out).is_absolute() else root / ns.out
-        if not ns.validate and (ns.start is None or ns.end is None):
-            raise ConfigError("--start·--end가 필요 (--validate가 아니면)")
+        if not ns.validate and not ns.final_check and (ns.start is None or ns.end is None):
+            raise ConfigError("--start·--end가 필요 (--validate·--final-check가 아니면)")
+        if ns.final_check and ns.end is None:
+            raise ConfigError("--final-check는 --end(최종 확인 끝 날짜)가 필요")
         start = date.fromisoformat(ns.start) if ns.start else date(2020, 1, 1)
         end = date.fromisoformat(ns.end) if ns.end else date(2020, 1, 1)
-        cfg = MinuteBacktestConfig(
+        cost = CostRates(commission_rate=fees.estimate_rate, sell_tax_rate=Decimal("0"), cost_quantum=QUOTE_PRECISION)
+        cfg0 = MinuteBacktestConfig(
             run_id=ns.run_id, strategy=strat, params=dict(params), account_limits=limits, rules=rules, pairs=pairs,
-            cost_rates=CostRates(commission_rate=fees.estimate_rate, sell_tax_rate=Decimal("0"),
-                                 cost_quantum=QUOTE_PRECISION),
-            symbol=ns.symbol, source=partial(iter_binance_minute_csv, data_path, final_from=final_from),  # type: ignore[arg-type]
-            start=start, end=end, initial_cash=Decimal(ns.cash), out_dir=out, slippage=Decimal(ns.slippage),
-            lookback_bars=ns.lookback, margin=timedelta(seconds=ns.margin_seconds), buy_buffer=market.buy_buffer,
-            sell_buffer=market.sell_buffer, quote_max_age=timedelta(seconds=market.quote_max_age_seconds),
-            final_from=final_from, caps=caps, data_version=f"{data_path.parent.name}/{data_path.name} {size}B",  # type: ignore[arg-type]
-            data_source=source, fees=fees)
+            cost_rates=cost, symbol=syms[0], source=lambda a, b: (), start=start, end=end,  # type: ignore[arg-type]
+            initial_cash=Decimal(ns.cash), out_dir=out, slippage=Decimal(ns.slippage), lookback_bars=ns.lookback,
+            margin=timedelta(seconds=ns.margin_seconds), caps=caps)
+        ext = minute_request(cfg0).flow   # 흐름 열 선언 전략만 확장 열 해석 (D-260)
+        sources = {s: partial(iter_binance_minute_csv, files[s], final_from=read_until, ext=ext) for s in syms}
+        if len(syms) > 1 and not ns.validate:   # [D-275 (1)] 실행 기간을 모든 심볼 데이터가 덮어야 함
+            lo, hi = (final_from, end) if ns.final_check else (start, end)
+            short = [s for s in syms if first_minute_start(files[s]) > lo or last_minute_start(files[s]) < hi]
+            if short:
+                raise ConfigError(f"실행 기간 {lo}~{hi}을 데이터가 덮지 않는 심볼: {', '.join(short)} (CP-041 D-275 (1))")
+        cfg = replace(cfg0, symbol=syms[0], source=sources[syms[0]], sources=sources if len(syms) > 1 else None,
+                      daily=daily, buy_buffer=market.buy_buffer, sell_buffer=market.sell_buffer,
+                      quote_max_age=timedelta(seconds=market.quote_max_age_seconds), final_from=final_from,  # type: ignore[arg-type]
+                      data_version=", ".join(f"{files[s].parent.name}/{files[s].name}" for s in syms) + f" {size}B",
+                      data_source=source + daily_note, fees=fees)
+        if ns.final_check:
+            v_out = out / ns.run_id
+            res = run_minute_final_check(cfg, v_out, final_from=final_from, end=end, ledger=root / ns.ledger,
+                                         confirmed_by=ns.confirmed_by)
+            print(f"최종 확인 완료: {v_out / 'final-check.json'} — 거래 {res['final-base']['trades']}건")
+            return 0
         if ns.validate:
             v_out = out / ns.run_id
             if v_out.exists():
                 raise ConfigError(f"같은 실행 ID의 검증 폴더가 이미 있음: {v_out.name}")
-            data_start = first_minute_start(data_path)
+            data_start = max(first_minute_start(files[s]) for s in syms)
             # [CP-038 T-058] 명세에 저빈도 선언이 있을 때만 (없으면 None → 일반 경로 결과 불변)
-            low = build_low_frequency_inputs(root, strat.spec.strategy_id, strat.spec.version, dict(params), out=out,
-                                             final_from=final_from, data_start=data_start, lookback=ns.lookback)
+            low = build_low_frequency_inputs(
+                root, strat.spec.strategy_id, strat.spec.version, dict(params), out=out, final_from=final_from,
+                data_start=data_start, lookback=ns.lookback,
+                lf8_minute_dir=Path(ns.lf8_minute_dir) if ns.lf8_minute_dir else None,
+                lf8_daily_dir=Path(ns.lf8_daily_dir) if ns.lf8_daily_dir else None, aliases=tuple(syms),
+                daily_needed=DAILY_CAPABILITY in strat.spec.capabilities)
             res = run_minute_validation(MinuteValidationInputs(
                 template=cfg, out_dir=v_out, data_start=data_start, skip_variants=ns.skip_variants,
                 command=" ".join(["backtest --market M2 --interval 1m", *argv]), low_frequency=low))
             print(f"검증 완료: {v_out / 'validation.md'} — 판정 {res['verdict']['verdict']}")
             return 0
         result = run_minute_backtest(cfg)
-    except (ConfigError, BacktestError, LowFrequencyError, ValueError, InvalidOperation, OSError) as exc:
+    except (ConfigError, BacktestError, LowFrequencyError, ValidationError, ValueError, InvalidOperation,
+            OSError) as exc:
         print(f"백테스트 거부: {exc}")
         return 2
     days = result.result.days
