@@ -1,0 +1,12 @@
+# crypto-trend v2 — M2 PAPER 축소판(운영 M2 PAPER 한도 A-064: L1 0.5%·L2 10%·L3 50%·L4 1%·L6 3·L7 100 USDT 안). 규칙·기간 값은 params-v1과 같다.
+strategy = "crypto-trend"
+version = 2
+
+[params]
+entry_n = 25
+exit_n = 50
+stop_atr = "2"
+risk_ratio = "0.002"   # 종목별 위험 0.2% (L1 0.5% 안 — IOC 완충 여유)
+max_weight = "0.05"    # 종목 비중 5% (L2 10% 안)
+order_cap = "95"
+period_minutes = 60    # CAP-TRG-02 주기 판정 격자(운영 D-219) — v2 추가       # 1회 95 USDT (L7 100 안)

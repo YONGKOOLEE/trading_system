@@ -1,6 +1,6 @@
-> 전략실 인계 패킷 원문 사본(2026-10-18, 원본 `C:\AI\strategy-lab\candidates\crypto_trend\handoff.md`, 전략실 커밋 08ebd6f, sha256 앞 16자리 `5573bf755ed25478`, 줄바꿈만 LF). 수정 없음. 운영 검토: [review-v1.md](review-v1.md).
+> 전략실 인계 패킷 원문 사본(2026-10-18, 원본 `C:\AI\strategy-lab\candidates\crypto_trend\handoff.md`, 전략실 커밋 a5c1405, 커밋 내용 sha256 앞 16자리 `ae44ccd134ba4029`, LF). 수정 없음. 운영 검토: [review-v2.md](review-v2.md).
 
-# 인계 패킷 — crypto-trend v1 (2026-10-18)
+# 인계 패킷 — crypto-trend v2 (2026-10-18, v1 운영 검토 F-1·F-2 반영)
 전략실 결과는 연구 참고다. 공식 판정·등록·PAPER·LIVE는 운영 저장소 절차와 사용자 승인(A-ID)으로만.
 
 **판정표 없는 상태의 사전 준비 패킷** — 운영 M2 장중 엔진(CP-040 T-068: 1분 재생·60분 주기 판정)이 아직 없어 공식 재현·판정표를 만들 수 없다. 전략실 근거는 1시간 모형 시뮬레이터와 운영 도메인 객체 간이 재생뿐이다. **전달 시점은 사용자 결정**(권장: T-068 완료 뒤, 또는 설계 참고용으로 지금).
@@ -12,9 +12,9 @@
 ## 파일 (전략실 → 운영 제안 — 위치는 운영이 정함)
 | 파일 | 전략실 | 운영(제안) |
 |---|---|---|
-| strategy.py | candidates/crypto_trend/strategy.py (CryptoTrendV1, CAP-TRG-02·CAP-DAT-01·CAP-ORD-01·CAP-INS-05, validate_rules·validate_deploy 포함) | src/trading_system/strategy/crypto_trend.py |
-| params-v1.toml | candidates/crypto_trend/params-v1.toml | config/strategies/crypto-trend-v1.toml |
-| params-v1-paper.toml | candidates/crypto_trend/params-v1-paper.toml (A-064 안 축소판: 위험 0.2%·비중 5%·95 USDT) | config/strategies/crypto-trend-v1-paper.toml |
+| strategy.py | candidates/crypto_trend/strategy.py (**CryptoTrendV2** — period_minutes 60·validate_deploy D-219 규약, v1은 strategy-v1.py, CAP-TRG-02·CAP-DAT-01·CAP-ORD-01·CAP-INS-05, validate_rules·validate_deploy 포함) | src/trading_system/strategy/crypto_trend.py |
+| params-v2.toml | candidates/crypto_trend/params-v2.toml (v1 + period_minutes = 60) | config/strategies/crypto-trend-v2.toml |
+| params-v2-paper.toml | candidates/crypto_trend/params-v2-paper.toml (A-064 안 축소판: 위험 0.2%·비중 5%·95 USDT, period_minutes 60) | config/strategies/crypto-trend-v2-paper.toml |
 | strategy.md | candidates/crypto_trend/strategy.md (운영 양식 칸, critic 차단 4건 반영) | docs/strategies/crypto-trend/strategy.md |
 | notes.md·trials.jsonl | 사전 등록(엔진 재현 폐기 기준)·시도 기록 | docs/strategies/crypto-trend/ (참고) |
 
@@ -28,8 +28,11 @@
 - critic 검토(2026-10-18): 차단 4건 반영(손절가 정의·무효 조건·사전 등록·L4 표시), 비차단 11건 중 대부분 반영 — notes.md.
 - 시도 횟수: trials.jsonl(이 계열 약 440 + 밤샘 시험 수십 설정). 파라미터는 btc-trend 탐색 고원 가운데(25·50·2)에서 바꾸지 않음.
 
+- **운영 v1 검토(9fdb517) 반영**: F-1·F-2 → v2 수정(위). F-3(validate_rules 서명에 종목 없음)은 전략 안에서 해결 불가 → 운영 공통 CP(서명에 종목 추가) 권장. ETHUSDT 수량 단위 0.0001은 테스트넷 exchangeInfo로 확인 필요. 재현은 1분봉 실행기에 여러 심볼 한 계좌·확정 일봉 입력·60분 판정 last_price·매분 L4가 필요(T-068 범위 확장 — 사용자 결정).
+
 ## 한계 · 미확인 (운영에서 확인할 것)
 - **사후 선택·사후 설계**: BTC·ETH 모두 사후에 살아남은 자산, 게이트·1시간 판정은 결과를 본 뒤 설계, "후기 2022~2025"도 선택에 쓰임 → 남은 표본 밖은 2026 최종 확인뿐. 과대 추정으로 읽는다.
+- **생존편향 점검(Z, 2026-10-18 운영 수집 A-118)**: 2018 거래대금 상위 20(상장폐지 포함) 일봉 v1 — 18종목 중 15종목 보유보다 비율 우위, 한 계좌 18종목 2019~2025 비율 0.99·MDD 30.8%(보유 0.56·79%). 추세 효과는 사후 선택 밖에서도 보이나, BTC·ETH 2종목 수치(비율 약 2)는 부풀려졌을 가능성 — 덜 편향된 기대치는 약 1.
 - **이익 집중**: 상위 3건이 이익의 67~78%(종목별). 2종목 거래 재표본(T)에서는 상위 3건을 빼도 중앙 12배·원금 손실 확률 0%(BTC 단독 v1은 2.7배·6.1%) — 단 순차 복리 근사라 과대.
 - **PAPER 기간**: 과거 재생에서 28일 구간의 56%는 진입 0건, 73%는 완결 왕복 0건(60일 25%·42%, 90일 10%·20%) → M2 PAPER-1 최소 28일(D-232)로는 경로 확인이 어려움, **90일 이상 제안**(결정은 사용자·운영, CP-038과 연결).
 - **L4·K2**: 전략실 수치는 L4 없음/30% 가정. 운영 M2 L4 1%·장중 1분 저가 평가(D-265)에서 K2가 신규 진입을 자주 막을 수 있음 — 미측정(T-068 V-334).
@@ -39,8 +42,8 @@
 
 ## 운영 세션에 붙일 지시문 (사용자가 복사 — 전달 시점은 사용자 결정)
 ```
-[전략실 → 운영] M2 매매 전략 후보 crypto-trend v1 검토 요청 (2026-10-18)
-파일: C:\AI\strategy-lab\candidates\crypto_trend\ 의 strategy.py(CryptoTrendV1)·params-v1.toml·strategy.md·notes.md·handoff.md (읽기 전용으로 복사해서 쓸 것).
+[전략실 → 운영] M2 매매 전략 후보 crypto-trend v2 재검토 요청 (2026-10-18 — v1 검토 F-1·F-2 반영)
+파일: C:\AI\strategy-lab\candidates\crypto_trend\ 의 strategy.py(CryptoTrendV2)·params-v2.toml·params-v2-paper.toml·strategy.md·notes.md·handoff.md (읽기 전용으로 복사해서 쓸 것).
 내용: btc-trend v1 수준을 60분 주기(CP-040)로 판정 + 진입 게이트, BTCUSDT·ETHUSDT 한 계좌(종목별 위험 2.5%·상한 49%). 스냅샷은 확정 일봉 + last_price만 씀(분봉·집계 봉 미사용).
 요청:
 1. 브랜치에 복사 → 구조 시험(능력: CAP-TRG-02 60분, M2 등록 가능 여부 포함).

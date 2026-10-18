@@ -1,10 +1,10 @@
-# 전략 crypto-trend v1
+# 전략 crypto-trend v2
 
-> **운영 복사본 (2026-10-18, A-118 A — T-M2-17 후보 검토, 미등록·미승인)** — 원본 `C:\AI\strategy-lab\candidates\crypto_trend\strategy.md`(전략실 커밋 08ebd6f, sha256 앞 16자리 `f2fa5d087c49338f`, 줄바꿈만 LF). 본문은 원본 그대로이며 **운영 수정 없음**(코드·파라미터 파일도 원본과 같음). 운영 검토·결함 F-1~F-3·재현 가능 여부: [review-v1.md](review-v1.md). 전략실 원문: [lab-handoff.md](lab-handoff.md), [lab-notes.md](lab-notes.md).
+> **운영 복사본 (2026-10-18, A-119 ① — T-M2-17 v2 재검토, 미등록·미승인)** — 원본 `C:\AI\strategy-lab\candidates\crypto_trend\strategy.md`(전략실 커밋 a5c1405, 커밋 내용 sha256 앞 16자리 `c05354f6b4dd35d0`, LF). 본문은 원본 그대로이며 **운영 수정 없음**(코드·파라미터 파일도 원본과 같음). v1 사본은 커밋 9fdb517. 운영 검토·결함 F-1~F-3·재현 가능 여부: [review-v2.md](review-v2.md). 전략실 원문: [lab-handoff.md](lab-handoff.md), [lab-notes.md](lab-notes.md).
 
 - 상태: **전략실 연구 후보** — strategy.py 작성(2026-10-18, 기존 스냅샷의 확정 일봉 + 판정 시세만 사용 — 장중 봉 불필요), 구조 검사 통과, 간이 재생(운영 도메인 객체)으로 시뮬레이터와 일치 확인, critic 차단 4건 반영(2026-10-18). 공식 재현은 운영 장중 엔진(CP-040 T-068) 뒤. 탐색 결과는 판정이 아님.
 - 작성: 2026-10-18 전략실(밤샘 연구). 근거 research/2026-10-18-overnight-design.md A·B·K·L·M·N·O·P·Q·V·W, research/2026-10-18-intraday-design.md.
-- 버전: v1 (btc-trend v1과 별개 ID — 유니버스·판정 주기·진입 게이트·크기가 다름. 이전 결과 승계 없음 — D-011)
+- 버전: **v2**(2026-10-18 03:04 — 운영 검토 F-1·F-2 반영: 파라미터 period_minutes = 60 추가, validate_deploy는 eval_times 빈 목록·period_minutes 60 요구. 판정·수량·신호 무변경, 재생 결과 v1과 같음 105건·+6,964%. v1 = strategy-v1.py·params-v1*.toml). v1 설명: (btc-trend v1과 별개 ID — 유니버스·판정 주기·진입 게이트·크기가 다름. 이전 결과 승계 없음 — D-011)
 - 설명: btc-trend v1의 수준(확정 UTC 일봉 25일 종가 최고 돌파·50일 종가 평균 이탈 청산·ATR14 손절)을 **60분마다** 확인한다. 진입은 "판정 가격 > 50일 평균"일 때만(진입 즉시 청산 상태 금지 — 1시간 판정의 헛매매 제거). BTCUSDT·ETHUSDT 2종목, 한 계좌에서 종목별 위험 2.5%·종목 상한 49%.
 
 - 대상 시장: M2(바이낸스 현물). 기준 통화 USDT, 레버리지·공매도 없음.
@@ -49,6 +49,7 @@
 | risk_ratio | decimal | 비율 | 0.001~0.10 | 종목별 1회 위험 (0.025 = 반반 계좌의 5%) |
 | max_weight | decimal | 비율 | 0.001~1 | 종목 상한 (0.49) |
 | order_cap | decimal | USDT | 5~1e9 | 1회 주문 상한 (1e9 = 없음) |
+| period_minutes | int | 분 | 15~60 | 주기 판정 격자(CAP-TRG-02, 운영 D-219) — 이 전략은 60만 허용(validate_deploy) (60) |
 
 ## 포지션 크기 (§2.8)
 - S-3: 수량 = min(기준 금액 × risk_ratio ÷ (stop_atr × ATR14), 기준 금액 × max_weight ÷ 판정 가격, order_cap ÷ (판정 가격 × 1.006)), 종목별 수량 단위로 내림(BTCUSDT 0.00001, ETHUSDT 0.0001 가정 — validate_rules로 확인).

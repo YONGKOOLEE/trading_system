@@ -1,4 +1,4 @@
-"""후보 crypto-trend v1 — BTC·ETH 현물(M2, 바이낸스) 일봉 수준 추세 추종을 60분마다 판정. 전략실 연구 후보(운영 미등록).
+"""후보 crypto-trend v2 — BTC·ETH 현물(M2, 바이낸스) 일봉 수준 추세 추종을 60분마다 판정. 전략실 연구 후보(운영 미등록).
 
 근거: research/2026-10-18-overnight-design.md(A·B·K·L·M·N·O·V·W), btc-trend v1(candidates/btc_trend)과 같은 수준·파라미터 값.
 규칙(판정 = CAP-TRG-02 60분 주기, 매시 정각 + 확정 여유 — 운영 CP-040 D-258. 스냅샷 일봉은 확정된 UTC 일봉만(그날 진행 중 봉 제외),
@@ -12,6 +12,8 @@
 - EXIT-1(청산): 보유 AND 판정 가격 < 확정 일봉 종가 SMA(exit_n) → 전량 시장가.
 - 우선순위 EXIT-2 > EXIT-1 > ENTRY-1. 종목마다 신호 1개, 종목끼리 독립(같은 계좌 현금 공유). 피라미딩 없음.
 순수 함수. 파일·네트워크·현재 시각·난수 없음.
+v2(2026-10-18, 운영 검토 F-1·F-2 반영 — 판정·수량·신호 무변경, v1 = strategy-v1.py): CAP-TRG-02 주기 판정 규약(운영 D-219·D-258)에 맞춰
+정수 파라미터 period_minutes(= 60)를 두고, validate_deploy는 eval_times 빈 목록·period_minutes 60을 요구한다.
 """
 
 from __future__ import annotations
@@ -27,10 +29,10 @@ from trading_system.domain.strategy import (
 from trading_system.strategy.base import ParamValues, make_signal
 
 STRATEGY_ID = "crypto-trend"
-VERSION = 1
+VERSION = 2
 # 종목 → 수량 단위(바이낸스 LOT_SIZE stepSize). BTCUSDT는 테스트넷 확인값(binance-spot.md), ETHUSDT 0.0001은 가정 — 운영 exchangeInfo로 확인
 STEPS = {"BTCUSDT": Decimal("0.00001"), "ETHUSDT": Decimal("0.0001")}
-PERIOD_EVALS_PER_DAY = 23          # 60분 주기 → 01:00~23:00 하루 23회(운영 CP-040 D-258·V-337, 00:00 판정 없음)
+PERIOD_MINUTES = 60                # 60분 주기(01:00~23:00 하루 23회, 운영 CP-040 D-258·V-337) — 15분은 전략실 시험에서 열위(research M)
 _ATR_N = 14
 VALID_FOR = timedelta(minutes=30)
 _INPUTS = ("CAP-DAT-01", "상태 입력")   # 판정 시세(last_price)는 조건 설명에 — 구조 규칙(선언 CAP-ID·상태 입력만)
@@ -66,6 +68,7 @@ def build_spec() -> StrategySpec:
         ParamSpec("risk_ratio", "decimal", "비율", "종목별 1회 위험 = 기준 금액 × 값(2종목 반반 계좌의 5% = 0.025)", Decimal("0.001"), Decimal("0.10")),
         ParamSpec("max_weight", "decimal", "비율", "종목 상한(레버리지 없음 — 두 종목 합 ≤ 1)", Decimal("0.001"), Decimal("1")),
         ParamSpec("order_cap", "decimal", "USDT", "1회 주문 금액 상한(계좌 L7 이하로)", Decimal("5"), Decimal("1000000000")),
+        ParamSpec("period_minutes", "int", "분", "주기 판정 격자(CAP-TRG-02, 운영 D-219 — 이 전략은 60만 허용)", Decimal("15"), Decimal("60")),
     )
     return StrategySpec(
         strategy_id=STRATEGY_ID, name="코인 추세 추종(일봉 수준·60분 판정·진입 게이트)", version=VERSION,
@@ -77,7 +80,7 @@ def build_spec() -> StrategySpec:
         unfilled_policy="시스템 기본", sizing="S-3", holding="수 일~수 개월", limits=StrategyLimits())
 
 
-class CryptoTrendV1:
+class CryptoTrendV2:
     def __init__(self) -> None:
         self.spec = build_spec()
 
@@ -128,15 +131,18 @@ class CryptoTrendV1:
         return []
 
     def validate_deploy(self, params: ParamValues, eval_times: tuple[time, ...], *, market: str | None = None) -> list[str]:
-        """btc-trend F-3와 같은 서명. 60분 주기 전제 → 판정 시각 23개(01:00~23:00), M2 전용. 주기 판정의 배포 표현은 운영 CP-040 구현에 맞춰 조정."""
-        del params
+        """btc-trend F-3와 같은 서명. CAP-TRG-02 규약(운영 D-219): 배포 eval_times는 빈 목록, 일정은 파라미터 period_minutes — 이 전략은 60만.
+        M2 전용. (v1은 판정 시각 23개를 요구해 D-219와 함께 통과할 수 없었다 — 운영 검토 F-2.)"""
         problems: list[str] = []
         if tuple(self.spec.markets) != ("M2",):
             problems.append(f"markets {tuple(self.spec.markets)} — 이 전략은 M2 전용")
         if market is not None and market != "M2":
             problems.append(f"배포 시장 {market!r} — 이 전략은 M2 전용")
-        if len(eval_times) != PERIOD_EVALS_PER_DAY:
-            problems.append(f"판정 시각은 60분 주기 하루 {PERIOD_EVALS_PER_DAY}개여야 함 — 현재 {len(eval_times)}개")
+        if eval_times:
+            problems.append(f"CAP-TRG-02 전략의 eval_times는 빈 목록이어야 함(일정은 period_minutes, D-219) — 현재 {len(eval_times)}개")
+        n = params.get("period_minutes")
+        if isinstance(n, bool) or str(n) != str(PERIOD_MINUTES):
+            problems.append(f"period_minutes는 {PERIOD_MINUTES}이어야 함(전략실 근거는 60분 판정) — 현재 {n!r}")
         return problems
 
     def _sig(self, snapshot: EvaluationSnapshot, v: InstrumentView, rule: str, kind: RequestType, qty: Decimal,
