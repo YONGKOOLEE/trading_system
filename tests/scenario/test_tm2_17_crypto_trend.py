@@ -211,7 +211,9 @@ def test_f3_start_rule_check_refuses_other_symbols_step() -> None:
     0.0001이 오면 거부한다. [T-070 개정] xfail(strict) 제거 — T-070 완료로 통과해야 하는 시험. 단언은 그대로(!= [])."""
     p = params("crypto-trend-v3-paper.toml")
     si = [StrategyInput(CryptoTrendV3(), p, ())]
-    assert spot_rule_problems(si, {BTC: replace(RULES, lot_step=D("0.0001"))}, PAIRS) != []
+    probs = spot_rule_problems(si, {BTC: replace(RULES, lot_step=D("0.0001"))}, {BTC: PAIRS[BTC]})   # 범위 = BTC 하나
+    assert len(probs) == 1 and probs[0].startswith("crypto-trend:3 BTCUSDT: ") and "0.0001" in probs[0], probs
+    # (재검토 2026-10-18: PAIRS가 BTC·ETH라 ETH '거래 규칙 없음'만으로도 != []가 되어 BTC 단위 검사를 확인하지 못했다)
 
 
 def test_start_rule_check_current_behaviour() -> None:
