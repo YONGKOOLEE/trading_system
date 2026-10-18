@@ -47,6 +47,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Protocol
 
+from trading_system.broker.base import BrokerDataError, BrokerQueryError
 from trading_system.domain.market import Quote
 from trading_system.domain.minute_bar import MinuteBar
 from trading_system.domain.minute_series import (
@@ -139,11 +140,28 @@ def minute_budget_problem(limits: RateLimits, symbols: int, plan: MinutePlan, *,
     return None
 
 
-def minute_page_fetcher(client: BinanceSpotClient) -> Callable[[str, int, int, int], object]:
-    """이력 채우기 한 쪽 조회 (D-261): (심볼, 시작 ms, 끝 ms, limit) → klines 1m 응답 본문. 실패는 BinanceQueryError."""
-    def fetch(symbol: str, start_ms: int, end_ms: int, limit: int) -> object:
-        return client.klines(symbol, "1m", limit=limit, start_ms=start_ms, end_ms=end_ms)
+def parsed_minute_pages(raw: Callable[[str, int, int, int], object]
+                        ) -> Callable[[str, int, int, int], list[MinuteBar]]:
+    """이력 채우기 한 쪽 (D-261): 원본 klines 1m 응답 → parse_klines(필드·경계·closeTime·순서·OHLC) → MinuteBar.
+    바이낸스 전용 타입·오류는 이 패키지 안에서 공통 오류로 바꾼다 — 조회 실패·보류 BinanceQueryError → BrokerQueryError,
+    해석 실패 KlineDataError → BrokerDataError (app/m2_backfill은 바이낸스 패키지를 import하지 않는다, 계약 시험)."""
+    def fetch(symbol: str, start_ms: int, end_ms: int, limit: int) -> list[MinuteBar]:
+        try:
+            rows = raw(symbol, start_ms, end_ms, limit)
+        except BinanceQueryError as exc:
+            raise BrokerQueryError(str(exc)) from exc
+        try:
+            ks = parse_klines(rows, symbol=symbol, interval="1m")
+        except KlineDataError as exc:
+            raise BrokerDataError(str(exc)) from exc
+        return [minute_bar_of(k) for k in ks]
     return fetch
+
+
+def minute_page_fetcher(client: BinanceSpotClient) -> Callable[[str, int, int, int], list[MinuteBar]]:
+    """이력 채우기 한 쪽 조회 (D-261): (심볼, 시작 ms, 끝 ms, limit) → 해석된 MinuteBar. 실패는 BrokerQueryError·BrokerDataError."""
+    return parsed_minute_pages(
+        lambda symbol, start_ms, end_ms, limit: client.klines(symbol, "1m", limit=limit, start_ms=start_ms, end_ms=end_ms))
 
 
 @dataclass(frozen=True)

@@ -23,9 +23,7 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
-from trading_system.broker.binance.client import BinanceQueryError
-from trading_system.broker.binance.feed import minute_bar_of
-from trading_system.broker.binance.market import KlineDataError, parse_klines
+from trading_system.broker.base import BrokerDataError, BrokerQueryError
 from trading_system.domain.minute_agg import KLINE_PAGE_MAX, missing_ranges, split_pages
 from trading_system.domain.minute_bar import MinuteBar
 from trading_system.domain.minute_series import (
@@ -39,7 +37,7 @@ from .m2_minutes import MINUTE_SOURCE
 BACKFILL_PER_MINUTE = 20        # 분당 조회 상한 [제안] (D-261 (1))
 BACKFILL_AUDIT = "MINUTE_BACKFILL"
 
-Fetch = Callable[[str, int, int, int], object]   # (심볼, 시작 ms, 끝 ms, limit) → klines 1m 응답 본문
+Fetch = Callable[[str, int, int, int], Sequence[MinuteBar]]   # (심볼, 시작 ms, 끝 ms, limit) → 해석된 1분 봉(브로커 패키지가 해석)
 
 
 class BackfillState(StrEnum):
@@ -129,13 +127,11 @@ class MinuteBackfill:
         start_ms, end_ms = _ms(start), _ms(end) + 59_999
         limit = int((end - start) / ONE_MINUTE) + 1
         try:
-            rows = self._fetch(s, start_ms, end_ms, limit)
-            ks = parse_klines(rows, symbol=s, interval="1m")
-        except BinanceQueryError as exc:
+            bars = list(self._fetch(s, start_ms, end_ms, limit))
+        except BrokerQueryError as exc:
             return f"조회 실패·보류: {exc}"
-        except KlineDataError as exc:
+        except BrokerDataError as exc:
             return f"응답 품질 실패: {exc}"
-        bars = [minute_bar_of(k) for k in ks]
         if any(not start <= b.start <= end for b in bars):
             return "요청 범위 밖 봉"
         issues = minute_quality_issues(bars)

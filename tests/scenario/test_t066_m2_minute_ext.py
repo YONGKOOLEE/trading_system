@@ -28,7 +28,7 @@ from trading_system.app.m2_minutes import (
 )
 from trading_system.app.wiring import StrategyInput, period_grid_of
 from trading_system.broker.binance.client import BinanceQueryError, QueryKind
-from trading_system.broker.binance.feed import MinutePlan, minute_budget_problem, minute_page_fetcher
+from trading_system.broker.binance.feed import MinutePlan, minute_budget_problem, minute_page_fetcher, parsed_minute_pages
 from trading_system.broker.binance.market import parse_klines
 from trading_system.broker.binance.run_start import M2RunConnector
 from trading_system.broker.binance.weights import parse_rate_limits
@@ -264,7 +264,7 @@ NOW = utc(10, 0, 2)
 
 
 def _backfill(fetch: PageFetch, window: int = 2500, per_minute: int = 2) -> MinuteBackfill:
-    return MinuteBackfill(fetch, [SYM], window_minutes=window, per_minute=per_minute)
+    return MinuteBackfill(parsed_minute_pages(fetch), [SYM], window_minutes=window, per_minute=per_minute)   # 바이낸스 해석은 브로커 패키지
 
 
 def test_v330_backfill_pages_only_missing_then_signal_valid(rig: MinuteRig) -> None:

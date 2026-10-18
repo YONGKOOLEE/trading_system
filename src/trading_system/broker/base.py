@@ -23,6 +23,10 @@ class BrokerQueryError(RuntimeError):
     """조회 실패 (연결·호출 제한·응답 해석 불가). 결과를 알 수 없다는 뜻이지 "없음"이 아니다."""
 
 
+class BrokerDataError(ValueError):
+    """응답은 받았으나 형식·품질 위반(필드·경계·순서·OHLC 등) — 그 응답은 쓰지 않는다. 브로커 공통 (T-066 이력 채우기)."""
+
+
 class LookupKind(StrEnum):
     """단건 주문 조회 결과 (M2, CP-024 D-111)."""
 
