@@ -189,8 +189,13 @@ class ExchangeSim:
         n = int(p.get("limit", "500"))
         px = self.price[p["symbol"]]
         rows = []
-        for i in range(n - 1, -1, -1):
-            o = cur - i * step
+        if "startTime" in p:   # 나눔 조회 (CP-040 T-066): startTime부터 endTime(·지금 분)까지 최대 limit개
+            first = -(-int(p["startTime"]) // step) * step
+            stop = min(int(p.get("endTime", cur)), cur)
+            opens = [o for o in range(first, stop + 1, step)][:n]
+        else:
+            opens = [cur - i * step for i in range(n - 1, -1, -1)]
+        for o in opens:
             if o in self.minute_skip:
                 continue
             c = px + self.minute_close_delta

@@ -18,6 +18,7 @@ from tests.scenario.test_t049_m2_ops import M1_BEFORE
 from tests.support.m2_engine_world import ACCOUNT, SYM, M2World, fixed_spec
 from tests.support.m2_fakes import m2_limits
 from trading_system.app.m2_minutes import MINUTE_CAPABILITY, MINUTE_INPUT_AUDIT, M2MinuteInput
+from trading_system.app import wiring
 from trading_system.app.wiring import StrategyInput, load_strategy, period_grid_of
 from trading_system.config.app_file import load_app_settings, parse_app_settings
 from trading_system.config.capabilities import load_capabilities
@@ -39,6 +40,14 @@ from trading_system.strategy.m2_verify import M2Verify
 D = Decimal
 REPO = Path(__file__).resolve().parents[2]
 CAPS = load_capabilities(REPO / "docs" / "capabilities.md")
+
+
+@pytest.fixture(autouse=True)
+def _engine_grid_periods(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[T-066 추가 — CP-040 D-258] 이 파일은 엔진 주기 격자(D-219: 1440의 약수)를 N=1·5·15 등으로 검사한다. D-258은 M2 등록
+    범위만 15·60분으로 좁히고 엔진 격자는 그대로 두므로(등록 범위 검사는 test_t066 V-337), 여기서는 등록 범위를 엔진 격자 전체로
+    넓힌다. 엔진 동작 기대값은 바꾸지 않았다."""
+    monkeypatch.setattr(wiring, "M2_PERIODS_ALLOWED", frozenset(n for n in range(1, 1441) if 1440 % n == 0))
 DAY = date(2026, 10, 10)
 LOTS = {SYM: D("0.01")}
 PER_CAPS = ("CAP-TRG-02", "CAP-DAT-01", "CAP-ORD-01", "CAP-ORD-02", "CAP-INS-05")

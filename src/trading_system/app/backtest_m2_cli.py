@@ -277,8 +277,10 @@ def backtest_m2_minute_main(argv: Sequence[str], root: Path) -> int:
         strat, params = load_strategy(StrategyDeploy(ns.strategy, (root / ns.params).resolve(), ()))
         if "CAP-TRG-02" not in strat.spec.capabilities:
             raise ConfigError("1분봉 백테스트는 CAP-TRG-02 주기 판정 전략만 (파라미터 period_minutes, CP-037 D-219)")
-        # 실운영 조립 지점과 같은 일정 검사 (M2·주기 격자·주문 창 — app.wiring.period_grid_of, DP-79)
-        period_grid_of(StrategyInput(strat, params, ()), Market.M2.value, margin=timedelta(seconds=ns.margin_seconds))
+        # 실운영 조립 지점과 같은 일정 검사 (M2·주기 격자·주문 창 — app.wiring.period_grid_of, DP-79). 등록 범위(15·60분,
+        # CP-040 D-258)는 실운영 등록에만 — 백테스트는 1440의 약수 그대로(공식 판정 경로 적용 여부는 T-068 몫)
+        period_grid_of(StrategyInput(strat, params, ()), Market.M2.value, margin=timedelta(seconds=ns.margin_seconds),
+                       registration=False)
         check = getattr(strat, "validate_deploy", None)
         problems = check(params, ()) if check is not None else []
         if problems:

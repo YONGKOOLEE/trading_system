@@ -7,6 +7,8 @@
 3. 결과 불명 해소 한 단계 (의도별 다음 조회 시각이 지난 것만, D-092)
 4. 일일 기준 시각: 기준 금액 고정·일일 보고, 일일 손실 L4 → K2
 5. 대조 (장중 주기·장 마감 후 1회·요청 시 — RV-25)
+5b. [CP-040 T-067] 손절 감시 (M2, CAP-HLD-02 선언 전략이 있을 때만 — app/stop_monitor): 닫힌 1분 봉 종가 ≤ 손절가 → 청산 요청
+   → 게이트 → 실행기. 결측·결과 불명·K8 등은 요청 0
 6. 예정 판정 (달력상 거래일, 예정 시각 + 유예 안, K8 등 전역 정지 중이면 건너뜀) → 게이트 → 실행기
    [CP-037 D-219] CAP-TRG-02 전략(M2만)은 주문 창 안 N분 격자 주기 판정(_evaluate_periodic — 분봉 조회 대기·시한, DP-79)
 7. 실행 정책: CAP-ORD-03b(취소, CP-032 D-175)를 선언한 전략의 미체결 주문이 정해진 시간을 넘으면 취소 요청(게이트 경유)
@@ -66,6 +68,7 @@ from trading_system.storage.repository import new_id, BrokerOrderRow, Repository
 from trading_system.strategy.base import Strategy
 
 from .market_profile import MarketProfile
+from .stop_monitor import StopMonitor
 
 EVAL_GRACE = timedelta(minutes=5)       # 예정 시각을 이만큼 넘기면 그 판정은 건너뛴다(늦은 판정 금지, DP-21)
 GLOBAL_BLOCKS = {"K1", "K5", "K6", "K7", "K8"}   # 전역 정지 중에는 판정 자체를 하지 않는다(어차피 위험 확대 거부)
@@ -189,6 +192,8 @@ class Engine:
     # [CP-037 D-219] 주기 판정 상태 (CAP-TRG-02 전략만 씀 — 정해진 시각 판정은 무관)
     _started_at: datetime | None = None                                       # start() 시각: 이전 예정 시각은 판정 안 함
     _period_last: dict[str, datetime] = field(default_factory=dict)          # 전략별 마지막으로 처리한 예정 시각
+    # [CP-040 D-262·D-263 T-067] M2 손절 감시(CAP-HLD-02 선언 전략이 있을 때만 조립 지점이 붙임). None(기본·M1) = 단계 없음
+    stop_monitor: StopMonitor | None = None
 
     def __post_init__(self) -> None:
         self.profile.attach(self)
@@ -336,6 +341,9 @@ class Engine:
             ("resolve", lambda: self._resolve_step(now)), ("daily", lambda: self._daily(now)),
             ("reconcile", lambda: self.profile.reconcile_step(now)), ("evaluate", lambda: self._evaluate_due(now)),
             ("exec_policy", lambda: self._exec_policy(now))]
+        if self.stop_monitor is not None:   # [CP-040 T-067] 분봉 저장(대조 단계) 다음·예정 판정 전 — 감시 → 게이트 → 실행기
+            monitor = self.stop_monitor
+            steps.insert(6, ("stop", lambda: monitor.step(now)))
         for name, step in steps:
             self.last_progress = self.mono()
             try:

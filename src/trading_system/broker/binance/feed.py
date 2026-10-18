@@ -29,7 +29,12 @@ binance-feed를 보고 긴급 알림 + K5(D-215).
   정지 없음, DP-72 개정).
   조회 실패·보류는 다른 조회와 같은 경보 묶음(DP-67). 닫힌 봉 거르기·저장은 받는 쪽(marketdata/spot_minute)이 한다.
 - 시작 예산 검사: minute_budget_problem — 심볼 수 × 쪽 × weight 2 × (창 길이 안 격자 수)가 내부 예산(rateLimits 50%)의
-  10%를 넘으면 시작 거부(D-220 [제안], run_start.M2RunConnector) [DP-74].
+  10%를 넘으면 시작 거부(D-220 [제안], run_start.M2RunConnector) [DP-74]. 이력 채우기(CP-040 D-261)를 켜면 같은 식에
+  채우기 몫(분당 상한 × 창 분 × weight 2, [제안] 분당 20회)을 더해 검사한다.
+- 확장 열 (CP-040 D-260, T-066): 응답 7~10번째 값(quoteVolume·tradeCount·takerBuyBase·takerBuyQuote, BN S6)을 MinuteBar
+  선택 필드로 넘긴다 — 저장은 받는 쪽이 추가 전용 `minute_bar_ext`에.
+- 이력 채우기 조회 (D-261): minute_page_fetcher(client) — startTime·endTime 나눔 조회 한 쪽(같은 클라이언트·WeightBudget·
+  시세 우선순위, RunGuard 경유). 일정·저장·실패 처리는 app/m2_backfill. **실행 경로 연결은 별도 승인 뒤**(실제 백필 호출).
 """
 
 from __future__ import annotations
@@ -54,7 +59,7 @@ from trading_system.domain.trading_rules import SymbolRules as DomainRules
 from .alert_throttle import ConditionAlerts
 from .client import WEIGHT, BinanceQueryError, BinanceSpotClient
 from .facts import BinanceMarketFacts
-from .market import KlineDataError, parse_avg_price, parse_klines
+from .market import Kline, KlineDataError, parse_avg_price, parse_klines
 from .weights import BUDGET_FRACTION_PERCENT, RateLimits
 
 
@@ -116,18 +121,29 @@ class MinutePlan:
         return math.ceil(self.limit / KLINE_PAGE_MAX)
 
 
-def minute_budget_problem(limits: RateLimits, symbols: int, plan: MinutePlan) -> str | None:
+def minute_budget_problem(limits: RateLimits, symbols: int, plan: MinutePlan, *,
+                          backfill_per_minute: int = 0) -> str | None:
     """분봉 조회가 REQUEST_WEIGHT 창마다 내부 예산(한도 × 50%)의 10%를 넘으면 거부 사유, 아니면 None (D-220).
-    klines 한 쪽 weight는 client.WEIGHT["klines"] 하나만 쓴다(조회 때 차감하는 값과 같은 상수)."""
+    klines 한 쪽 weight는 client.WEIGHT["klines"] 하나만 쓴다(조회 때 차감하는 값과 같은 상수).
+    backfill_per_minute > 0 = 이력 채우기 분당 상한(CP-040 D-261) — 창마다 그 몫(분당 상한 × 창 분, 최소 1회)을 더한다."""
     weight = WEIGHT["klines"]
     for w in limits.weight:
         per_window = max(1, math.ceil(w.interval_ms / (plan.period_minutes * 60_000)))
         need = symbols * plan.pages * weight * per_window
+        fill = backfill_per_minute * max(1, math.ceil(w.interval_ms / 60_000)) * weight if backfill_per_minute > 0 else 0
         cap = w.limit * BUDGET_FRACTION_PERCENT // 100
-        if need * 100 > cap * MINUTE_BUDGET_PERCENT:
+        if (need + fill) * 100 > cap * MINUTE_BUDGET_PERCENT:
+            extra = (f" + 백필 분당 {backfill_per_minute}회 × weight {weight} = {fill} (D-261)" if fill else "")
             return (f"분봉 조회 호출 예산 초과: 심볼 {symbols} × {plan.pages}쪽 × weight {weight} × 창 {w.interval_ms // 1000}초 "
-                    f"안 {per_window}회 = {need} > 내부 예산 {cap}의 {MINUTE_BUDGET_PERCENT}% — 시작하지 않는다 (D-220)")
+                    f"안 {per_window}회 = {need}{extra} > 내부 예산 {cap}의 {MINUTE_BUDGET_PERCENT}% — 시작하지 않는다 (D-220)")
     return None
+
+
+def minute_page_fetcher(client: BinanceSpotClient) -> Callable[[str, int, int, int], object]:
+    """이력 채우기 한 쪽 조회 (D-261): (심볼, 시작 ms, 끝 ms, limit) → klines 1m 응답 본문. 실패는 BinanceQueryError."""
+    def fetch(symbol: str, start_ms: int, end_ms: int, limit: int) -> object:
+        return client.klines(symbol, "1m", limit=limit, start_ms=start_ms, end_ms=end_ms)
+    return fetch
 
 
 @dataclass(frozen=True)
@@ -137,6 +153,13 @@ class FeedPlan:
     server_time: timedelta = timedelta(minutes=10)
     kline_limit: int = 200
     loop_s: float = 1.0
+
+
+def minute_bar_of(k: Kline) -> MinuteBar:
+    """klines 1m 한 행 → MinuteBar(adjusted = NO_ADJUSTMENT) + 확장 열(7~10번째 값, D-260)."""
+    return MinuteBar(k.symbol, 1, k.open_time, k.open, k.high, k.low, k.close, k.volume, NO_ADJUSTMENT,
+                     quote_volume=k.quote_volume, trades=k.trades, taker_buy_base=k.taker_buy_base,
+                     taker_buy_quote=k.taker_buy_quote)
 
 
 class BinanceFeed:
@@ -259,8 +282,7 @@ class BinanceFeed:
         except KlineDataError as exc:
             sink.minute_quality_failed(s, str(exc), now)
             return
-        sink.put_minute_bars(s, [MinuteBar(s, 1, k.open_time, k.open, k.high, k.low, k.close, k.volume, NO_ADJUSTMENT)
-                                 for k in ks], now)
+        sink.put_minute_bars(s, [minute_bar_of(k) for k in ks], now)
 
     def _load_klines(self) -> None:
         for s in self._symbols:

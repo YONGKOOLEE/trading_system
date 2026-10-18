@@ -158,6 +158,11 @@ class Bar:
     low: Decimal
     close: Decimal
     volume: Decimal
+    # [CP-040 D-260] 분봉 확장 열 (바이낸스 klines 7~10번째 값). 없으면 None — 일봉·M1 분봉·확장 열이 없는 봉
+    quote_volume: Decimal | None = None
+    trades: int | None = None
+    taker_buy_base: Decimal | None = None
+    taker_buy_quote: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -189,6 +194,10 @@ class InstrumentView:
     # [CP-037 DP-78] CAP-DAT-02 선언 전략의 1분봉 판정 입력이 유효한지. False면 minute_bars는 ()이고, 판정 실행기가 이 종목의
     # 신규 진입·증액 신호를 버린다 — 청산·감액(보유·최근가 등 나머지 입력 기반)은 막지 않는다(CLAUDE.md §8-3). 미선언 전략은 True
     minute_ok: bool = True
+    # [CP-040 D-259] 집계 봉(15분·60분, 저장 1분 봉에서 UTC 정렬로 계산) 판정 창 — 집계 봉을 선언한 CAP-DAT-02 전략만.
+    # 결측 집계 봉은 빼고(채우지 않음) 시작 시각 오름차순, 그 시작 시각은 agg_missing(오름차순)에. minute_ok False면 둘 다 ()
+    agg_bars: tuple[Bar, ...] = ()
+    agg_missing: tuple[datetime, ...] = ()
 
 
 @dataclass(frozen=True)
