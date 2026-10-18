@@ -112,11 +112,20 @@ C:\AI\trading_system\trading_system\.venv\Scripts\python.exe scripts\run-m2.py
 - 시작 직후는 항상 K8(주문 없음) — 정상.
 - 시작 거부 문구가 나오면 그 줄을 보낸다.
 
-### 4-7. K8 재개 → 지급 BTC 1개 매도 (KST 10:00 전)
+### 4-7. K4·K8 재개 → 지급 BTC 1개 매도 (KST 10:00 전)
+기준선 확정(4-5)은 열린 대조 항목만 닫고 **K4 정지는 풀지 않는다**(관찰 run에서 걸린 K4 — [t050-observation.md](t050-observation.md)). run 시작 뒤 1~2분 기다려 대조가 일치한 다음 순서대로 푼다.
 텔레그램 **M2 봇**에서:
-1. `/resume K8` → 회신에 나온 `/confirm <코드>`를 60초 안에 보냄. 기대: "K8 재개 완료".
-2. `/status` → BTCUSDT 1 수동 보유 확인.
-3. `/exit BTCUSDT 1` → `/confirm <코드>`. 기대: 시장가 매도 체결 알림, 이후 보유 0.
+1. `/status` → "열린 대조 불일치 0건"(또는 대조 MATCH)과 정지 K4·K8 확인. 불일치가 남아 있으면 멈추고 출력을 보낸다.
+2. `/resume K4` → 회신에 나온 `/confirm <코드>`를 60초 안에 보냄. 기대: "K4 재개 완료".
+3. `/resume K8` → `/confirm <코드>`. 기대: "K8 재개 완료".
+4. `/status` → 정지 없음, BTCUSDT 1 수동 보유 확인.
+5. `/exit BTCUSDT 1` → `/confirm <코드>`. 기대: 시장가 매도 체결 알림, 이후 보유 0.
+- 텔레그램이 안 되면 PC의 다른 PowerShell 창에서(같은 순서, K4 먼저):
+```
+Set-Location C:\AI\trading_system\m2-binance
+C:\AI\trading_system\trading_system\.venv\Scripts\python.exe scripts\resume.py --mode PAPER --market M2 K4
+C:\AI\trading_system\trading_system\.venv\Scripts\python.exe scripts\resume.py --mode PAPER --market M2 K8
+```
 - 부분 체결로 남으면 남은 수량으로 `/exit`를 다시(0.00001 단위가 아니면 거부 — 자동 반올림 없음).
 - 10:00 전에 못 하면 그날 전략은 아무것도 안 한다(안전). 다음 날 10:00 전에 하면 된다.
 
