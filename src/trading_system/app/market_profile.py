@@ -84,6 +84,10 @@ class MarketProfile:
                          ub: _UbInput | None) -> tuple[EvaluationSnapshot, dict[str, Decimal]]:
         return self._engine._store_input(ls, ev_id, at, now, base, ub)   # noqa: SLF001
 
+    def minute_pending(self, ls: LoadedStrategy, at: datetime) -> frozenset[str]:
+        """[CP-037 T-052] 주기 판정이 기다릴 1분봉 조회가 남은 심볼. M1은 분봉 공급이 없다(주기 판정 미개방)."""
+        return frozenset()
+
     def prepare(self, req: GateRequest) -> GateRequest | None:
         """게이트 전 요청 변환 (D-201 (5)). M1 = 항등."""
         return req
@@ -171,15 +175,27 @@ class SpotProfile(MarketProfile):
             self.dust.review(self._engine.account, inst)
 
     # --- 판정 입력 (D-207 최소) ------------------------------------------------------------------
+    def _instruments(self, ls: LoadedStrategy) -> list[str]:
+        spec = ls.strategy.spec
+        return sorted(set(spec.universe) & set(self.pairs)) if spec.universe_method == "U-A" else sorted(self.pairs)
+
+    def minute_pending(self, ls: LoadedStrategy, at: datetime) -> frozenset[str]:
+        """[CP-037 T-052, DP-79] CAP-DAT-02 전략의 판정 시각 at 조회가 아직 끝나지 않은 심볼. 분봉 공급이 꺼져 있으면 기다릴
+        조회가 없다(입력은 DISABLED)."""
+        if MINUTE_CAPABILITY not in ls.strategy.spec.capabilities or self.minutes is None:
+            return frozenset()
+        return self.minutes.pending_fetch(self._instruments(ls), at)
+
     def evaluation_input(self, ls: LoadedStrategy, ev_id: str, at: datetime, now: datetime, base: Decimal,
-                         ub: _UbInput | None) -> tuple[EvaluationSnapshot, dict[str, Decimal]]:
+                         ub: _UbInput | None, *, unfetched: frozenset[str] = frozenset(),
+                         ) -> tuple[EvaluationSnapshot, dict[str, Decimal]]:
         e = self._engine
         spec = ls.strategy.spec
-        insts = sorted(set(spec.universe) & set(self.pairs)) if spec.universe_method == "U-A" else sorted(self.pairs)
+        insts = self._instruments(ls)
         self.review_dust(insts)   # 매도 뒤 남은 dust는 보유 없음 취급 전에 소유권부터 정리 (D-102)
         mins: dict[str, MinuteInput] = {}
         if MINUTE_CAPABILITY in spec.capabilities:   # [CP-037 D-220] CAP-DAT-02 선언 전략만 1분봉 입력
-            mins = (self.minutes.inputs(e.repo, e.alerts, insts, at, now, ev_id) if self.minutes is not None
+            mins = (self.minutes.inputs(e.repo, e.alerts, insts, at, now, ev_id, unfetched) if self.minutes is not None
                     else disabled_inputs(e.repo, insts, at, now, ev_id))
         views = tuple(self._view(i, ls.owner, now, mins.get(i)) for i in insts)
         snap = EvaluationSnapshot(ev_id, self.market.value, e.account, now, base, views, e._next_eval(ls, at))  # noqa: SLF001
@@ -196,14 +212,14 @@ class SpotProfile(MarketProfile):
                        or e.repo.active_new_intents(e.account, inst, Side.SELL.value))
         yesterday = M2_TIME.local(now).date() - timedelta(days=1)
         data_ok = rules is not None and statuses is not None and bool(bars) and bars[-1].at >= yesterday  # type: ignore[operator]
-        if minute is not None:   # 1분봉 누락·결측·품질 실패·저장 실패·공급 꺼짐 → 그 판정 신호 무효 (D-220)
-            # [T-052 재검토 — CLAUDE.md §8-3, DP-75 (6)] data_ok False면 CAP-DAT-02 전략은 청산(위험 축소) 신호도 내지
-            # 못할 수 있다. 무효 창일 때 청산 신호를 허용할지는 엔진 주기 판정을 연결하는 T-052에서 다시 정한다.
-            data_ok = data_ok and minute.ok
+        # [DP-78 — DP-75 (6) 해소, CLAUDE.md §8-3] 1분봉 누락·결측·품질·저장 실패·조회 시한 초과·공급 꺼짐(D-220)은 data_ok가
+        # 아니라 minute_ok False로 전달한다(minute_bars ()). 판정 실행기가 이 종목 신규 진입·증액을 버리고, 청산·감액은 분봉 외
+        # 입력(data_ok)으로만 검사한다 — 분봉이 무효라고 위험 축소 신호까지 조용히 막지 않는다.
         return InstrumentView(inst, daily_bars=bars, minute_bars=minute.bars if minute is not None else (),
                               last_price=q.price if q is not None and q.at <= now else None,
                               statuses=statuses or frozenset(), position=self._position(inst, owner, rules),
-                              has_pending_order=pending, data_ok=data_ok)
+                              has_pending_order=pending, data_ok=data_ok,
+                              minute_ok=minute.ok if minute is not None else True)
 
     def _position(self, inst: str, owner: str, rules: SymbolRules | None) -> PositionView | None:
         """보유 표시 = 청산 가능 수량(실제로 보낼 매도 경로의 단위로 내림). 0·minQty 미만·확실한 dust면 보유 없음(D-102).

@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 
 import importlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -45,6 +45,7 @@ from trading_system.strategy.base import Strategy
 from trading_system.domain.investor_flow import CAPABILITY as FLOW_CAPABILITY
 from trading_system.domain.market import Quote
 from trading_system.domain.market_time import M2_TIME, Market
+from trading_system.domain.minute_series import DEFAULT_CONFIRM_MARGIN, PeriodGrid
 from trading_system.domain.sinks import AlertSink
 from trading_system.domain.trading_rules import SpotOrderPolicy, SymbolRules
 from trading_system.execution.dust import DustHandler
@@ -53,7 +54,7 @@ from trading_system.monitoring.spot_cash import SpotAccountFacts
 from trading_system.reconciliation.spot import SpotReconcileCycle, SpotReconcileSchedule, SpotReconciler
 
 from .engine import AccountState, Engine, LoadedAllocation, LoadedStrategy
-from .m2_minutes import M2MinuteInput
+from .m2_minutes import MINUTE_CAPABILITY, M2MinuteInput
 from .market_profile import SpotFacts, SpotProfile
 
 BROKER_ENV = {Mode.BACKTEST: "fake", Mode.PAPER: "mock"}
@@ -202,8 +203,53 @@ def build_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: BrokerAd
     return engine
 
 
+PERIODIC_CAPABILITY = "CAP-TRG-02"   # 주기 판정 (CP-037 D-219)
+PERIOD_PARAM = "period_minutes"      # 주기 판정 격자 N분 — 전략 파라미터 (D-219)
+
+
+def period_grid_of(si: StrategyInput, market: str, *, minute_period: int | None = None,
+                   margin: timedelta = DEFAULT_CONFIRM_MARGIN) -> PeriodGrid | None:
+    """[CP-037 D-219, DP-79] 전략의 판정 일정 검사 → CAP-TRG-02면 주기 격자, 아니면 None(정해진 시각 판정). 문제면 ConfigError.
+
+    - CAP-TRG-02는 M2 프로파일에서만 연다 — M1은 거부(capabilities.md M1 "미지원"과 별개로 코드도 막는다, CP-032 T-029 몫).
+    - CAP-TRG-02 전략: 배포 설정 eval_times는 비어 있어야 하고(일정은 파라미터 period_minutes), N은 1440의 약수이며 격자
+      시각이 주문 창 안에 있어야 한다(DP-77). CAP-DAT-02도 선언했고 1분봉 조회가 켜져 있으면 N은 조회 격자(설정 [minute]
+      period_minutes)의 배수 — 판정 시각마다 그 시각의 조회가 있어야 한다.
+    - 그 밖의 전략: eval_times가 하나 이상(M2 설정은 빈 목록을 허용하므로 여기서 막는다)."""
+    spec = si.strategy.spec
+    owner = spec.owner
+    if PERIODIC_CAPABILITY not in spec.capabilities:
+        if not si.eval_times:
+            raise ConfigError([f"{owner}: eval_times가 비어 있음 — 빈 목록은 {PERIODIC_CAPABILITY} 주기 판정 전략만"])
+        return None
+    if market != Market.M2.value:
+        raise ConfigError([f"{owner}: {PERIODIC_CAPABILITY} 주기 판정은 M1 프로파일에서 열지 않는다 "
+                           "(CP-037 D-219 — M1은 CP-032 T-029 키움 호출 예산과 함께)"])
+    problems: list[str] = []
+    if si.eval_times:
+        problems.append(f"{owner}: {PERIODIC_CAPABILITY} 전략의 eval_times는 빈 목록이어야 함 — 판정 일정은 파라미터 "
+                        f"{PERIOD_PARAM} (D-219)")
+    n = si.params.get(PERIOD_PARAM)
+    grid: PeriodGrid | None = None
+    if isinstance(n, bool) or not isinstance(n, int):
+        problems.append(f"{owner}: {PERIODIC_CAPABILITY} 전략은 정수 파라미터 {PERIOD_PARAM}이 필요 (D-219)")
+    else:
+        try:
+            grid = PeriodGrid(n, margin)
+        except ValueError as exc:
+            problems.append(f"{owner}: {PERIOD_PARAM} {n} — {exc}")
+        if grid is not None and MINUTE_CAPABILITY in spec.capabilities and minute_period is not None \
+                and n % minute_period:
+            problems.append(f"{owner}: {PERIOD_PARAM} {n}이 1분봉 조회 격자 {minute_period}분의 배수가 아님 — 판정 시각에 그 "
+                            "시각 조회가 없다 (config/m2/market.<mode>.toml [minute], DP-79)")
+    if problems:
+        raise ConfigError(problems)
+    return grid
+
+
 def _register_strategies(registry: StrategyRegistry, strategies: list[StrategyInput], caps: CapabilityTable,
-                         account_limits: AccountLimits, mode: Mode, account: str) -> list[LoadedStrategy]:
+                         account_limits: AccountLimits, mode: Mode, account: str, market: str = Market.M1.value,
+                         minutes: M2MinuteInput | None = None) -> list[LoadedStrategy]:
     loaded: list[LoadedStrategy] = []
     for si in strategies:
         reg = registry.register(si.strategy.spec, dict(si.params), caps, account_limits, mode,
@@ -215,7 +261,13 @@ def _register_strategies(registry: StrategyRegistry, strategies: list[StrategyIn
         # [CP-032 D-175] 03b(취소) 선언이면 미체결 시간 초과 취소. "CAP-ORD-03"(03a 포함)은 등록에서 이미 거부된다
         if uses_unfilled_cancel(si.strategy.spec.capabilities) and "unfilled_max_minutes" in parsed:
             unfilled = int(str(parsed["unfilled_max_minutes"]))
-        loaded.append(LoadedStrategy(si.strategy, parsed, si.eval_times, unfilled))
+        # [CP-037 D-219] 판정 일정: CAP-TRG-02(M2만)면 주기 격자. M1은 CAP-TRG-02를 선언하지 않은 전략만 여기 온다(등록 거부)
+        period = None
+        if PERIODIC_CAPABILITY in si.strategy.spec.capabilities or market != Market.M1.value:
+            period = period_grid_of(replace(si, params=parsed), market,
+                                    minute_period=minutes.period_minutes if minutes is not None else None,
+                                    margin=minutes.margin if minutes is not None else DEFAULT_CONFIRM_MARGIN)
+        loaded.append(LoadedStrategy(si.strategy, parsed, si.eval_times, unfilled, period))
     # [CP-035 D-200, DP-49] 보유·예약을 가진 전략을 배포 설정에서 빼면(교체 전이 없이 설정만 바꿈) 시작 거부
     orphans = registry.undeployed_holding_problems(account, {si.strategy.spec.owner for si in strategies})
     if orphans:
@@ -331,7 +383,7 @@ def _build_spot_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: Br
     recovery = RecoveryChecker(repo, reconciler, halts, clock_health.clock_ok)
     ops = OpsProcessor(repo, gate, executor, halts, clock, reconciler=reconciler,
                        resolver=ReconcileResolver(repo, executor, clock), kill_file=kill_file, registry=registry)
-    loaded = _register_strategies(registry, strategies, caps, account_limits, mode, account)
+    loaded = _register_strategies(registry, strategies, caps, account_limits, mode, account, market, spot.minutes)
 
     watcher = None
     if alert_thresholds is not None:

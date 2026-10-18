@@ -18,6 +18,7 @@
                                 TELEGRAM_BOT_TOKEN·TELEGRAM_CHAT_ID가 있어야 시작 (03 D-052, 01 §2.9·§2.10)
 [[instruments]]  code, kind(STOCK|ETF|ETN), leverage(문자열, 부호), lot_size(문자열). M1만 — M2 종목은 config/m2/universe
 [[strategies]]   module("패키지.모듈:클래스"), params(파라미터 파일 경로, 저장소 기준), eval_times(["HH:MM"] KST)
+                 — M2는 UTC, CAP-TRG-02 주기 판정 전략은 eval_times = [] (CP-037 D-219, app.wiring.period_grid_of)
                  verification_approval (선택, PAPER만): PAPER-0 검증 전략 승인 A-ID (DP-24 a, A-037)
                  l6_slots (선택, 정수 ≥ 1) [CP-034 D-197]: 전략별 보유 슬롯. 없으면 슬롯 검사 없음(기존 동작).
                  배정하면 모든 전략에 배정해야 하고 합 ≤ 계좌 L6 (check_strategy_slots). 미배정 슬롯은 아무도 안 씀(A-092 Q-7)
@@ -203,9 +204,13 @@ def parse_app_settings(raw: dict, mode: Mode, repo_root: Path) -> AppSettings:
             problems.append(f"strategies[{i}].params: config/ 아래 파일이어야 함")
             continue
         times = st["eval_times"]
-        if not isinstance(times, list) or not times or not all(isinstance(t, str) and _HHMM.fullmatch(t)
-                                                              for t in times):
-            problems.append(f"strategies[{i}].eval_times: ['HH:MM', ...] (KST)")
+        # [CP-037 D-219] M2는 빈 목록 허용 — CAP-TRG-02 주기 판정 전략(일정 = 파라미터 period_minutes). 전략별 일치 검사는
+        # 조립 지점(app.wiring.period_grid_of)이 한다. M1은 그대로 하나 이상 필수
+        empty_ok = market == Market.M2.value
+        if not isinstance(times, list) or (not times and not empty_ok) or \
+                not all(isinstance(t, str) and _HHMM.fullmatch(t) for t in times):
+            problems.append(f"strategies[{i}].eval_times: ['HH:MM', ...] "
+                            + ("(UTC, CAP-TRG-02 주기 판정 전략은 [])" if empty_ok else "(KST)"))
             continue
         strategies.append(StrategyDeploy(st["module"], p,
                                          tuple(sorted(time(int(t[:2]), int(t[3:])) for t in set(times))), va,

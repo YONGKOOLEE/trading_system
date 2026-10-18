@@ -9,6 +9,9 @@
 - [CP-034] 신규 진입·증액 제한(감액·청산은 막지 않음): `entry_universe`(U-B 적용 목록 — 목록 밖 보유 종목은 청산·감액
   판정 대상으로만 남는다, D-198 (4))와 `entry_block`(배분 규칙이 진입을 허용하지 않을 때의 사유, D-199). 둘 다 주지 않으면
   기존 동작 그대로.
+- [CP-037 DP-78] 종목 입력의 `minute_ok`가 False(CAP-DAT-02 전략의 1분봉 창 무효 — 누락·결측·품질·저장 실패·조회 시한
+  초과·공급 꺼짐)면 그 종목 신규 진입·증액만 버린다. 청산·감액은 data_ok(분봉 외 입력)로만 검사한다(CLAUDE.md §8-3).
+  minute_ok 기본값은 True — M1·분봉 미선언 전략은 기존 동작 그대로.
 """
 
 from __future__ import annotations
@@ -64,10 +67,13 @@ def run_evaluation(strategy: Strategy, snapshot: EvaluationSnapshot, params: Par
     for s in raw:
         reason = _check(s, spec, snapshot, rules, universe, hard_cap, lot_of or {})
         if reason is None and isinstance(s, Signal) and s.kind in _RISK_UP:
+            view = snapshot.view(s.instrument)
             if entry_block is not None:
                 reason = entry_block
             elif entry_universe is not None and s.instrument not in entry_universe:
                 reason = "U-B 적용 목록 밖 종목 — 신규 진입·증액 불가, 청산·감액만 (D-198)"
+            elif view is not None and not view.minute_ok:
+                reason = "1분봉 판정 입력 무효 — 신규 진입·증액 불가, 청산·감액만 (CP-037 D-220, DP-78)"
         if reason:
             result.dropped.append(Dropped(getattr(s, "instrument", "?"), getattr(s, "rule_id", "?"), reason))
         else:

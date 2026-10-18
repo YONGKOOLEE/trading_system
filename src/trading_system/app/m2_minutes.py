@@ -18,11 +18,13 @@
    누락 때 요약 1건, 경고 뒤 첫 OK 판정에서 회복 1건(INFO). GAP·QUALITY는 연속 수를 바꾸지 않는다. 품질 실패는 심볼별로
    같은 방식의 별도 묶음 경고(첫 실패 1건·30분 요약·정상 수신 뒤 회복 INFO, DP-72·DP-73).
 CAP-DAT-02를 선언한 전략만 분봉 입력을 받는다. 선언했는데 분봉 공급이 꺼져 있으면(설정 [minute] 꺼짐) 모든 심볼
-DISABLED = 신호 무효(불확실하면 주문하지 않음). M2 열 CAP-DAT-02는 capabilities.md에서 아직 "미지원"이라 등록이
-거부된다 — 개정은 T-052(승인 + M1 run 꺼진 시간). 판정 입력 규칙 [DP-75], 저장 값(adjusted·source) [DP-70].
-[T-052 재검토 — CLAUDE.md §8-3] 분봉 입력이 무효면 그 심볼 data_ok False라 CAP-DAT-02 전략은 **청산(위험 축소) 신호까지**
-내지 못할 수 있다. 위험 축소 요청에 위험 확대와 같은 거부를 무조건 적용하지 않는다는 원칙에 맞게, 엔진 주기 판정을 연결하는
-T-052에서 무효 창일 때 청산 신호 허용 여부를 다시 정한다(DP-75 (6)).
+DISABLED = 신호 무효(불확실하면 주문하지 않음). M2 열 CAP-DAT-02는 T-052에서 "검증 중"(BACKTEST 등록만, PAPER는 "지원" 뒤).
+판정 입력 규칙 [DP-75], 저장 값(adjusted·source) [DP-70].
+4. 주기 판정 대기 [T-052, DP-79]: 엔진은 CAP-TRG-02·CAP-DAT-02 전략의 판정 시각 at에 pending_fetch로 그 시각 조회가 끝났는지
+   보고 PeriodGrid.fetch_wait까지 기다린다. 넘으면 그 심볼은 FETCH_TIMEOUT(신호 무효)으로 판정한다(늦은 판정은 만들지 않음).
+[DP-78 — DP-75 (6) 해소, CLAUDE.md §8-3] 분봉 입력이 무효여도 data_ok는 분봉 외 입력(규칙·심볼 상태·1d 봉)만 반영한다.
+무효는 InstrumentView.minute_ok False + minute_bars ()로 전달하고, 판정 실행기가 그 종목 신규 진입·증액만 버린다 — 전략은
+보유·최근가로 청산·감액 신호를 낼 수 있다.
 """
 
 from __future__ import annotations
@@ -111,12 +113,13 @@ def _record(status: str, first: datetime, last: datetime, *, count: int = 0, mis
 
 class M2MinuteInput:
     def __init__(self, book: SpotMinuteBook, *, lookback_bars: int,
-                 margin: timedelta = DEFAULT_CONFIRM_MARGIN) -> None:
+                 margin: timedelta = DEFAULT_CONFIRM_MARGIN, period_minutes: int | None = None) -> None:
         if lookback_bars <= 0:
             raise ValueError("lookback_bars는 1 이상")
         self.book = book
         self.lookback = lookback_bars
         self.margin = margin
+        self.period_minutes = period_minutes   # 1m klines 조회 격자 N분 (설정 [minute]) — 주기 판정 격자 검사용 (T-052)
         self._missing: dict[str, _Missing] = {}
         self._conditions = _ConditionAlerts()
         self._store_problem: str | None = None           # 분봉 저장 실패 중이면 사유 (DP-76) — 성공한 flush가 지운다
@@ -185,10 +188,22 @@ class M2MinuteInput:
                 self._conditions.recovered(key, alerts, f"분봉 품질 회복 {sym}: 정상 수신")
 
     # --- 판정 입력 -------------------------------------------------------------------------------------
+    def pending_fetch(self, symbols: Sequence[str], at: datetime) -> frozenset[str]:
+        """판정 시각 at의 1m klines 조회(정상·품질 실패 수신 모두)가 아직 끝나지 않은 심볼 (T-052 주기 판정 대기, DP-79).
+        공급 스레드는 격자 시각(= at) 이후 조회해 받은 시각을 남긴다 — 받은 시각 < at이면 이전 격자의 조회다."""
+        out = []
+        for s in symbols:
+            got = self.book.fetched_at(s)
+            if got is None or got < at:
+                out.append(s)
+        return frozenset(out)
+
     def inputs(self, repo: Repository, alerts: AlertSink | None, symbols: Sequence[str], at: datetime, now: datetime,
-               ev_id: str) -> dict[str, MinuteInput]:
+               ev_id: str, unfetched: frozenset[str] = frozenset()) -> dict[str, MinuteInput]:
+        """unfetched: 기다림 상한(PeriodGrid.fetch_wait)이 지나도 그 판정 시각 조회가 끝나지 않은 심볼 → FETCH_TIMEOUT
+        (신호 무효 — 판정 직전 닫힌 봉을 받지 못한 것이므로 누락 연속 수에 센다, DP-73·DP-79)."""
         self.flush(repo, alerts, now)
-        out = {s: self._one(repo, alerts, s, at, now, ev_id) for s in symbols}
+        out = {s: self._one(repo, alerts, s, at, now, ev_id, s in unfetched) for s in symbols}
         with repo.tx():
             repo.audit(now, MINUTE_INPUT_AUDIT, "engine", ev_id, {
                 "at": at.isoformat(), "lookback": self.lookback, "margin_s": self.margin.total_seconds(),
@@ -196,9 +211,13 @@ class M2MinuteInput:
         return out
 
     def _one(self, repo: Repository, alerts: AlertSink | None, s: str, at: datetime, now: datetime,
-             ev_id: str) -> MinuteInput:
+             ev_id: str, unfetched: bool = False) -> MinuteInput:
         last = last_closed_start(at, self.margin)
         first = last - ONE_MINUTE * (self.lookback - 1)
+        if unfetched:   # 그 판정 시각의 조회가 기다림 상한 안에 끝나지 않음 (T-052, DP-79)
+            self._track(s, WindowStatus.LAST_MISSING, alerts, now, ev_id)
+            return MinuteInput((), False, _record("FETCH_TIMEOUT", first, last,
+                                                  reason="판정 시각 1m klines 조회가 기다림 상한 안에 끝나지 않음"))
         if self._store_problem is not None:   # 저장 실패 중 — 저장 봉 창이 받은 봉을 반영하지 못함 (DP-76)
             return MinuteInput((), False, _record("STORE_FAILED", first, last, reason=self._store_problem))
         problem = self.book.quality_problem(s)
