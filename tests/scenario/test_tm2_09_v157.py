@@ -526,22 +526,26 @@ COVERAGE: dict[str, list[str]] = {
     "V-126": [f"{_TM}.test_tm2_09_v157::test_v126_m2_external_same_terms_order_is_k4_ours_adopted_by_client_id"],
 }
 # 이 작업 범위에서 M2 설정으로 실행하지 못한 V (미실행 — 통과 아님). 사유와 담당 작업·승인
-NOT_RUN: dict[str, str] = {
-    "V-02": "M2 현물에는 레버리지·인버스 상품이 없다(L10 none, CP-024 §2.4). 배수 1 경로는 PARTIAL 시험이 통과하지만 "
-            "'V-02 = M2 해당 없음' 판정은 사용자 확인 전(04 §6 방식) — 확인되면 COVERAGE로",
-    "V-76": "부분: 형식·중복·순서·OHLC 모순 → K10·신호 없음은 PARTIAL 시험 통과. 결측(1d 봉 사이 빈 날)·이상치는 M2 기준이 "
-            "설계에 없음(가격제한 없음 — M1 ±30% 기준 적용 불가) → 설계 결정(CP) 뒤 구현 [제안]",
-    "V-112": "전처리 동일성 — M2 실시간 판정 경로(klines → 스냅샷)가 M2 엔진 조립 T-M2-14(테스트넷 연결 승인 별도)에 있고, "
-             "백테스트(app/backtest_m2 _check_config)와 실시간(facts.parse_klines)의 공통 전처리 함수가 아직 없다 "
-             "(03 D-088의 M2 적용 설계 결정 필요 [제안])",
-    "V-127": "WS 재접속 한도 — M2 사용자 스트림 연결·재접속 스레드(websockets 실연결)는 T-M2-14(테스트넷 연결 승인 별도). "
-             "오프라인 부품은 연결 수명 정책(stream.SessionPolicy)뿐이고 재접속 한도·K5 연결은 미조립",
-}
+# [2026-10-18 V-157 잔여 정리] V-76·V-112·V-127은 아래 COVERAGE로(test_v157_m2_remaining). V-02는 V-157 목록(04 2-M2.4
+# "V-01, V-03~V-13")에 없어 이 표에서 뺐다 — M2 해당 없음 근거 시험은 test_v157_m2_remaining::test_v02_*.
+NOT_RUN: dict[str, str] = {}
 # NOT_RUN 중 부분 실행한 시험 (통과로 세지 않는다 — 존재만 검사)
-PARTIAL: dict[str, list[str]] = {
-    "V-02": [f"{_TM}.test_tm2_09_v157_rest::test_v02_m2_spot_exposure_multiplier_is_one"],
-    "V-76": [f"{_TM}.test_tm2_09_v157_rest::test_v76_m2_kline_quality_failure_invalidates_signal_via_k10"],
-}
+PARTIAL: dict[str, list[str]] = {}
+_RM = f"{_TM}.test_v157_m2_remaining"
+COVERAGE.update({
+    # 결측(빈 날)·중복·순서·OHLC 모순·최근 봉 없음. 이상치: M2는 가격제한이 없어 OHLC 모순·음수 값(파서 거부)까지만 —
+    # 급변 기준은 두지 않음(DP-83, 사용자 확인 대기)
+    "V-76": [f"{_TM}.test_tm2_09_v157_rest::test_v76_m2_kline_quality_failure_invalidates_signal_via_k10",
+             f"{_RM}::test_v76_m2_control_clean_klines_signal_reaches_broker",
+             f"{_RM}::test_v76_m2_duplicate_or_ohlc_kline_k10_and_no_order",
+             f"{_RM}::test_v76_m2_missing_latest_day_no_signal",
+             f"{_RM}::test_v76_m2_gap_inside_window_invalidates_signal",
+             f"{_RM}::test_v76_m2_gap_outside_needed_window_does_not_block"],
+    "V-112": [f"{_RM}::test_v112_m2_same_raw_klines_same_bars_and_same_signal",
+              f"{_RM}::test_v112_m2_same_raw_with_missing_day_same_inputs_every_evaluation"],
+    # M2는 첫 끊김에 K5·긴급 알림(M1의 10회 한도보다 보수적), 재접속 대기 상한 30초(DP-84)
+    "V-127": [f"{_RM}::test_v127_m2_reconnect_refused_past_limit_k5_one_emergency_thread_kept_then_recovers"],
+})
 _RT = f"{_TM}.test_tm2_09_v157_rest"
 COVERAGE.update({
     "V-57": [f"{_RT}::test_v57_m2_duplicate_update_processed_once"],

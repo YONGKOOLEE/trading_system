@@ -19,10 +19,11 @@ from typing import TYPE_CHECKING, Protocol
 from trading_system.broker.base import BrokerQueryError
 from trading_system.broker.ratelimit import Priority, call_priority
 from trading_system.domain.clock import KST, last_kst_time_at_or_before
+from trading_system.domain.daily_input import final_daily, m2_daily_input
 from trading_system.domain.enums import OrderType, Side
 from trading_system.domain.limits import AccountLimits
 from trading_system.domain.market import SessionInfo
-from trading_system.domain.market_time import M2_TIME, Market, daily_bar_is_final, session_247
+from trading_system.domain.market_time import M2_TIME, Market, session_247
 from trading_system.domain.models import GateRequest
 from trading_system.domain.strategy import Bar, EvaluationSnapshot, InstrumentView, PositionView
 from trading_system.domain.trading_rules import (
@@ -205,13 +206,12 @@ class SpotProfile(MarketProfile):
     def _view(self, inst: str, owner: str, now: datetime, minute: MinuteInput | None = None) -> InstrumentView:
         e = self._engine
         rules = self.facts.rules(inst)
-        bars = final_daily_bars(self.facts.daily_bars(inst), now)
+        bars, daily_ok = m2_daily_input(self.facts.daily_bars(inst), now)   # 백테스트와 같은 함수 (D-088, DP-82)
         q = self.facts.quote(inst)
         statuses = self.facts.trading_status(inst)
         pending = bool(e.repo.active_new_intents(e.account, inst, Side.BUY.value)
                        or e.repo.active_new_intents(e.account, inst, Side.SELL.value))
-        yesterday = M2_TIME.local(now).date() - timedelta(days=1)
-        data_ok = rules is not None and statuses is not None and bool(bars) and bars[-1].at >= yesterday  # type: ignore[operator]
+        data_ok = rules is not None and statuses is not None and daily_ok
         # [DP-78 — DP-75 (6) 해소, CLAUDE.md §8-3] 1분봉 누락·결측·품질·저장 실패·조회 시한 초과·공급 꺼짐(D-220)은 data_ok가
         # 아니라 minute_ok False로 전달한다(minute_bars ()). 판정 실행기가 이 종목 신규 진입·증액을 버리고, 청산·감액은 분봉 외
         # 입력(data_ok)으로만 검사한다 — 분봉이 무효라고 위험 축소 신호까지 조용히 막지 않는다.
@@ -285,6 +285,5 @@ class SpotProfile(MarketProfile):
 
 
 def final_daily_bars(bars: tuple[Bar, ...], as_of: datetime) -> tuple[Bar, ...]:
-    """as_of 시점에 확정된 1d 봉만 (D-108, V-142): 봉 시작(UTC 날짜) + 1일 ≤ as_of. 날짜형이 아닌 봉은 쓰지 않는다."""
-    return tuple(b for b in bars if isinstance(b.at, date) and not isinstance(b.at, datetime)
-                 and daily_bar_is_final(b.at, as_of))
+    """as_of 시점에 확정된 1d 봉만 (D-108, V-142) — domain.daily_input.final_daily와 같음(판정 입력은 m2_daily_input)."""
+    return final_daily(bars, as_of)
