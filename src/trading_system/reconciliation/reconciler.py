@@ -358,7 +358,9 @@ class Reconciler:
                 found.append((ItemKind.UNKNOWN_BROKER_ORDER, o.instrument, o.order_no, None,
                               f"{o.side} {o.quantity} {o.state}",
                               {"side": o.side, "quantity": str(o.quantity), "trade_date": today,
-                               "detected_at": now.isoformat()}))
+                               "detected_at": now.isoformat(),
+                               # A-109 ④: 외부 주문 인정 시 브로커 상태·체결 수량으로 기록 (ops/reconcile)
+                               "broker_state": o.state, "filled_quantity": str(o.filled_quantity)}))
         for io in self._repo.open_orders(account):
             trade_date = io.order_key.split("|")[1]
             if trade_date != today:
