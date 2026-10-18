@@ -9,10 +9,11 @@
 - 실행 끝 날짜(--end) 뒤의 행은 실행기에 넘기지 않는다(판정에 쓰이지 않는 미래 행 — 개수를 요약에 기록).
   최종 확인 구간 보호(CP-030 D-163)는 실행기 그대로: 실행 날짜가 config/validation.toml final_from 이후와 겹치면 거부.
   M2에는 최종 확인 실행(--final-check·장부)이 없다 — 겹치면 항상 거부.
-- 실운영 시작 검사와 같은 검사: 전략 validate_deploy(판정 시각), validate_rules(거래 규칙 — app.wiring.spot_rule_problems),
-  전략 등록(docs/capabilities.md M2 열, BACKTEST 대상).
-- 거래 규칙: 테스트넷 BTCUSDT 실측값(broker-specs/binance-spot.md §12, 2026-10-14)만 있다 — PAPER 대상과 같은 규칙으로 과거
-  가격을 돌린다(실서버 과거 시점의 규칙이 아님, 보고서 한계). 다른 심볼은 규칙이 없어 거부.
+- 실운영 시작 검사와 같은 검사: 전략 validate_deploy(판정 시각), 거래 규칙 검사(app.wiring.spot_rule_problems — CP-041
+  D-270·D-271: validate_symbol_rules 우선, 기존 validate_rules는 범위 1심볼만), 전략 등록(docs/capabilities.md M2 열, BACKTEST 대상).
+  규칙 검사 범위 = 전략 명세 유니버스 ∩ 거래 규칙 표(TESTNET_RULES 전체 — 설정 유니버스 역할, D-271 (5)). 실행 심볼은 --symbol 하나.
+- 거래 규칙: 테스트넷 실측값 BTCUSDT(broker-specs/binance-spot.md §12, 2026-10-14)·ETHUSDT(§15, 2026-10-18)만 있다 — PAPER 대상과
+  같은 규칙으로 과거 가격을 돌린다(실서버 과거 시점의 규칙이 아님, 보고서 한계). 다른 심볼은 규칙이 없어 거부.
 - 비용: 수수료율 기본 = config/m2/market.paper.toml [costs] commission_rate(M2 비용 추정 요율), 슬리피지는 필수 인자(기본값 없음).
 - 결과: <out>/<실행 ID>/trading.db·report.md·summary.json. 재현성(같은 입력 재실행 지문 비교)·교란 검사(V-91, 표본 = 기간을 약 10등분한 날짜, M1과 같음)를 함께 한다.
 """
@@ -45,16 +46,25 @@ from trading_system.domain.market_time import Market
 from trading_system.domain.strategy import Bar
 from trading_system.domain.trading_rules import SymbolRules
 
-# 테스트넷 BTCUSDT 거래 규칙 실측값 (binance-spot.md §12, 2026-10-14 PV-M2-03). 가격·잔고 아님
+# 테스트넷 거래 규칙 실측값. 가격·잔고 아님. 백테스트 전용 표 — 운영 M2 유니버스(config/m2/universe.*.toml)와 별개
 TESTNET_RULES: dict[str, SymbolRules] = {
+    # BTCUSDT: binance-spot.md §12 (2026-10-14 PV-M2-03)
     "BTCUSDT": SymbolRules(
         instrument="BTCUSDT", tick_size=Decimal("0.01"), min_price=Decimal("0.01"), max_price=Decimal("1000000"),
         lot_min_qty=Decimal("0.00001"), lot_max_qty=Decimal("9000"), lot_step=Decimal("0.00001"),
         market_min_qty=Decimal("0"), market_max_qty=Decimal("133.97193096"), market_step=Decimal("0"),
         min_notional=Decimal("5"), max_notional=Decimal("9000000"), apply_min_to_market=True,
         apply_max_to_market=False),
+    # ETHUSDT: binance-spot.md §15 (2026-10-18, 공개 exchangeInfo) — PRICE_FILTER 0.01 (0.01~1,000,000), LOT_SIZE 0.0001
+    # (0.0001~9000), MARKET_LOT_SIZE minQty 0·stepSize 0, NOTIONAL minNotional 5·applyMinToMarket True (CP-041 D-270, T-070).
+    # §15에 기록이 없는 MARKET_LOT_SIZE maxQty·NOTIONAL maxNotional·applyMaxToMarket은 [미확인] → 비활성(0·None·False)으로 둔다
+    "ETHUSDT": SymbolRules(
+        instrument="ETHUSDT", tick_size=Decimal("0.01"), min_price=Decimal("0.01"), max_price=Decimal("1000000"),
+        lot_min_qty=Decimal("0.0001"), lot_max_qty=Decimal("9000"), lot_step=Decimal("0.0001"),
+        market_min_qty=Decimal("0"), market_max_qty=Decimal("0"), market_step=Decimal("0"),
+        min_notional=Decimal("5"), max_notional=None, apply_min_to_market=True, apply_max_to_market=False),
 }
-PAIRS: dict[str, tuple[str, str]] = {"BTCUSDT": ("BTC", "USDT")}
+PAIRS: dict[str, tuple[str, str]] = {"BTCUSDT": ("BTC", "USDT"), "ETHUSDT": ("ETH", "USDT")}
 QUOTE_PRECISION = Decimal("0.00000001")   # quoteAssetPrecision 8 (§12)
 KLINE_COLUMNS = ("open_time_utc", "open", "high", "low", "close", "volume", "close_time_utc")
 
@@ -130,7 +140,7 @@ def backtest_m2_main(argv: Sequence[str], root: Path) -> int:
     p.add_argument("--strategy", required=True, help="패키지.모듈:클래스")
     p.add_argument("--params", required=True, help="파라미터 파일 (저장소 기준)")
     p.add_argument("--data", required=True, help="바이낸스 공개 1d klines CSV 파일 (읽기만)")
-    p.add_argument("--symbol", default="BTCUSDT", help="심볼 (거래 규칙이 있는 심볼만: BTCUSDT)")
+    p.add_argument("--symbol", default="BTCUSDT", help="심볼 (거래 규칙이 있는 심볼만: BTCUSDT, ETHUSDT)")
     p.add_argument("--start", default=None, help="시작 UTC 날짜 (기본: 첫 봉)")
     p.add_argument("--end", required=True, help="끝 UTC 날짜 (final_from 전)")
     p.add_argument("--run-id", required=True)
@@ -153,7 +163,8 @@ def backtest_m2_main(argv: Sequence[str], root: Path) -> int:
         if ns.symbol not in TESTNET_RULES:
             raise ConfigError(f"거래 규칙이 없는 심볼: {ns.symbol}")
         rules, pairs = {ns.symbol: TESTNET_RULES[ns.symbol]}, {ns.symbol: PAIRS[ns.symbol]}
-        problems = spot_rule_problems([StrategyInput(strat, params, times)], rules, pairs)
+        # [CP-041 D-271 (1)(5)] 검사 범위 = 명세 유니버스 ∩ 거래 규칙 표 전체 (실행 심볼 하나로 좁히지 않는다)
+        problems = spot_rule_problems([StrategyInput(strat, params, times)], TESTNET_RULES, PAIRS)
         if problems:
             raise ConfigError([f"거래 규칙 검사: {x}" for x in problems])
         market = load_m2_market(root / ns.market_config)
@@ -228,7 +239,7 @@ def backtest_m2_minute_main(argv: Sequence[str], root: Path) -> int:
     p.add_argument("--strategy", required=True, help="패키지.모듈:클래스 (CAP-TRG-02 주기 판정 전략)")
     p.add_argument("--params", required=True, help="파라미터 파일 (저장소 기준 또는 절대 경로)")
     p.add_argument("--data", required=True, help="바이낸스 공개 1m klines CSV (A-110 형식, 읽기만)")
-    p.add_argument("--symbol", default="BTCUSDT", help="심볼 (거래 규칙이 있는 심볼만: BTCUSDT)")
+    p.add_argument("--symbol", default="BTCUSDT", help="심볼 (거래 규칙이 있는 심볼만: BTCUSDT, ETHUSDT)")
     p.add_argument("--start", default=None, help="시작 UTC 날짜 (--validate가 아니면 필수)")
     p.add_argument("--end", default=None, help="끝 UTC 날짜 (final_from 전, --validate가 아니면 필수)")
     p.add_argument("--run-id", required=True)
@@ -259,7 +270,8 @@ def backtest_m2_minute_main(argv: Sequence[str], root: Path) -> int:
         if ns.symbol not in TESTNET_RULES:
             raise ConfigError(f"거래 규칙이 없는 심볼: {ns.symbol}")
         rules, pairs = {ns.symbol: TESTNET_RULES[ns.symbol]}, {ns.symbol: PAIRS[ns.symbol]}
-        problems = spot_rule_problems([StrategyInput(strat, params, ())], rules, pairs)
+        # [CP-041 D-271 (1)(5)] 일봉 경로와 같은 검사 범위
+        problems = spot_rule_problems([StrategyInput(strat, params, ())], TESTNET_RULES, PAIRS)
         if problems:
             raise ConfigError([f"거래 규칙 검사: {x}" for x in problems])
         market = load_m2_market(root / ns.market_config)

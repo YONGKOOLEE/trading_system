@@ -293,24 +293,38 @@ def _spot_strategy_problems(strategies: list[StrategyInput], pairs: Mapping[str,
     return out
 
 
+LEGACY_RULES_MULTI_SYMBOL = "종목별 규칙 검사 불가 — validate_symbol_rules 필요 (CP-041 D-271)"
+
+
 def spot_rule_problems(strategies: list[StrategyInput], rules: Mapping[str, SymbolRules],
                        pairs: Mapping[str, tuple[str, str]]) -> list[str]:
-    """시작 시 전략 규칙 검사 (CP-036 D-209, B-8): 거래소 규칙 적재 뒤, 등록 전에 부른다. 전략이 validate_rules(params,
-    LOT_SIZE stepSize, minNotional)를 가지면 그 전략 유니버스(U-A, 없으면 전체 유니버스)의 심볼마다 부른다.
-    규칙이 없는 심볼은 불일치로 본다(불확실하면 시작하지 않음). 문제 목록이 비어 있지 않으면 호출자가 시작을 거부한다."""
+    """시작 시 전략 규칙 검사 (CP-036 D-209, B-8 → CP-041 D-270·D-271): 거래소 규칙 적재 뒤, 등록 전에 부른다.
+    범위 = 전략 명세 유니버스(U-A) ∩ 유니버스 `pairs`(U-A가 아니면 전체 유니버스) (D-271 (1)).
+    - validate_symbol_rules(params, symbol, SymbolRules)가 있으면 그것만, 범위 심볼마다 한 번 부른다 (D-270, D-271 (2)).
+    - 없고 기존 validate_rules(params, LOT_SIZE stepSize, minNotional)만 있으면 범위 심볼이 1개일 때만 기존대로 부른다.
+      2개 이상이면 종목별 검사를 할 수 없으므로 시작 거부 사유 (D-271 (3), F-3 — 서명에 종목이 없다).
+    - 둘 다 없으면 검사 없음 (D-271 (4), 판정 실행기의 수량 단위 검사는 그대로).
+    규칙이 없는 심볼은 불일치로 본다(불확실하면 시작하지 않음). 문구는 "<전략> <심볼>: <사유>". 문제 목록이 비어 있지 않으면
+    호출자가 시작을 거부한다(주문 0). M2 조립(main._run_m2)·M2 백테스트 CLI에서만 부른다 (D-280)."""
     out: list[str] = []
     for si in strategies:
-        check = getattr(si.strategy, "validate_rules", None)
-        if check is None:
+        per_symbol = getattr(si.strategy, "validate_symbol_rules", None)
+        legacy = getattr(si.strategy, "validate_rules", None)
+        if per_symbol is None and legacy is None:
             continue
         spec = si.strategy.spec
         symbols = sorted(set(spec.universe) & set(pairs)) if spec.universe_method == "U-A" else sorted(pairs)
+        if per_symbol is None and len(symbols) > 1:
+            out.append(f"{spec.owner} {', '.join(symbols)}: {LEGACY_RULES_MULTI_SYMBOL}")
+            continue
         for sym in symbols:
             r = rules.get(sym)
             if r is None:
                 out.append(f"{spec.owner} {sym}: 거래 규칙 없음")
                 continue
-            out.extend(f"{spec.owner} {sym}: {p}" for p in check(si.params, r.lot_step, r.min_notional))
+            found = per_symbol(si.params, sym, r) if per_symbol is not None else \
+                legacy(si.params, r.lot_step, r.min_notional)
+            out.extend(f"{spec.owner} {sym}: {p}" for p in found)
     return out
 
 

@@ -119,6 +119,42 @@ class RulesCheckedStrategy(FixedM2Strategy):
         return problems
 
 
+# [CP-041 D-270, T-070] 새 형식 시험 전략의 종목별 수량 단위 — 테스트넷 실측 LOT_SIZE stepSize(binance-spot.md §12 BTCUSDT
+# 2026-10-14, §15 ETHUSDT 2026-10-18). 가격·잔고 아님
+SYMBOL_STEPS = {"BTCUSDT": Decimal("0.00001"), "ETHUSDT": Decimal("0.0001")}
+
+
+def symbol_rules_spec() -> StrategySpec:
+    # 능력은 m2-verify와 같은 다섯 개(BACKTEST 등록 통과 — docs/capabilities.md M2 열)
+    return fixed_spec(strategy_id="t-m2symrules", universe=tuple(SYMBOL_STEPS),
+                      capabilities=("CAP-TRG-01", "CAP-DAT-01", "CAP-ORD-01", "CAP-ORD-02", "CAP-INS-05"), params=(
+        ParamSpec("qty", "decimal", "기초 자산", "진입 수량(소수)", Decimal("0.0001"), Decimal("100")),
+        ParamSpec("notional", "decimal", "USDT", "1회 매수 금액 (2 × minNotional 이상)", Decimal("1"),
+                  Decimal("100000"))))
+
+
+class SymbolRulesCheckedStrategy(FixedM2Strategy):
+    """CP-041 D-270 종목별 시작 규칙 검사 시험용 — validate_symbol_rules(params, symbol, rules)만 가진다(기존 형식 없음).
+    시스템이 범위 심볼마다 한 번 부른다. 수량 단위 표(SYMBOL_STEPS)·규칙 심볼 이름·minNotional을 대조한다."""
+
+    def __init__(self) -> None:
+        super().__init__(symbol_rules_spec())
+
+    @staticmethod
+    def validate_symbol_rules(params: ParamValues, symbol: str, rules: SymbolRules) -> list[str]:
+        step = SYMBOL_STEPS.get(symbol)
+        if step is None:
+            return [f"수량 단위 표에 없는 심볼 (표: {', '.join(SYMBOL_STEPS)})"]
+        problems = []
+        if rules.instrument != symbol:
+            problems.append(f"거래 규칙의 심볼 {rules.instrument}가 다름")
+        if rules.lot_step != step:
+            problems.append(f"수량 단위 {step} ≠ 거래소 LOT_SIZE stepSize {rules.lot_step}")
+        if Decimal(str(params["notional"])) < 2 * rules.min_notional:
+            problems.append(f"notional {params['notional']} < 2 × minNotional {rules.min_notional}")
+        return problems
+
+
 class ClockOk:
     def clock_ok(self) -> bool | None:
         return True
