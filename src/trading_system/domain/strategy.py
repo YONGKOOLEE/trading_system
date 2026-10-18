@@ -198,6 +198,12 @@ class InstrumentView:
     # 결측 집계 봉은 빼고(채우지 않음) 시작 시각 오름차순, 그 시작 시각은 agg_missing(오름차순)에. minute_ok False면 둘 다 ()
     agg_bars: tuple[Bar, ...] = ()
     agg_missing: tuple[datetime, ...] = ()
+    # [DP-82, A-126 ②] M2 일봉 판정 입력(domain/daily_input.m2_daily_input). daily_ok = 진입용 일봉 유효(빈 날 뒤 연속 구간이
+    # 어제까지) — False면 판정 실행기가 그 종목 신규 진입·증액을 버린다(전략에는 data_ok AND daily_ok로 보인다).
+    # daily_exit = 일봉이 불완전(빈 날·어제 봉 없음)할 때만 빈 날을 건너뛴 확정 봉 — 판정 실행기가 이 봉으로 전략을 한 번 더
+    # 불러 감액·청산 신호만 쓴다(전략에게는 None으로 지워 보인다). 기본값(True, None) = 종전 동작(M1·일봉 미사용 전략)
+    daily_ok: bool = True
+    daily_exit: tuple[Bar, ...] | None = None
 
 
 @dataclass(frozen=True)

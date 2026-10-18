@@ -46,8 +46,8 @@ STRUCTURAL_REASONS = ("보유 기간", "판정 주기", "유니버스 크기")  
 VERIFY_FAMILIES = ("paper0-verify", "m2-verify", "m2-paper0-verify")    # D-161 검증용 전략 (E-4)
 UNKNOWN_PAST = datetime(1970, 1, 1, tzinfo=UTC)   # 커밋 시각을 모르는 공식 판정표 → 선언보다 먼저 있었다고 본다(보수)
 NO_MINUTE_SAMPLE = "분봉 판정 전략인데 표본 심볼 1분봉 실행 결과 없음 (D-244 (7) — 일봉 근사로 대신하지 않음)"
-NO_SAMPLE_WIRING = ("LF-8 표본 실행 연결 전 — 1분봉 여러 심볼 실행기·표본 파일 배치는 T-068 뒤 (D-244 (7), "
-                    "표본 데이터 없음)")
+NO_SAMPLE_WIRING = ("LF-8 표본 1분봉 위치를 주지 않음(명령줄 --lf8-minute-dir, T-068 연결) — 표본 데이터 없음 "
+                    "(D-244 (7))")
 BOOTSTRAP_LIMITS = ("참고 표시(판정 제외, D-242): 거래 간 독립 가정(국면 의존 무시), 표본 n이 작음, "
                     "선택 편향(C-7·LF-0)을 반영하지 못함")
 _A_ID = re.compile(r"A-\d+")
@@ -684,6 +684,7 @@ class Lf8Sample:
     years: frozenset[int]              # 목록 해 (D-244 (2)(3))
     data_start: date
     data_end: date                     # 마지막 봉 날짜 — 전체 이력 끝 전이면 보유분 × 0.9 청산(D-244 (4))
+    daily: tuple | None = None         # [T-068] CAP-DAT-01 전략용 표본 심볼 확정 일봉(1d 파일) — 없으면 일봉 전략 표본 실행 거부
 
 
 @dataclass(frozen=True)

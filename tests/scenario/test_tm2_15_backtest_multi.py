@@ -56,7 +56,9 @@ CAPS = load_capabilities(ROOT / "docs" / "capabilities.md")
 # 보강 전(abbdda1) 판정 시각 1개 실행의 결과 지문·보고서 해시 (test_tm2_12 config 그대로)
 DIGEST_0015 = "41bf906b56a1c62df70cefbbd039d7be96230f95b6372e5fa55d6e7752fd7dc4"
 DIGEST_0100 = "0023181dfd521f82e2742d766df2a2c0c3cfd76f47950e195de3cccc78364db0"
-REPORT_0015 = "b3cff7534393bbdec9cff07ff043d331b6f40d15bd964b795890c1cf216e1aeb"
+# [T-068 개정] 보고서 해시만 바뀜: CP-040 D-265 (4)·V-334 "1분 데이터 없는 M2 백테스트는 'L4 장중 측정 불가 — K2 영향 과소'
+# 표시" 한 줄 추가(이전 값 b3cff753…). 결과 지문(DIGEST_*)은 그대로
+REPORT_0015 = "ae3a9a5a075eac62ca5114bbafe03e280088198ef5e315d6408a5123c3717eac"
 
 
 def btc_bars(rows: list[tuple[str, str]], start: date = date(2025, 3, 1)) -> list[Bar]:
@@ -173,7 +175,9 @@ def test_every_decision_sees_only_prior_days_and_open_as_price(tmp_path: Path) -
     s = Seen()
     run_backtest_m2(cfg(tmp_path, s, data, times=(time(1, 0), time(4, 0), time(23, 0)), params={}))
     opens = {b.at: b.open for b in data}
-    assert len(s.seen) == 9
+    # [T-068 DP-82 개정] 첫날은 확정 일봉이 없어 판정 입력이 불완전 → 판정 실행기가 진입용·청산용 두 번 부른다(A-126 ②).
+    # 판정 시각 수(9)와 "그날 이전 봉·그날 시가만 본다"는 시험 의도는 그대로 — 호출 수 대신 판정 시각 수를 센다
+    assert len({a for a, _, _ in s.seen}) == 9 and len(s.seen) == 12
     for as_of, last, price in s.seen:
         assert last is None or last == as_of.date() - timedelta(days=1)    # 그날 봉(진행 중)은 23:00에도 없음
         assert price == opens[as_of.date()]                                 # 판정 시세 = 그날 시가 (종가는 미래)

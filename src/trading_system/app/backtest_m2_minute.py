@@ -1,34 +1,52 @@
-"""M2 1분봉 백테스트·검증 실행기 (CP-037 D-221·D-222, T-053, 승인 A-113 Q-5). BACKTEST 전용 — 주문 경로·PAPER 코드 무변경.
+"""M2 1분봉 백테스트·검증 실행기 (CP-037 D-221·D-222, T-053, 승인 A-113 Q-5 / CP-040 T-068·CP-041 D-275~D-277, A-115·A-122).
+BACKTEST 전용 — 주문 경로·PAPER 코드 무변경.
 
 M2 일봉 실행기(app/backtest_m2 — 하루 여러 판정 일봉 근사)는 그대로 두고 1분봉용을 따로 둔다. 같은 전략·판정 실행기·게이트·
 실행기·정지 관리·체결 모델(SpotBacktestBroker)을 쓰고, 판정 일정·입력·체결 기준만 1분봉이다.
 
 - 데이터 (A-110 공개 실서버 1m CSV, 읽기만): 열 `open_time_utc,open,high,low,close,volume,close_time_utc,quote_volume,trades,
   taker_buy_base,taker_buy_quote`. **스트리밍**(iter_binance_minute_csv) — 4.8M 행을 메모리에 올리지 않는다. 실행 시작 −
-  lookback분 전 행은 시각 문자열 비교만으로 건너뛰고(해석 안 함), 끝(또는 최종 확인 구간 시작) 이후 행은 읽지 않는다.
+  창 길이 전 행은 시각 문자열 비교만으로 건너뛰고(해석 안 함), 끝(또는 최종 확인 구간 시작) 이후 행은 읽지 않는다.
   형식·품질(분 정렬·봉 끝 = 시작 + 59.999초·오름차순·중복 없음·가격 > 0·고저 관계·거래량 ≥ 0) 위반은 실행 거부(파일·줄만).
   결측 분은 채우지 않는다 — 판정 창 안이면 그 판정 분봉 입력 무효, 체결 봉이면 미체결(MISSING_BAR).
 - 판정 일정 = 실운영과 같은 주기 격자(PeriodGrid — UTC 00:00 + k×N분 + 확정 여유, 주문 창 00:10~23:50, N = 전략 파라미터
   period_minutes, D-219). 판정 ID = 전략·버전·M2·UTC 판정 시각(실운영과 같은 식).
 - 판정 입력 (D-220과 같은 규칙): 판정 직전 닫힌 봉(시작 + 60초 ≤ 판정 시각 − 여유)부터 lookback개, 모두 있어야 유효
   (minute_ok). CAP-DAT-02 선언 전략만 minute_bars를 받는다. 최근가 = 마지막 닫힌 봉 종가, 시세 시각 = 그 봉 끝(결측이 길면
-  늙은 시세 → 게이트 G11·지연 매도 규칙). 1d 봉은 넣지 않는다(daily_bars ()) [제안 — 분봉 전략 입력만].
+  늙은 시세 → 게이트 G11·지연 매도 규칙). 60분 판정이면 HH:00 직전 분 종가 = 1시간 봉 종가와 같은 값(D-277 (1)).
+  [T-068] 집계 봉 요청(agg_bar_minutes 등, minute_request_of)은 실운영과 같은 domain/minute_agg.check_agg_window로 계산하고,
+  흐름 열 선언이면 확장 열 결측 = 분봉 입력 무효(D-259·D-260, DP-88 (3)).
+- [CP-041 D-276] 확정 일봉: CAP-DAT-01 선언 전략만, 심볼별 1d 파일 봉을 실시간과 같은 함수 domain/daily_input.m2_daily_input
+  (확정 봉만, 최근 199개 = 실운영 1d 조회 limit 200 − 진행 중 봉)으로 넣는다(D-088). 결측일은 채우지 않고 DP-82 규칙
+  (진입·증액만 막고 감액·청산은 빈 날을 건너뛴 봉)으로 판정한다. 1분봉이 완전한 날은 1d 파일과 1분봉 일 집계를 비교해
+  일치 보고(판정에 쓰지 않음).
+- [CP-041 D-275] 여러 심볼 한 계좌: 판정 시각마다 스냅샷 하나에 모든 심볼(이름 정렬). 신호 처리 순서 = 판정 실행기 출력
+  순서(위험 축소 먼저, 그다음 종목코드 — 실운영 엔진과 같은 run_evaluation 결과 순서) → 게이트 순차(앞 신호 예약이 뒤 신호
+  검사에 반영). 체결 = 심볼별 다음 분 시가, 한 심볼 봉 결측은 그 심볼만 미체결, 봉 거래량 10% 상한 심볼별. 실행 기간을
+  모든 심볼 데이터가 덮어야 한다(첫날·마지막 날에 봉이 없는 심볼이 있으면 거부).
 - 체결 (D-221): 판정 시각 T가 속한 분에 시작하는 봉(= 격자 시각 봉)의 **시가** 기준. 매수 IOC 지정가 = 최근가 × (1 + 완충)
   tick 내림(시스템 규칙 apply_spot_terms, A-064), 체결가 = 시가 × (1 + 슬리피지) tick 올림이 지정가 이하일 때만. 매도 시장가 =
   시가 × (1 − 슬리피지) tick 내림. 봉 거래량 10% 상한(04 §2.2), 수수료 받는 자산에서 차감(BN §9), 수량 LOT_SIZE.
   그 봉이 결측이면 미체결(MISSING_BAR 기록). 판정은 주문 창 안에서만 나므로 창 밖 체결 없음.
-- 최종 확인 구간 보호 (CP-030 D-163): 실행 끝 날짜가 final_from(2026-01-01) 이후면 거부, 그 이후 행은 읽지도 않는다. M2에는
-  최종 확인 실행이 없다.
-- 일일: UTC 일 경계 첫 판정에서 기준 금액·K2 다음 날 재개(M1 DP-6과 같음), 일일 손실 L4는 판정마다 검사. 평가액은 날마다
-  마지막 닫힌 봉 종가. 연환산 365일.
+- [CP-040 D-262] 손절 감시(CAP-HLD-02 선언 전략만): 실운영 감시(app/stop_monitor)와 같은 1분 격자(주문 창 안 — 창 밖 20분은
+  실운영도 감시하지 않음, DP-89 (6))마다 소유 포지션의 직전 닫힌 1분 봉 종가 ≤ 손절가(domain/stop_watch)면 청산 요청 →
+  게이트 → 실행기. 체결 = 감지 다음 1분 봉 시가 × (1 − 슬리피지). 감지 봉 결측 = 판단 불가(청산 안 함), 체결 봉 결측 =
+  미체결 기록 뒤 다음 분 재판단. 손절 초과 손실(손절가 − 체결가) 분포를 보고한다.
+- [CP-040 D-265·CP-041 D-277] 일일 손실 L4: 매 1분 봉마다 보유를 그 분 **저가**로 평가(여러 심볼 합산, 그 분 봉이 없는
+  보유 심볼은 마지막 종가 + "평가 결측 분")해 L4 도달 → K2 발동, 다음 분부터 신규·증액 거부·감액·청산 허용. 판정 시점
+  검사(종가)도 그대로. K2 재개 = 다음 UTC 일 첫 분(낙관적 — 실제 사용자 재개는 늦을 수 있음). 같은 실행의 종가 기준
+  발동 일수를 참고로 센다.
+- 최종 확인 구간 보호 (CP-030 D-163): 실행 끝 날짜가 final_from(2026-01-01) 이후면 거부, 그 이후 행은 읽지도 않는다.
+  [DP-81, A-124 ④] 최종 확인 실행(run_minute_final_check)만 final_from 이후를 쓰고, 전략 버전당 1회(M1과 같은 장부).
+- 일일: UTC 일 경계에서 기준 금액·K2 재개(M1 DP-6과 같음). 평가액은 날마다 마지막 닫힌 봉 종가. 연환산 365일.
 - 재현성(D-074): 지문 = 신호·체결·평가액 해시. 룩어헤드 교란 검사(V-91): perturbation_check_minute — 판정 시각에 닫히지
-  않은 봉(체결 봉·이후 봉)을 바꾸거나 지워도 그 판정 신호가 같아야 한다(실행기와 같은 decision_points 사용).
+  않은 봉(체결 봉·이후 봉)과 그날 이후 1d 봉을 바꾸거나 지워도 그 판정 신호가 같아야 한다(실행기와 같은 decision_points 사용).
 - 검증 (D-222, A-113 Q-5): 학습 3년·검증 1년·1년 이동, 검증 2020~2025 6창. 데이터 시작(2017-08-17) 전 학습 구간은
-  "학습 단축" 표시, 창별 결측 봉 수, C-7(BTCUSDT 단일 심볼 사후 선택) "과대 추정 가능" 표시. 공개 실서버 성과는 테스트넷
+  "학습 단축" 표시, 창별 결측 봉 수(심볼별), C-7 사후 선택 "과대 추정 가능" 표시(심볼별). 공개 실서버 성과는 테스트넷
   PAPER 성과와 직접 비교하지 않는다(2-M2.6).
 - [CP-038 T-058] 저빈도 예외 경로(run_low_frequency_m2): 저빈도 선언 전략만(MinuteValidationInputs.low_frequency). 일반 판정
   뒤 적격(E-1~E-5)이면 전체 이력 실행·2배 슬리피지·변형·LF-8 표본 실행 → LF-0~LF-8(app/low_frequency) → D-234 문구.
-  선언이 없으면 결과 파일이 이전과 바이트 단위로 같다(V-313).
+  비용 요율은 일반 경로와 같은 체결 요율(taker, D-267 (3)).
 """
 
 from __future__ import annotations
@@ -36,8 +54,9 @@ from __future__ import annotations
 import hashlib
 import json
 import time as _time
+from bisect import bisect_right
 from collections import Counter, deque
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -47,21 +66,32 @@ from trading_system.app import low_frequency as lfm
 from trading_system.app.backtest import BacktestError, BacktestResult
 from trading_system.app.backtest_m2 import (
     ACCOUNT, _Account, _ClockOk, _Limits, _Market, _round_trips, _Rules, _Strategies, check_fee_model,
-    compute_metrics_m2, fee_model_lines, fee_model_summary, fill_rate_of, sellable,
+    compute_metrics_m2, fee_model_lines, fee_model_summary, fill_rate_of, final_bars, sellable,
 )
-from trading_system.app.validation import Window, check_final_guard, param_variants, walkforward_windows
+from trading_system.app.m2_minutes import MinuteRequest, minute_request_of
+from trading_system.app.validation import (
+    _LEDGER_APPROVAL, ValidationError, Window, check_final_guard, claim_final_check, param_variants,
+    walkforward_windows,
+)
 from trading_system.broker.fake.spot_fill_model import SpotBacktestBroker
 from trading_system.config.capabilities import CapabilityTable
 from trading_system.config.errors import ConfigError
 from trading_system.config.strategy_registry import StrategyRegistry
 from trading_system.domain.clock import FixedClock
-from trading_system.domain.enums import GateResult, HaltType, IntentState, Mode, Side
+from trading_system.domain.daily_input import DailyInput, m2_daily_input
+from trading_system.domain.enums import (
+    Check, GateResult, HaltType, IntentState, Mode, OrderType, RequestSource, RequestType, Side,
+)
 from trading_system.domain.fees import FeeModel
+from trading_system.domain.halts import HaltView, RequestView, halt_rejection
 from trading_system.domain.limits import AccountLimits
 from trading_system.domain.market import CashView, CostRates, DailyRisk, Quote
 from trading_system.domain.market_time import M2_TIME
+from trading_system.domain.minute_agg import AggStatus, check_agg_window
+from trading_system.domain.minute_bar import MinuteBar
 from trading_system.domain.minute_series import DEFAULT_CONFIRM_MARGIN, ONE_MINUTE, PeriodGrid
 from trading_system.domain.models import Account, GateRequest
+from trading_system.domain.stop_watch import STOP_CAPABILITY, STOP_RULE_ID, latest_stop_price, stop_idem_key, stop_triggered
 from trading_system.domain.strategy import Bar, EvaluationSnapshot, InstrumentView, PositionView, evaluation_id_of
 from trading_system.domain.trading_rules import SpotOrderPolicy, SymbolRules, apply_spot_terms
 from trading_system.evaluation.runner import run_evaluation
@@ -76,13 +106,18 @@ MINUTE_COLUMNS = ("open_time_utc", "open", "high", "low", "close", "volume", "cl
                   "taker_buy_base", "taker_buy_quote")
 FINAL_FROM_DEFAULT = date(2026, 1, 1)            # CP-030 D-163 (config/validation.toml final_from)
 MINUTE_CAPABILITY = "CAP-DAT-02"
+DAILY_CAPABILITY = "CAP-DAT-01"
 PERIOD_PARAM = "period_minutes"
 SLIPPAGE_BASE = Decimal("0.001")                 # CP-030 D-164 (2배 = 0.2%)
 MIN_TRADES = 100                                 # CP-030 D-167 C-2
-FIXED_PARAMS = frozenset({PERIOD_PARAM, "qty_step"})   # ±20% 변형 제외 — 일정 격자(1440 약수)·거래소 단위는 구조값 [제안]
+DAILY_LIVE_FINAL = 199                           # 실운영 1d 조회 limit 200(feed kline_limit) − 진행 중 봉 1 (D-276 (2)) [임시 판단]
+FIXED_PARAMS = frozenset({PERIOD_PARAM, "qty_step", "agg_bar_minutes", "agg_lookback_bars", "max_missing_bars"})
+# ±20% 변형 제외 — 일정 격자(1440 약수)·거래소 단위·집계 봉 규칙(15·60, 창·허용 결측 정수)은 구조값 [제안]
 _TS_LEN = len("2017-08-17T04:00:00.000Z")
 _CLOSE_OFFSET = timedelta(seconds=59, milliseconds=999)
 _ZERO = Decimal("0")
+_RISK_UP = (RequestType.ENTRY, RequestType.INCREASE)
+_Q6 = Decimal("0.000001")
 
 
 # --- 데이터 (스트리밍) --------------------------------------------------------------------------------------------
@@ -99,9 +134,10 @@ def _ts_key(at: datetime) -> str:
 
 
 def iter_binance_minute_csv(path: Path, start: datetime, stop: datetime, *, final_from: date = FINAL_FROM_DEFAULT,
-                            stats: MinuteReadStats | None = None) -> Iterator[Bar]:
+                            stats: MinuteReadStats | None = None, ext: bool = False) -> Iterator[Bar]:
     """A-110 공개 1m CSV → 1분봉(Bar.at = 봉 시작 UTC). start ≤ 봉 시작 < min(stop, final_from 00:00 UTC)만 해석해 넘긴다.
-    파일은 읽기만 한다. 형식·품질 위반은 ConfigError(파일 이름·줄 번호, 값 없음)."""
+    파일은 읽기만 한다. 형식·품질 위반은 ConfigError(파일 이름·줄 번호, 값 없음). ext면 확장 열(quote_volume·trades·
+    taker_buy_base·taker_buy_quote)도 해석한다(흐름 열 선언 전략, D-260 — 형식 오류인 확장 값은 None)."""
     limit = min(stop, datetime(final_from.year, final_from.month, final_from.day, tzinfo=UTC))
     start_key, stop_key = _ts_key(start), _ts_key(limit)
     st = stats if stats is not None else MinuteReadStats()
@@ -141,7 +177,24 @@ def iter_binance_minute_csv(path: Path, start: datetime, stop: datetime, *, fina
                 raise ConfigError(f"{name}:{i}: 1분봉 품질 실패 (0 이하 가격·고저 모순·음수 거래량)")
             prev = opened
             st.used += 1
-            yield Bar(opened.astimezone(UTC), o, h, lo, c, v)
+            if ext:
+                yield Bar(opened.astimezone(UTC), o, h, lo, c, v, *_ext_values(cols[7:11]))
+            else:
+                yield Bar(opened.astimezone(UTC), o, h, lo, c, v)
+
+
+def _ext_values(cols: Sequence[str]) -> tuple[Decimal | None, int | None, Decimal | None, Decimal | None]:
+    def dec(x: str) -> Decimal | None:
+        try:
+            d = Decimal(x)
+        except InvalidOperation:
+            return None
+        return d if d.is_finite() and d >= 0 else None
+    try:
+        trades: int | None = int(cols[1])
+    except ValueError:
+        trades = None
+    return dec(cols[0]), trades, dec(cols[2]), dec(cols[3])
 
 
 def first_minute_start(path: Path) -> date:
@@ -155,13 +208,29 @@ def first_minute_start(path: Path) -> date:
         raise ConfigError(f"{path.name}:2: open_time_utc 형식 오류") from None
 
 
+def last_minute_start(path: Path) -> date:
+    """파일 마지막 데이터 행의 봉 시작 UTC 날짜(여러 심볼 기간 검사·LF-8 표본 데이터 끝). 끝 부분만 읽는다."""
+    with path.open("rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        f.seek(max(0, size - 4096))
+        tail = f.read().decode("utf-8", errors="replace").splitlines()
+    rows = [x for x in tail if x[:4].isdigit()]
+    if not rows:
+        raise ConfigError(f"{path.name}: 마지막 데이터 행 없음")
+    try:
+        return datetime.fromisoformat(rows[-1].split(",")[0]).astimezone(UTC).date()
+    except ValueError:
+        raise ConfigError(f"{path.name}: 마지막 행 open_time_utc 형식 오류") from None
+
+
 # --- 판정 시점 (실행기·교란 검사 공용) -------------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class DecisionPoint:
     at: datetime                 # 판정 시각 = 격자 시각 + 확정 여유
     boundary: datetime           # 격자 시각 = 체결 봉의 시작
-    window: tuple[Bar, ...]      # minute_ok일 때만 lookback개(오름차순), 아니면 ()
+    window: tuple[Bar, ...]      # minute_ok일 때만 lookback개(오름차순), 아니면 () — window_at이 거짓인 시각도 ()
     minute_ok: bool
     last: Bar | None             # 판정 시각에 닫힌 가장 최근 봉 (최근가 = 종가)
     fill: Bar | None             # 체결 봉(격자 시각에 시작) — 결측이면 None
@@ -170,10 +239,14 @@ class DecisionPoint:
 
 def decision_points(bars: Iterable[Bar], grid: PeriodGrid, days: Sequence[date], lookback: int,
                     counter: list[int] | None = None,
-                    end_bar: list[Bar | None] | None = None) -> Iterator[DecisionPoint]:
+                    end_bar: list[Bar | None] | None = None, *,
+                    window_at: Callable[[datetime], bool] | None = None,
+                    on_bar: Callable[[Bar], None] | None = None) -> Iterator[DecisionPoint]:
     """판정 시각 순서로 (창·최근 봉·체결 봉). 창에는 판정 시각에 닫힌 봉(시작 ≤ 격자 시각 − 1분)만 들어간다 — 체결 봉과 그
     이후 봉은 판정 입력에 쓰이지 않는다(룩어헤드 차단). counter[0]에는 첫 판정 날짜 00:00 이후 들어온 봉 수를 센다.
-    end_bar[0]에는 마지막 날 끝(24:00) 전 마지막 봉을 남긴다(마지막 날 평가액 — 판정 입력 아님)."""
+    end_bar[0]에는 마지막 날 끝(24:00) 전 마지막 봉을 남긴다(마지막 날 평가액 — 판정 입력 아님).
+    window_at: 주면 그 시각에만 창 튜플을 만든다(1분 격자 손절 감시에서 매분 복사하지 않게 — minute_ok는 그대로 계산).
+    on_bar: 봉을 소비할 때마다(시각 순서) 부른다 — 매분 L4·손절 감지 봉·일 집계용(판정 입력 아님)."""
     window: deque[Bar] = deque(maxlen=lookback)
     last: Bar | None = None
     before_day: Bar | None = None
@@ -188,6 +261,8 @@ def decision_points(bars: Iterable[Bar], grid: PeriodGrid, days: Sequence[date],
             while nxt is not None and nxt.at < b:   # type: ignore[operator]
                 window.append(nxt)
                 last = nxt
+                if on_bar is not None:
+                    on_bar(nxt)
                 if nxt.at < midnight:   # type: ignore[operator]
                     before_day = nxt
                 if counter is not None and since is not None and nxt.at >= since:  # type: ignore[operator]
@@ -195,12 +270,15 @@ def decision_points(bars: Iterable[Bar], grid: PeriodGrid, days: Sequence[date],
                 nxt = next(it, None)
             ok = len(window) == lookback and window[-1].at == b - ONE_MINUTE and window[0].at == b - span
             fill = nxt if nxt is not None and nxt.at == b else None
-            yield DecisionPoint(at, b, tuple(window) if ok else (), ok, last, fill, before_day)
+            keep = ok and (window_at is None or window_at(at))
+            yield DecisionPoint(at, b, tuple(window) if keep else (), ok, last, fill, before_day)
     if days and (counter is not None or end_bar is not None):   # 마지막 판정 뒤 같은 날 봉: 결측 집계·마지막 날 평가액
         end = datetime(days[-1].year, days[-1].month, days[-1].day, tzinfo=UTC) + timedelta(days=1)
         while nxt is not None and nxt.at < end:   # type: ignore[operator]
             if counter is not None and since is not None and nxt.at >= since:   # type: ignore[operator]
                 counter[0] += 1
+            if on_bar is not None:
+                on_bar(nxt)
             last = nxt
             nxt = next(it, None)
     if end_bar is not None:
@@ -240,18 +318,29 @@ class MinuteBacktestConfig:
     data_source: str = ""
     code_commit: str = ""
     fees: FeeModel | None = None            # 수수료 모델(CP-040 D-267) — 체결 taker, 추정 max. None = 기존 단일 요율
+    sources: Mapping[str, MinuteSource] | None = None   # [D-275] 여러 심볼(한 계좌). 주면 symbol·source 대신 이것
+    daily: Mapping[str, tuple[Bar, ...]] | None = None  # [D-276] 심볼별 1d 파일 봉(CAP-DAT-01 전략 입력·일치 보고)
+    daily_limit: int = DAILY_LIVE_FINAL     # [D-276 (2)] 판정에 넣는 확정 일봉 최대 개수
+    final_check: bool = False               # [DP-81] 최종 확인 실행(run_minute_final_check만 True로)
 
     @property
     def fill_rate(self) -> Decimal:
         return fill_rate_of(self.fees, self.cost_rates)
+
+    @property
+    def symbols(self) -> tuple[str, ...]:
+        return tuple(sorted(self.sources)) if self.sources else (self.symbol,)
+
+    def source_of(self, sym: str) -> MinuteSource:
+        return self.sources[sym] if self.sources else self.source
 
 
 @dataclass
 class MinuteBacktestResult:
     result: BacktestResult
     decisions: int = 0
-    minute_invalid: int = 0         # 분봉 입력 무효 판정 수 (CAP-DAT-02 전략)
-    missing_bars: int = 0           # 실행 기간 안 결측 분 수
+    minute_invalid: int = 0         # 분봉 입력 무효 판정 수 (CAP-DAT-02 전략, 심볼 합)
+    missing_bars: int = 0           # 실행 기간 안 결측 분 수 (심볼 합)
     bars_in_period: int = 0
     missing_fill: int = 0           # 체결 봉 결측으로 미체결 처리한 주문 수
     first_open: Decimal | None = None
@@ -262,6 +351,11 @@ class MinuteBacktestResult:
     trade_records: list = field(default_factory=list)
     open_lots: dict = field(default_factory=dict)
     end_close: Decimal | None = None
+    # [T-068] 보고서 칸 (지문에 넣지 않음)
+    k2: dict = field(default_factory=dict)          # 장중 L4·K2 통계 (D-265·D-277)
+    stop: dict = field(default_factory=dict)        # 손절 감시 통계·초과 손실 분포 (D-262)
+    by_symbol: dict = field(default_factory=dict)   # 심볼별 거래·손익·결측 (D-275 (7))
+    daily_check: dict | None = None                 # 1d 파일 vs 1분봉 일 집계 일치 보고 (D-276 (5)), 1d 없으면 None
 
 
 def grid_of(cfg: MinuteBacktestConfig) -> PeriodGrid:
@@ -274,18 +368,41 @@ def grid_of(cfg: MinuteBacktestConfig) -> PeriodGrid:
         raise BacktestError(f"period_minutes {n}: {exc}") from None
 
 
+def minute_request(cfg: MinuteBacktestConfig) -> MinuteRequest:
+    """CAP-DAT-02 전략의 분봉 입력 요청(집계 봉·흐름 열) — 실운영과 같은 minute_request_of (D-259·D-260)."""
+    if MINUTE_CAPABILITY not in cfg.strategy.spec.capabilities:
+        return MinuteRequest()
+    try:
+        return minute_request_of(cfg.params)
+    except ValueError as exc:
+        raise BacktestError(f"분봉 입력 파라미터: {exc}") from None
+
+
+def _warm_minutes(cfg: MinuteBacktestConfig, req: MinuteRequest) -> int:
+    agg = (req.agg_minutes or 0) * req.agg_lookback
+    return max(cfg.lookback_bars, agg + (req.agg_minutes or 0))
+
+
 def _days(cfg: MinuteBacktestConfig) -> list[date]:
     if not isinstance(cfg.slippage, Decimal) or not cfg.slippage.is_finite() or not _ZERO <= cfg.slippage < 1:
         raise BacktestError("슬리피지는 0 이상 1 미만의 Decimal (CP-030 D-164 기본 0.001)")
     check_fee_model(cfg.fees, cfg.cost_rates)
-    if cfg.symbol not in cfg.rules or cfg.symbol not in cfg.pairs:
-        raise BacktestError(f"규칙·자산 쌍 없는 심볼: {cfg.symbol}")
+    for sym in cfg.symbols:
+        if sym not in cfg.rules or sym not in cfg.pairs:
+            raise BacktestError(f"규칙·자산 쌍 없는 심볼: {sym}")
     if not 1 <= cfg.lookback_bars <= 997:
         raise BacktestError("lookback_bars는 1~997 (설정 [minute]와 같은 범위)")
     if cfg.end < cfg.start:
         raise BacktestError("구간에 날짜가 없음")
-    if cfg.end >= cfg.final_from:
-        raise BacktestError(f"실행 날짜가 최종 확인 구간({cfg.final_from} 이후)과 겹침 — M2 최종 확인 실행 없음 (D-163)")
+    if cfg.final_check:
+        if cfg.start < cfg.final_from:
+            raise BacktestError(f"최종 확인 실행은 최종 확인 구간({cfg.final_from} 이후)만 쓴다 (D-163)")
+    elif cfg.end >= cfg.final_from:
+        raise BacktestError(f"실행 날짜가 최종 확인 구간({cfg.final_from} 이후)과 겹침 — 최종 확인 실행(--final-check)으로만 "
+                            "(D-163, DP-81)")
+    if DAILY_CAPABILITY in cfg.strategy.spec.capabilities and (
+            cfg.daily is None or any(s not in cfg.daily for s in cfg.symbols)):
+        raise BacktestError("CAP-DAT-01(일봉) 선언 전략은 심볼마다 확정 일봉 입력(1d 파일, --daily)이 필요 (CP-041 D-276)")
     return [cfg.start + timedelta(days=k) for k in range((cfg.end - cfg.start).days + 1)]
 
 
@@ -293,16 +410,134 @@ def _midnight(d: date) -> datetime:
     return datetime(d.year, d.month, d.day, tzinfo=UTC)
 
 
+def _minute_bar(sym: str, b: Bar) -> MinuteBar:
+    return MinuteBar(sym, 1, b.at, b.open, b.high, b.low, b.close, b.volume,  # type: ignore[arg-type]
+                     quote_volume=b.quote_volume, trades=b.trades, taker_buy_base=b.taker_buy_base,
+                     taker_buy_quote=b.taker_buy_quote)
+
+
+def _has_ext(b: Bar) -> bool:
+    return None not in (b.quote_volume, b.trades, b.taker_buy_base, b.taker_buy_quote)
+
+
+@dataclass(frozen=True)
+class _MinuteView:
+    bars: tuple[Bar, ...]
+    ok: bool
+    agg_bars: tuple[Bar, ...] = ()
+    agg_missing: tuple[datetime, ...] = ()
+
+
+def _minute_view(req: MinuteRequest, dp: DecisionPoint, agg_hist: Iterable[MinuteBar], margin: timedelta) -> _MinuteView:
+    """실운영 M2MinuteInput._one·_agg와 같은 판단: 1분 창 무효 → 무효, 흐름 열 선언이면 확장 열 결측 → 무효(EXT_MISSING),
+    집계 봉 요청이면 check_agg_window(같은 함수) — OK가 아니면 그 심볼 분봉 입력 전체 무효(DP-88 (3))."""
+    if not dp.minute_ok:
+        return _MinuteView((), False)
+    if req.flow and not all(_has_ext(b) for b in dp.window):
+        return _MinuteView((), False)
+    if req.agg_minutes is None:
+        return _MinuteView(dp.window, True)
+    w = check_agg_window(agg_hist, dp.at, req.agg_minutes, req.agg_lookback, req.max_missing, margin, flow=req.flow)
+    if w.status is not AggStatus.OK:
+        return _MinuteView((), False)
+    return _MinuteView(dp.window, True, w.bars, w.missing)
+
+
+class _DailyFeed:
+    """심볼별 1d 봉 → 판정 시각의 판정 입력(m2_daily_input, 실시간과 같은 함수). 같은 날짜는 같은 결과라 날짜별로 기억한다.
+    후보는 판정 날짜 이하 봉 가운데 최근 limit + 1개(진행 중 봉 1개 포함)로 잘라 넘긴다 — 확정·개수 판단은 공용 함수가 한다."""
+
+    def __init__(self, daily: Mapping[str, tuple[Bar, ...]], limit: int) -> None:
+        self._bars = {s: tuple(sorted(bs, key=lambda b: b.at)) for s, bs in daily.items()}   # type: ignore[arg-type, return-value]
+        self._dates = {s: [b.at for b in bs] for s, bs in self._bars.items()}
+        self._limit = limit
+        self._cache: dict[tuple[str, date], DailyInput] = {}
+
+    def at(self, sym: str, at: datetime) -> DailyInput:
+        key = (sym, at.astimezone(UTC).date())
+        hit = self._cache.get(key)
+        if hit is None:
+            k = bisect_right(self._dates[sym], key[1])   # type: ignore[arg-type]
+            cands = self._bars[sym][max(0, k - self._limit - 1):k]
+            hit = self._cache[key] = m2_daily_input(cands, at, final_bars, max_bars=self._limit)
+        return hit
+
+
+def _daily_view(feed: _DailyFeed | None, sym: str, at: datetime) -> dict:
+    if feed is None:
+        return {}
+    di = feed.at(sym, at)
+    return {"daily_bars": di.bars, "daily_ok": di.ok, "daily_exit": di.daily_exit}
+
+
 # --- 실행기 ------------------------------------------------------------------------------------------------------
+
+class _DayCheck:
+    """[D-276 (5)] 1분봉 일 집계(시가 첫 분·고가 최대·저가 최소·종가 마지막 분·거래량 합 — D-259와 같은 식) vs 1d 파일."""
+
+    def __init__(self, daily: Mapping[str, tuple[Bar, ...]], syms: Sequence[str], days: Sequence[date]) -> None:
+        self.ref = {s: {b.at: b for b in daily.get(s, ())} for s in syms}
+        self.days = set(days)
+        self.cur: dict[str, tuple[date, list[Bar]]] = {}
+        self.stats = {s: {"compared": 0, "mismatch": 0, "minute_incomplete": 0, "no_daily": 0, "max_price_diff": "0",
+                          "max_volume_diff": "0", "mismatch_days": []} for s in syms}
+        self.seen: dict[str, set[date]] = {s: set() for s in syms}
+
+    def add(self, sym: str, b: Bar) -> None:
+        d = b.at.date()   # type: ignore[union-attr]
+        cur = self.cur.get(sym)
+        if cur is None or cur[0] != d:
+            if cur is not None:
+                self._close(sym, *cur)
+            self.cur[sym] = (d, [b])
+        else:
+            cur[1].append(b)
+
+    def _close(self, sym: str, d: date, bars: list[Bar]) -> None:
+        if d not in self.days:
+            return
+        self.seen[sym].add(d)
+        st = self.stats[sym]
+        if len(bars) != 1440:
+            st["minute_incomplete"] += 1
+            return
+        ref = self.ref[sym].get(d)
+        if ref is None:
+            st["no_daily"] += 1
+            return
+        st["compared"] += 1
+        agg = (bars[0].open, max(b.high for b in bars), min(b.low for b in bars), bars[-1].close)
+        price = max(abs(x - y) for x, y in zip(agg, (ref.open, ref.high, ref.low, ref.close), strict=True))
+        vol = abs(sum((b.volume for b in bars), _ZERO) - ref.volume)
+        if price or vol:
+            st["mismatch"] += 1
+            if len(st["mismatch_days"]) < 20:
+                st["mismatch_days"].append(d.isoformat())
+        st["max_price_diff"] = str(max(Decimal(st["max_price_diff"]), price))
+        st["max_volume_diff"] = str(max(Decimal(st["max_volume_diff"]), vol))
+
+    def finish(self) -> dict:
+        for sym, cur in list(self.cur.items()):
+            self._close(sym, *cur)
+        for sym, st in self.stats.items():
+            st["minute_incomplete"] += len(self.days - self.seen[sym])   # 1분봉이 하나도 없는 날도 비교 불가
+        return self.stats
+
 
 def run_minute_backtest(cfg: MinuteBacktestConfig) -> MinuteBacktestResult:
     t0 = _time.perf_counter()
     grid = grid_of(cfg)
     days = _days(cfg)
+    req = minute_request(cfg)
     spec = cfg.strategy.spec
-    sym = cfg.symbol
-    rules = cfg.rules[sym]
+    syms = cfg.symbols
+    multi = len(syms) > 1
     minute_declared = MINUTE_CAPABILITY in spec.capabilities
+    daily_feed = _DailyFeed(cfg.daily, cfg.daily_limit) \
+        if DAILY_CAPABILITY in spec.capabilities and cfg.daily is not None else None
+    stop_active = STOP_CAPABILITY in spec.capabilities
+    point_grid = PeriodGrid(1, cfg.margin) if stop_active else grid
+    period = timedelta(minutes=grid.period_minutes)
     run_dir = cfg.out_dir / cfg.run_id
     if (run_dir / "trading.db").exists():
         raise BacktestError(f"같은 실행 ID의 DB가 이미 있음: {run_dir}")
@@ -324,14 +559,15 @@ def run_minute_backtest(cfg: MinuteBacktestConfig) -> MinuteBacktestResult:
         if not reg.ok:
             repo.close()
             raise BacktestError(f"전략 등록 거부: {'; '.join(reg.problems)}")
-    gate = Gate(repo, clock, GateInputs(_Limits(cfg.account_limits), market, acct,
-                                        registry if registry is not None else _Strategies(), _ClockOk(),
+    strategies = registry if registry is not None else _Strategies()
+    gate = Gate(repo, clock, GateInputs(_Limits(cfg.account_limits), market, acct, strategies, _ClockOk(),
                                         spot_rules=_Rules(cfg, market)), policy)  # type: ignore[arg-type]
     halts = HaltManager(repo, gate, executor, clock, reference_time_of=lambda a: cfg.account_limits.daily_reference_time,
                         market_time=M2_TIME)
     if registry is not None:
         registry.attach_halts(halts)
-    lots = {sym: rules.lot_step}
+    lots = {s: cfg.rules[s].lot_step for s in syms}
+    l4 = cfg.account_limits.l4_daily_loss_ratio
 
     out = MinuteBacktestResult(result=None)  # type: ignore[arg-type]
     cash, costs = cfg.initial_cash, _ZERO
@@ -341,18 +577,38 @@ def run_minute_backtest(cfg: MinuteBacktestConfig) -> MinuteBacktestResult:
     fills_log: list[tuple[date, str, str, str, str, str]] = []
     by_eval: dict[str, list[tuple]] = {}
     seen = k2_resumes = 0
-    cur_day: date | None = None
-    k2_day: date | None = None
-    base = _ZERO
-    last_close: Decimal | None = None
+    st: dict = {"cur_day": None, "base": _ZERO, "k2_day": None, "close_day": None}
+    last_close: dict[str, Decimal] = {}          # 처리한(닫힌) 봉의 마지막 종가 — 평가·기준 금액
+    eval_close: dict[str, Decimal] = {}          # 마지막 판정 시점 종가 (단순 보유 참고 C-5 — 종전 의미)
+    first_open: dict[str, Decimal] = {}
+    held: dict[str, Decimal] = {s: _ZERO for s in syms}
+    avg: dict[str, Decimal] = {s: _ZERO for s in syms}
     dirty = True
-    held = avg = _ZERO
-    pv: PositionView | None = None
-    pending = False
-    reserved = _ZERO
+    k2 = {"days": 0, "times": [], "hours": {}, "rejected_entries": {}, "close_days": 0, "eval_missing_minutes": 0,
+          "measured": True}
+    stop = {"active": stop_active, "triggers": 0, "requests": 0, "fills": 0, "unfilled": 0, "not_judged": 0,
+            "skipped": 0, "no_stop_price": 0, "excess": []}
+    buffer: list[tuple[datetime, str, Bar]] = []
+    # 집계 봉 창 + 정렬 여유(판정 격자가 집계 길이에 맞지 않아도 첫 집계 봉 구성 분이 남게) — 집계 길이 × (창 + 1)
+    agg_hist: dict[str, deque[MinuteBar]] = {s: deque(maxlen=(req.agg_minutes or 0) * (req.agg_lookback + 1) or 1)
+                                             for s in syms}
+    first_day_seen: set[str] = set()
+    last_day_seen: set[str] = set()
+    last_day_start = _midnight(days[-1])
+    first_day_end = _midnight(days[0]) + timedelta(days=1)
+    day_check = _DayCheck(cfg.daily, syms, days) if cfg.daily is not None else None
 
-    def absorb(day: date) -> None:
+    def refresh() -> None:
+        nonlocal dirty
+        if dirty:
+            for s in syms:
+                pos = repo.position(ACCOUNT, s)
+                held[s], avg[s] = pos.quantity, pos.avg_price
+            dirty = False
+
+    def absorb(day: date) -> list[tuple[date, str, str, str, str, str]]:
         nonlocal seen, cash, costs
+        new = []
         for f in broker.fills_for(ACCOUNT)[seen:]:
             seen += 1
             if f.side == "BUY":
@@ -361,95 +617,255 @@ def run_minute_backtest(cfg: MinuteBacktestConfig) -> MinuteBacktestResult:
             else:
                 cash += f.quote_qty - f.commission
                 costs += f.commission
-            fills_log.append((day, f.order_no, f.instrument, f.side, str(f.quantity), str(f.price)))
+            row = (day, f.order_no, f.instrument, f.side, str(f.quantity), str(f.price))
+            fills_log.append(row)
+            new.append(row)
+        return new
 
-    warm = _midnight(days[0]) - ONE_MINUTE * cfg.lookback_bars
-    stop = _midnight(days[-1]) + timedelta(days=1)
-    counter = [0]
-    end_bar: list[Bar | None] = [None]
-    for dp in decision_points(cfg.source(warm, stop), grid, days, cfg.lookback_bars, counter, end_bar):
-        day = dp.at.date()
-        clock._now = dp.at  # noqa: SLF001
-        prev_last = last_close
-        if dp.last is not None:
-            last_close = dp.last.close
-        if dirty:
-            pos = repo.position(ACCOUNT, sym)
-            held, avg = pos.quantity, pos.avg_price
-            own = repo.active_ownership(ACCOUNT, sym)
-            q = sellable(held, rules)
-            pv = PositionView(q, avg, 0, own is not None and own.owner == spec.owner) if q > 0 else None
-            pending = bool(repo.active_new_intents(ACCOUNT, sym, Side.BUY.value)
-                           or repo.active_new_intents(ACCOUNT, sym, Side.SELL.value))
-            reserved = sum((r.cash_remaining for r in repo.active_reservations(ACCOUNT)), _ZERO)
-            dirty = False
-        mark = held * (last_close if last_close is not None else avg)
-        if day != cur_day:   # UTC 일 경계 첫 판정: 전날 평가액·K2 다음 날 재개·기준 금액 — 모두 UTC 00:00 전 마지막 봉 종가
-            px0 = dp.prev_close.close if dp.prev_close is not None else prev_last
-            mark0 = held * (px0 if px0 is not None else avg)   # 판정 사이에는 체결이 없어 보유·현금은 전날 끝과 같다
-            if cur_day is not None:
-                equity.append((cur_day, cash + mark0))
-            cur_day = day
-            if HaltType.K2.value in repo.active_halts(ACCOUNT):
-                if halts.resume(HaltType.K2, ACCOUNT, Channel.LOCAL, "backtest").ok:
-                    k2_resumes += 1
-            base = cash + mark0
-            if base <= 0:
-                repo.close()
-                raise BacktestError(f"{day} 기준 금액 0 이하")
-        quote = None if dp.last is None else Quote(sym, dp.last.close, min(dp.last.at + ONE_MINUTE, dp.at))  # type: ignore[operator]
-        market.quotes = {sym: quote} if quote is not None else {}
-        acct.daily = DailyRisk(base, _ZERO, cash + mark - base, _ZERO)
-        acct.cash_view = CashView(cash, cash - reserved)
-        if k2_day != day and halts.check_daily_loss(ACCOUNT, acct.daily,
-                                                     cfg.account_limits.l4_daily_loss_ratio) is not None:
-            k2_day, dirty = day, True   # 같은 날 다시 발동해도 같은 정지(중복 없음) — 그날은 더 검사하지 않는다
-        if out.first_open is None and dp.fill is not None:
-            out.first_open = dp.fill.open
-        minute_ok = dp.minute_ok if minute_declared else True
-        out.decisions += 1
-        out.minute_invalid += 0 if minute_ok else 1
-        view = InstrumentView(sym, minute_bars=dp.window if minute_declared else (),
-                              last_price=quote.price if quote is not None else None, position=pv,
-                              has_pending_order=pending, data_ok=quote is not None, minute_ok=minute_ok)
-        ev_id = evaluation_id_of(spec.strategy_id, spec.version, "M2", dp.at.isoformat())
-        snap = EvaluationSnapshot(ev_id, "M2", ACCOUNT, dp.at, base, (view,), next_evaluation_at=grid.next_after(dp.at))
-        res = run_evaluation(cfg.strategy, snap, cfg.params, lots)
-        if not res.signals:
-            continue
-        by_eval[dp.at.isoformat()] = [(s.signal_id, s.kind.value, s.instrument, str(s.quantity), str(s.price))
-                                      for s in res.signals]
-        submitted = 0
-        for s in res.signals:
-            signals.append(s.signal_id)
-            req = apply_spot_terms(GateRequest.from_signal(s), quote, dp.at, rules, order_policy)
-            if req is None:
-                rejects["TERMS"] += 1
+    def mark(px: Mapping[str, Decimal], fallback_avg: bool = True) -> Decimal:
+        return sum((held[s] * (px.get(s, avg[s] if fallback_avg else _ZERO)) for s in syms if held[s]), _ZERO)
+
+    def k2_note(at: datetime) -> None:
+        k2["days"] += 1
+        k2["times"].append(at.isoformat())
+        h = f"{at.hour:02d}"
+        k2["hours"][h] = k2["hours"].get(h, 0) + 1
+
+    def rollover(day: date) -> None:
+        """UTC 일 경계: 전날 평가액·K2 다음 날 재개·기준 금액 — 모두 UTC 00:00 전 마지막 봉 종가(판정 사이에는 체결이 없어
+        보유·현금은 전날 끝과 같다)."""
+        nonlocal k2_resumes
+        refresh()
+        mark0 = cash + mark(last_close)
+        if st["cur_day"] is not None:
+            equity.append((st["cur_day"], mark0))
+        st["cur_day"] = day
+        clock._now = _midnight(day)  # noqa: SLF001
+        if HaltType.K2.value in repo.active_halts(ACCOUNT):
+            if halts.resume(HaltType.K2, ACCOUNT, Channel.LOCAL, "backtest").ok:
+                k2_resumes += 1
+        st["base"] = mark0
+        if mark0 <= 0:
+            repo.close()
+            raise BacktestError(f"{day} 기준 금액 0 이하")
+
+    def advance(day: date) -> None:
+        if st["cur_day"] is None:
+            rollover(days[0])
+        while st["cur_day"] < day:
+            rollover(st["cur_day"] + timedelta(days=1))
+
+    def minute_l4(m: datetime, group: dict[str, Bar]) -> None:
+        """[D-265·D-277] 그 분 저가로 보유 평가 → L4 도달이면 K2(다음 분부터 신규 거부). 같은 실행의 종가 기준도 센다."""
+        refresh()
+        if not any(held.values()):
+            return
+        low = close = cash
+        for s in syms:
+            q = held[s]
+            if not q:
                 continue
-            decision = gate.decide(req)
-            if decision.result is GateResult.APPROVED and decision.approved is not None:
-                executor.submit(decision.approved)
-                submitted += 1
+            b = group.get(s)
+            if b is None:
+                k2["eval_missing_minutes"] += 1
+                px = last_close.get(s, avg[s])
+                low += q * px
+                close += q * px
             else:
-                rejects[str(decision.failed_check)] += 1
+                low += q * b.low
+                close += q * b.close
+        base = st["base"]
+        day = st["cur_day"]
+        if st["close_day"] != day and (base - close) / base >= l4:
+            st["close_day"] = day
+            k2["close_days"] += 1
+        if st["k2_day"] != day and (base - low) / base >= l4:
+            clock._now = m + ONE_MINUTE + cfg.margin  # noqa: SLF001
+            if halts.check_daily_loss(ACCOUNT, DailyRisk(base, _ZERO, low - base, _ZERO), l4) is not None:
+                st["k2_day"] = day
+                k2_note(m)
+
+    def drain() -> None:
+        """소비한 봉을 분 순서로 처리: 일 경계·매분 L4·마지막 종가·일 집계."""
+        if not buffer:
+            return
+        buffer.sort(key=lambda x: (x[0], x[1]))
+        i = 0
+        while i < len(buffer):
+            m = buffer[i][0]
+            group: dict[str, Bar] = {}
+            while i < len(buffer) and buffer[i][0] == m:
+                group[buffer[i][1]] = buffer[i][2]
+                i += 1
+            if m >= _midnight(days[0]):
+                advance(m.date())
+                minute_l4(m, group)
+            for s, b in group.items():
+                last_close[s] = b.close
+                if day_check is not None:
+                    day_check.add(s, b)
+                if m < first_day_end and m >= _midnight(days[0]):
+                    first_day_seen.add(s)
+                if m >= last_day_start:
+                    last_day_seen.add(s)
+        buffer.clear()
+
+    def on_bar_of(sym: str) -> Callable[[Bar], None]:
+        hist = agg_hist[sym]
+        want_agg = req.agg_minutes is not None
+
+        def f(b: Bar) -> None:
+            buffer.append((b.at, sym, b))   # type: ignore[arg-type]
+            if want_agg:
+                hist.append(_minute_bar(sym, b))
+        return f
+
+    def is_eval(at: datetime) -> bool:
+        b = at - cfg.margin
+        return (b - _midnight(b.date())) % period == timedelta(0)
+
+    warm = _midnight(days[0]) - ONE_MINUTE * _warm_minutes(cfg, req)
+    stop_at = _midnight(days[-1]) + timedelta(days=1)
+    counters = {s: [0] for s in syms}
+    end_bars: dict[str, list[Bar | None]] = {s: [None] for s in syms}
+    gens = [decision_points(cfg.source_of(s)(warm, stop_at), point_grid, days, cfg.lookback_bars, counters[s],
+                            end_bars[s], window_at=is_eval, on_bar=on_bar_of(s)) for s in syms]
+    for dps_t in zip(*gens, strict=True):
+        dps = dict(zip(syms, dps_t, strict=True))
+        at = dps_t[0].at
+        day = at.date()
+        drain()
+        advance(day)
+        clock._now = at  # noqa: SLF001
+        refresh()
+        evaluate = is_eval(at)
+        quotes: dict[str, Quote] = {}
+        for s, dp in dps.items():
+            if dp.last is not None:
+                quotes[s] = Quote(s, dp.last.close, min(dp.last.at + ONE_MINUTE, at))  # type: ignore[operator]
+                if evaluate:
+                    eval_close[s] = dp.last.close
+        market.quotes = quotes
+        if not evaluate and not any(held.values()):
+            continue   # 손절 감시 1분 격자의 무보유 분: 할 일 없음 (매분 L4는 봉 처리에서 이미 했다)
+        acct.daily = DailyRisk(st["base"], _ZERO, cash + mark(last_close) - st["base"], _ZERO)
+        reserved = sum((r.cash_remaining for r in repo.active_reservations(ACCOUNT)), _ZERO)
+        acct.cash_view = CashView(cash, cash - reserved)
+        if evaluate and st["k2_day"] != day and halts.check_daily_loss(ACCOUNT, acct.daily, l4) is not None:
+            st["k2_day"], dirty = day, True   # 같은 날 다시 발동해도 같은 정지(중복 없음) — 그날은 더 검사하지 않는다
+            k2_note(at)
+        submitted: Counter = Counter()
+        stop_intents: list[tuple[str, str, Decimal, datetime]] = []
+        if stop_active:
+            for s in syms:
+                if not held[s]:
+                    continue
+                made = _stop_request(repo, strategies, spec.owner, s, dps[s], at, cfg.rules[s], quotes.get(s),
+                                     order_policy, stop)
+                if made is None:
+                    continue
+                r, stp = made
+                stop["requests"] += 1
+                if r is None:
+                    rejects["TERMS"] += 1
+                    stop["unfilled"] += 1
+                    continue
+                d = gate.decide(r)
+                if d.result is GateResult.APPROVED and d.approved is not None:
+                    executor.submit(d.approved)
+                    submitted[s] += 1
+                    stop_intents.append((d.approved.intent_id, s, stp, dps[s].boundary))
+                else:
+                    rejects[str(d.failed_check)] += 1
+                    stop["unfilled"] += 1
+            if submitted:
+                dirty = True
+        if evaluate:
+            for s, dp in dps.items():
+                if dp.fill is not None and s not in first_open:
+                    first_open[s] = dp.fill.open
+            out.decisions += 1
+            views = []
+            for s in syms:
+                dp = dps[s]
+                pos = repo.position(ACCOUNT, s)
+                own = repo.active_ownership(ACCOUNT, s)
+                q = sellable(pos.quantity, cfg.rules[s])
+                pv = PositionView(q, pos.avg_price, 0, own is not None and own.owner == spec.owner) if q > 0 else None
+                pending = bool(repo.active_new_intents(ACCOUNT, s, Side.BUY.value)
+                               or repo.active_new_intents(ACCOUNT, s, Side.SELL.value))
+                mv = _minute_view(req, dp, agg_hist[s], cfg.margin) if minute_declared else _MinuteView((), True)
+                out.minute_invalid += 0 if mv.ok else 1
+                qt = quotes.get(s)
+                views.append(InstrumentView(s, minute_bars=mv.bars, last_price=qt.price if qt is not None else None,
+                                            position=pv, has_pending_order=pending, data_ok=qt is not None,
+                                            minute_ok=mv.ok, agg_bars=mv.agg_bars, agg_missing=mv.agg_missing,
+                                            **_daily_view(daily_feed, s, at)))
+            ev_id = evaluation_id_of(spec.strategy_id, spec.version, "M2", at.isoformat())
+            snap = EvaluationSnapshot(ev_id, "M2", ACCOUNT, at, st["base"], tuple(views),
+                                      next_evaluation_at=grid.next_after(at))
+            res = run_evaluation(cfg.strategy, snap, cfg.params, lots)
+            if res.signals:
+                by_eval[at.isoformat()] = [(x.signal_id, x.kind.value, x.instrument, str(x.quantity), str(x.price))
+                                           for x in res.signals]
+            for sg in res.signals:
+                signals.append(sg.signal_id)
+                req_ = apply_spot_terms(GateRequest.from_signal(sg), quotes.get(sg.instrument), at,
+                                        cfg.rules[sg.instrument], order_policy)
+                if req_ is None:
+                    rejects["TERMS"] += 1
+                    continue
+                decision = gate.decide(req_)
+                if decision.result is GateResult.APPROVED and decision.approved is not None:
+                    executor.submit(decision.approved)
+                    submitted[sg.instrument] += 1
+                else:
+                    rejects[str(decision.failed_check)] += 1
+                    if sg.kind in _RISK_UP and decision.failed_check == Check.G2 \
+                            and HaltType.K2.value in repo.active_halts(ACCOUNT):
+                        k2["rejected_entries"][sg.instrument] = k2["rejected_entries"].get(sg.instrument, 0) + 1
+            if res.signals and not submitted:
+                dirty = True
         if not submitted:
-            dirty = True
             continue
         executor.process_events()
-        if dp.fill is not None:   # D-221: 판정 시각이 속한 분의 봉 시가 + 불리 슬리피지
-            broker.match(sym, dp.fill.open, dp.fill.volume, dp.at)
-        else:
-            rejects["MISSING_BAR"] += submitted
-            out.missing_fill += submitted
+        for s in syms:   # D-221: 판정 시각이 속한 분의 봉 시가 + 불리 슬리피지 (심볼별, 제출 순서)
+            if not submitted[s]:
+                continue
+            fb = dps[s].fill
+            if fb is not None:
+                broker.match(s, fb.open, fb.volume, at)
+            else:
+                rejects["MISSING_BAR"] += submitted[s]
+                out.missing_fill += submitted[s]
         broker.end_of_day()   # IOC·시장가 미체결분 소멸, 봉 거래량 사용량 초기화(상한은 봉마다)
         executor.process_events()
-        absorb(day)
+        new = absorb(day)
         dirty = True
-    if dirty:
-        held = repo.position(ACCOUNT, sym).quantity
-    px_end = end_bar[0].close if end_bar[0] is not None else last_close
-    if cur_day is not None:   # 마지막 날 평가액 = 그날 마지막 봉 종가(마지막 판정 뒤 봉 포함)
-        equity.append((cur_day, cash + held * (px_end if px_end is not None else _ZERO)))
+        for iid, s, stp, b in stop_intents:
+            filled = repo.intent(iid).filled_quantity
+            px = next((Decimal(r[5]) for r in new if r[2] == s and r[3] == "SELL"), None)
+            if filled > 0 and px is not None:
+                stop["fills"] += 1
+                stop["excess"].append({"symbol": s, "detected_bar": (b - ONE_MINUTE).isoformat(), "stop": str(stp),
+                                       "fill": str(px), "excess": str(stp - px),
+                                       "ratio": str(((stp - px) / stp).quantize(_Q6))})
+            else:
+                stop["unfilled"] += 1
+    drain()
+    if st["cur_day"] is None:
+        advance(days[0])
+    advance(days[-1])
+    refresh()
+    if multi:
+        lacking = sorted(s for s in syms if s not in first_day_seen or s not in last_day_seen)
+        if lacking:
+            repo.close()
+            raise BacktestError(f"실행 기간 {days[0]}~{days[-1]}을 모든 심볼 데이터가 덮지 않음(첫날·마지막 날 봉 없음): "
+                                f"{', '.join(lacking)} — 상장 시점 차이로 결과가 바뀌지 않게 거부 (CP-041 D-275 (1))")
+    px_end = {s: (end_bars[s][0].close if end_bars[s][0] is not None else last_close.get(s)) for s in syms}
+    equity.append((st["cur_day"], cash + sum((held[s] * (px_end[s] if px_end[s] is not None else _ZERO)
+                                              for s in syms if held[s]), _ZERO)))
     unknown = repo.intents_in_state(IntentState.UNKNOWN)
     repo.close()
     if unknown:
@@ -461,51 +877,154 @@ def run_minute_backtest(cfg: MinuteBacktestConfig) -> MinuteBacktestResult:
                                        sort_keys=True, default=str).encode()).hexdigest()
     out.result = BacktestResult(cfg.run_id, "ALL", days, equity, trades, metrics, rejects, digest, run_dir / "trading.db",
                                 signals, fills_log, k2_resumes, costs, {}, by_eval)
-    out.bars_in_period = counter[0]
-    out.missing_bars = len(days) * 1440 - counter[0]
-    out.last_close = last_close
-    out.end_close = px_end
+    out.bars_in_period = sum(c[0] for c in counters.values())
+    out.missing_bars = len(days) * 1440 * len(syms) - out.bars_in_period
+    first = syms[0]
+    out.first_open = first_open.get(first)
+    out.last_close = eval_close.get(first)
+    out.end_close = px_end[first]
     out.trade_records, out.open_lots = lfm.round_trip_records(broker.fills_for(ACCOUNT), cfg.pairs, cfg.rules)
+    out.k2 = k2
+    stop["summary"] = _excess_summary(stop["excess"])
+    out.stop = stop
+    out.by_symbol = {s: {"trades": sum(1 for t in trades if t.instrument == s),
+                         "pnl": str(sum((t.pnl for t in trades if t.instrument == s), _ZERO).quantize(Decimal("0.00000001"))),
+                         "bars": counters[s][0], "missing_bars": len(days) * 1440 - counters[s][0],
+                         "first_open": None if s not in first_open else str(first_open[s]),
+                         "last_close": None if s not in eval_close else str(eval_close[s]),
+                         "end_close": None if px_end[s] is None else str(px_end[s])} for s in syms}
+    out.daily_check = day_check.finish() if day_check is not None else None
     out.seconds = round(_time.perf_counter() - t0, 2)
     return out
 
 
+def _stop_price(repo: Repository, sym: str, owner: str, intent_id: str | None) -> Decimal | None:
+    """실운영 StopMonitor._stop_price와 같은 조회: 이 소유 기간의 진입·증액 의도(최신 순) → latest_stop_price."""
+    if intent_id is None:
+        return None
+    rows = repo.select(
+        "SELECT filled_quantity, stop_price FROM intent WHERE account=? AND instrument=? AND owner=? "
+        "AND request_type IN ('ENTRY','INCREASE') AND created_seq >= "
+        "(SELECT created_seq FROM intent WHERE intent_id=?) ORDER BY created_seq DESC",
+        (ACCOUNT, sym, owner, intent_id))
+    return latest_stop_price((Decimal(r["filled_quantity"]),
+                              Decimal(r["stop_price"]) if r["stop_price"] is not None else None) for r in rows)
+
+
+def _stop_request(repo: Repository, strategies: object, owner: str, sym: str, dp: DecisionPoint, at: datetime,
+                  rules: SymbolRules, quote: Quote | None, policy: SpotOrderPolicy,
+                  stats: dict) -> tuple[GateRequest | None, Decimal] | None:
+    """[D-262·D-263] 실운영 StopMonitor._judge와 같은 판단(감지·요청 안 함 조건·요청 형식). 요청할 일이면 (주문 조건을 넣은
+    요청 — 정할 수 없으면 None, 손절가), 아니면 None."""
+    own = repo.active_ownership(ACCOUNT, sym)
+    if own is None or own.owner != owner:
+        return None   # 비소유(수동·다른 전략) 보유는 감시하지 않는다 (R-28)
+    q = sellable(repo.position(ACCOUNT, sym).quantity, rules)
+    if q <= 0:
+        return None
+    stop = _stop_price(repo, sym, owner, own.intent_id)
+    if stop is None:
+        stats["no_stop_price"] += 1
+        return None
+    bar_start = dp.boundary - ONE_MINUTE
+    b = dp.last if dp.last is not None and dp.last.at == bar_start else None
+    if b is None:
+        stats["not_judged"] += 1   # 직전 닫힌 봉 결측 → 판단하지 않음(청산 안 함, §8-10)
+        return None
+    if not stop_triggered(b.close, stop):
+        return None
+    stats["triggers"] += 1
+    if repo.unknown_intents(ACCOUNT, sym) or repo.active_new_intents(ACCOUNT, sym, Side.SELL.value) \
+            or repo.active_new_intents(ACCOUNT, sym, Side.BUY.value):
+        stats["skipped"] += 1
+        return None
+    view = RequestView(RequestSource.SIGNAL, RequestType.EXIT, Side.SELL, sym, owner)
+    for row in repo.halt_rows(ACCOUNT):
+        h = HaltView(HaltType(row["halt_type"]), row["scope_instrument"], row["scope_owner"], row["variant"])
+        if halt_rejection(h, view):
+            stats["skipped"] += 1
+            return None
+    if strategies.signal_rejection(owner, RequestType.EXIT) is not None:  # type: ignore[attr-defined]
+        stats["skipped"] += 1
+        return None
+    key = stop_idem_key(own.ownership_id, bar_start)
+    req = GateRequest(source=RequestSource.SIGNAL, request_type=RequestType.EXIT, account=ACCOUNT, instrument=sym,
+                      side=Side.SELL, quantity=q, order_type=OrderType.MARKET, price=b.close, idem_key=key, owner=owner,
+                      valid_until=at + ONE_MINUTE, signal_id=key, rule_id=STOP_RULE_ID)
+    return apply_spot_terms(req, quote, at, rules, policy), stop
+
+
+def _excess_summary(rows: list[dict]) -> dict:
+    """손절 초과 손실 분포(손절가 대비 체결가 차 비율, 양수 = 손절가보다 불리)."""
+    if not rows:
+        return {"count": 0, "gaps": 0, "mean_ratio": None, "median_ratio": None, "p90_ratio": None, "max_ratio": None}
+    rs = sorted(Decimal(r["ratio"]) for r in rows)
+    n = len(rs)
+    return {"count": n, "gaps": sum(1 for r in rs if r > 0),
+            "mean_ratio": str((sum(rs, _ZERO) / n).quantize(_Q6)), "median_ratio": str(rs[n // 2]),
+            "p90_ratio": str(rs[min(n - 1, (n * 9) // 10)]), "max_ratio": str(rs[-1])}
+
+
 # --- 룩어헤드 교란 검사 (V-91 분봉판) ------------------------------------------------------------------------------
 
-def _flat_signals(cfg: MinuteBacktestConfig, grid: PeriodGrid, dp: DecisionPoint) -> list[tuple]:
+def _flat_signals(cfg: MinuteBacktestConfig, grid: PeriodGrid, dps: Mapping[str, DecisionPoint],
+                  hist: Mapping[str, Sequence[Bar]], daily: Mapping[str, tuple[Bar, ...]] | None) -> list[tuple]:
     spec = cfg.strategy.spec
     declared = MINUTE_CAPABILITY in spec.capabilities
-    price = dp.last.close if dp.last is not None else None
-    view = InstrumentView(cfg.symbol, minute_bars=dp.window if declared else (), last_price=price,
-                          data_ok=price is not None, minute_ok=dp.minute_ok if declared else True)
-    ev = evaluation_id_of(spec.strategy_id, spec.version, "M2", dp.at.isoformat())
-    snap = EvaluationSnapshot(ev, "M2", ACCOUNT, dp.at, cfg.initial_cash, (view,), next_evaluation_at=grid.next_after(dp.at))
-    r = run_evaluation(cfg.strategy, snap, cfg.params, {cfg.symbol: cfg.rules[cfg.symbol].lot_step})
-    return [(s.signal_id, s.kind.value, s.instrument, str(s.quantity), str(s.price)) for s in r.signals]
+    req = minute_request(cfg)
+    feed = _DailyFeed(daily, cfg.daily_limit) if DAILY_CAPABILITY in spec.capabilities and daily is not None else None
+    at = next(iter(dps.values())).at
+    views = []
+    for s in cfg.symbols:
+        dp = dps[s]
+        price = dp.last.close if dp.last is not None else None
+        agg = [_minute_bar(s, b) for b in hist[s] if b.at < dp.boundary] if req.agg_minutes else ()  # type: ignore[operator]
+        mv = _minute_view(req, dp, agg, cfg.margin) if declared else _MinuteView((), True)
+        views.append(InstrumentView(s, minute_bars=mv.bars, last_price=price, data_ok=price is not None, minute_ok=mv.ok,
+                                    agg_bars=mv.agg_bars, agg_missing=mv.agg_missing, **_daily_view(feed, s, at)))
+    ev = evaluation_id_of(spec.strategy_id, spec.version, "M2", at.isoformat())
+    snap = EvaluationSnapshot(ev, "M2", ACCOUNT, at, cfg.initial_cash, tuple(views), next_evaluation_at=grid.next_after(at))
+    r = run_evaluation(cfg.strategy, snap, cfg.params, {s: cfg.rules[s].lot_step for s in cfg.symbols})
+    return [(x.signal_id, x.kind.value, x.instrument, str(x.quantity), str(x.price)) for x in r.signals]
 
 
 def perturbation_check_minute(cfg: MinuteBacktestConfig, check_days: Sequence[date], probes: int = 4) -> list[str]:
-    """V-91: 판정 시각 T에 닫히지 않은 봉(체결 봉·이후 봉 — 시작 ≥ 격자 시각)을 크게 바꾸거나 지워도 T의 신호가 같아야 한다.
-    무보유 스냅샷 비교. 날마다 판정 시각 probes개(고르게)를 본다. 다르면 그 판정 시각을 돌려준다."""
+    """V-91: 판정 시각 T에 닫히지 않은 봉(체결 봉·이후 봉 — 시작 ≥ 격자 시각)과 그날 이후 1d 봉(진행 중·미래)을 크게 바꾸거나
+    지워도 T의 신호가 같아야 한다. 무보유 스냅샷 비교, 모든 심볼을 함께 교란. 날마다 판정 시각 probes개(고르게)를 본다."""
     grid = grid_of(cfg)
+    req = minute_request(cfg)
+    warm = _warm_minutes(cfg, req)
     bad: list[str] = []
+    syms = cfg.symbols
+
+    def pts(bars: Mapping[str, list[Bar]], day: date) -> list[dict[str, DecisionPoint]]:
+        gens = [decision_points(bars[s], grid, [day], cfg.lookback_bars) for s in syms]
+        return [dict(zip(syms, t, strict=True)) for t in zip(*gens, strict=True)]
+
+    def scaled(b: Bar) -> Bar:
+        return Bar(b.at, b.open * 3, b.high * 3, b.low * 3, b.close * 3, b.volume * 3)
+
     for day in check_days:
-        bars = list(cfg.source(_midnight(day) - ONE_MINUTE * cfg.lookback_bars, _midnight(day) + timedelta(days=1)))
-        points = list(decision_points(bars, grid, [day], cfg.lookback_bars))
+        bars = {s: list(cfg.source_of(s)(_midnight(day) - ONE_MINUTE * warm, _midnight(day) + timedelta(days=1)))
+                for s in syms}
+        points = pts(bars, day)
         if not points:
             continue
         step = max(1, len(points) // probes)
-        for dp in points[::step][:probes]:
-            base = _flat_signals(cfg, grid, dp)
-
-            def scaled(b: Bar) -> Bar:
-                return Bar(b.at, b.open * 3, b.high * 3, b.low * 3, b.close * 3, b.volume * 3)
-            variants = ([scaled(b) if b.at >= dp.boundary else b for b in bars],    # type: ignore[operator]
-                        [b for b in bars if b.at < dp.boundary])                    # type: ignore[operator]
-            for var in variants:
-                again = next(p for p in decision_points(var, grid, [day], cfg.lookback_bars) if p.at == dp.at)
-                if _flat_signals(cfg, grid, again) != base:
-                    bad.append(dp.at.isoformat())
+        for dps in points[::step][:probes]:
+            first = next(iter(dps.values()))
+            base = _flat_signals(cfg, grid, dps, bars, cfg.daily)
+            cut = first.boundary
+            dvars: list[Mapping[str, tuple[Bar, ...]] | None] = [cfg.daily, cfg.daily]
+            if cfg.daily is not None:
+                dvars = [{s: tuple(scaled(b) if b.at >= day else b for b in bs) for s, bs in cfg.daily.items()},   # type: ignore[operator]
+                         {s: tuple(b for b in bs if b.at < day) for s, bs in cfg.daily.items()}]   # type: ignore[operator]
+            variants = (({s: [scaled(b) if b.at >= cut else b for b in bars[s]] for s in syms}, dvars[0]),   # type: ignore[operator]
+                        ({s: [b for b in bars[s] if b.at < cut] for s in syms}, dvars[1]))                   # type: ignore[operator]
+            for var, dv in variants:
+                again = next(p for p in pts(var, day) if next(iter(p.values())).at == first.at)
+                if _flat_signals(cfg, grid, again, var, dv) != base:
+                    bad.append(first.at.isoformat())
                     break
     return bad
 
@@ -520,14 +1039,73 @@ def buy_hold_return(first_open: Decimal | None, last_close: Decimal | None, slip
     return format(r.quantize(Decimal("0.000001")), "f")
 
 
+def hold_return_of(r: MinuteBacktestResult, slippage: Decimal, fee: Decimal, *, end: bool = False) -> str | None:
+    """단순 보유 참고: 단일 심볼은 종전 식 그대로, 여러 심볼은 심볼별 단순 보유 수익률의 단순 평균(동일 비중) [임시 판단].
+    end면 마지막 봉 종가(end_close) 기준(LF-8 표본·C-5+와 같은 기준)."""
+    if len(r.by_symbol) <= 1:
+        return buy_hold_return(r.first_open, r.end_close if end else r.last_close, slippage, fee)
+    vals = []
+    for x in r.by_symbol.values():
+        last = x["end_close"] if end else x["last_close"]
+        v = buy_hold_return(None if x["first_open"] is None else Decimal(x["first_open"]),
+                            None if last is None else Decimal(last), slippage, fee)
+        if v is None:
+            return None
+        vals.append(Decimal(v))
+    return format((sum(vals, _ZERO) / len(vals)).quantize(_Q6), "f")
+
+
+def _intraday_lines(out: MinuteBacktestResult) -> list[str]:
+    k, s = out.k2, out.stop
+    lines = [f"- 장중 L4(D-265·D-277): 매 1분 봉 **저가 기준** 평가 — K2 발동 {k.get('days', 0)}일"
+             + (f"(시각 UTC {', '.join(k['times'][:10])}{' …' if len(k.get('times', [])) > 10 else ''}, 시간대별 "
+                f"{json.dumps(k['hours'], sort_keys=True)})" if k.get("times") else "")
+             + f", K2로 거부된 진입 {json.dumps(k.get('rejected_entries', {}), sort_keys=True)}, 참고 **종가 기준** 발동 "
+             f"{k.get('close_days', 0)}일, 평가 결측 분 {k.get('eval_missing_minutes', 0)}. K2 재개 = 다음 UTC 일 첫 분"
+             "(낙관 — 실제 사용자 재개는 더 늦을 수 있음)"]
+    if s.get("active"):
+        sm = s.get("summary", {})
+        lines.append(f"- 손절 감시(CAP-HLD-02, D-262): 감지 {s['triggers']}회, 요청 {s['requests']}, 체결 {s['fills']}, "
+                     f"미체결(체결 봉 결측 등) {s['unfilled']}, 판단 불가(감지 봉 결측) {s['not_judged']}, 요청 안 함 "
+                     f"{s['skipped']}, 손절가 없음 {s['no_stop_price']}. 체결 = 감지 다음 분 시가 × (1 − 슬리피지). "
+                     f"손절 초과 손실(손절가 − 체결가)/손절가: {sm.get('count', 0)}건, 손절가 아래 체결 {sm.get('gaps', 0)}, "
+                     f"평균 {sm.get('mean_ratio')}, 중앙 {sm.get('median_ratio')}, 90% {sm.get('p90_ratio')}, 최대 "
+                     f"{sm.get('max_ratio')}. 주문 창 밖 UTC 23:50~00:10은 감시 없음(실운영과 같음, DP-89 (6))")
+    else:
+        lines.append("- 손절 감시: 해당 없음(CAP-HLD-02 미선언) — 손절 초과 손실 칸 비어 있음")
+    return lines
+
+
+def _symbol_lines(cfg: MinuteBacktestConfig, out: MinuteBacktestResult) -> list[str]:
+    if len(cfg.symbols) <= 1:
+        return []
+    rows = ["", "## 심볼별 (D-275 (7) — 한 계좌, 합산은 위 지표)", "| 심볼 | 거래 | 손익(USDT) | 결측 분 | C-7 |", "|---|---|---|---|---|"]
+    for s, x in out.by_symbol.items():
+        rows.append(f"| {s} | {x['trades']} | {x['pnl']} | {x['missing_bars']} | 사후 선택 — 과대 추정 가능 |")
+    return rows
+
+
+def _daily_check_lines(out: MinuteBacktestResult) -> list[str]:
+    if out.daily_check is None:
+        return []
+    return ["- 1d 파일 vs 1분봉 일 집계 일치(D-276 (5), 판정에 쓰지 않음): "
+            + "; ".join(f"{s} 비교 {x['compared']}일·불일치 {x['mismatch']}일(최대 가격 차 {x['max_price_diff']}, 거래량 차 "
+                        f"{x['max_volume_diff']})·1분봉 불완전(비교 불가) {x['minute_incomplete']}일·1d 없음 {x['no_daily']}일"
+                        for s, x in out.daily_check.items())]
+
+
 def render_minute_report(cfg: MinuteBacktestConfig, out: MinuteBacktestResult, *, reproducible: bool | None,
                          lookahead_bad: list[str] | None) -> str:
     spec = cfg.strategy.spec
     r = out.result
     grid = grid_of(cfg)
+    syms = cfg.symbols
+    sym_text = cfg.symbol if len(syms) == 1 else f"{', '.join(syms)} (한 계좌)"
+    daily_text = ("1d 봉 입력 없음(분봉 전략 입력만)" if DAILY_CAPABILITY not in spec.capabilities else
+                  f"확정 1d 봉(1d 파일, 최근 {cfg.daily_limit}개, DP-82 결측 규칙) 입력")
     lines = [
         f"# M2 1분봉 백테스트 보고서 — {spec.strategy_id} v{spec.version}", "",
-        f"- 실행 ID: `{cfg.run_id}` / 기간 {r.days[0]} ~ {r.days[-1]} ({len(r.days)}일, UTC) / 심볼 {cfg.symbol} / "
+        f"- 실행 ID: `{cfg.run_id}` / 기간 {r.days[0]} ~ {r.days[-1]} ({len(r.days)}일, UTC) / 심볼 {sym_text} / "
         f"데이터 버전 `{cfg.data_version or '미기재'}` / 코드 `{cfg.code_commit or '미기재'}`",
         f"- 판정(D-219·실운영과 같은 격자): {grid.period_minutes}분마다 UTC 00:00 + k×N분 + 여유 {cfg.margin.total_seconds():g}초, "
         f"주문 창 00:10~23:50 안 — 판정 {out.decisions}회, 분봉 창 {cfg.lookback_bars}봉"
@@ -538,14 +1116,17 @@ def render_minute_report(cfg: MinuteBacktestConfig, out: MinuteBacktestResult, *
         *(fee_model_lines(cfg.fees, r.costs) if cfg.fees is not None else
           [f"- 비용: 수수료율 {cfg.cost_rates.commission_rate}(받는 자산에서 차감, BN §9 — 실제 요율 미확인), 비용 합계 {r.costs} USDT"]),
         f"- 데이터: 실행 기간 봉 {out.bars_in_period}개, 결측 분 {out.missing_bars}개(채우지 않음 — 판정 창 안이면 무효)",
-        f"- 단순 보유 참고(C-5): {buy_hold_return(out.first_open, out.last_close, cfg.slippage, cfg.fill_rate)}",
-        f"- K2 다음 날 재개 가정: {r.k2_resumes}회 / 실행 시간 {out.seconds}초", "",
+        f"- 단순 보유 참고(C-5): {hold_return_of(out, cfg.slippage, cfg.fill_rate)}",
+        f"- K2 다음 날 재개 가정: {r.k2_resumes}회 / 실행 시간 {out.seconds}초",
+        *_intraday_lines(out), *_daily_check_lines(out), "",
         "## 지표 (비용 반영 후, 연환산 365일)", "| 지표 | 값 |", "|---|---|",
-        *[f"| {k} | {v} |" for k, v in r.metrics.items()], "",
+        *[f"| {k} | {v} |" for k, v in r.metrics.items()],
+        *_symbol_lines(cfg, out), "",
         "## 한계",
         f"- 데이터 출처: {cfg.data_source or '바이낸스 공개 실서버 1m klines(A-110)'} — 테스트넷 PAPER 성과와 직접 비교하지 않는다(2-M2.6).",
-        "- 거래 규칙은 테스트넷 BTCUSDT 실측값(실서버 과거 시점 규칙 아님). 1d 봉 입력 없음(분봉 전략 입력만).",
-        "- BTCUSDT 단일 심볼은 사후 선택 — 성과는 과대 추정 가능(C-7).", "",
+        f"- 거래 규칙은 테스트넷 실측값(실서버 과거 시점 규칙 아님). {daily_text}.",
+        (f"- {cfg.symbol} 단일 심볼은 사후 선택 — 성과는 과대 추정 가능(C-7)." if len(syms) == 1 else
+         f"- {', '.join(syms)} 각각 사후 선택 — 성과는 과대 추정 가능(C-7, 심볼별)."), "",
         "## 판정 (04 §2.7 — 실행 기록)",
         f"- 재현성(D-074): {'통과' if reproducible else ('실패' if reproducible is False else '미실행')}",
         "- 룩어헤드 교란 검사(V-91 분봉판): " + ("통과" if lookahead_bad == [] else
@@ -560,7 +1141,8 @@ def summary_of(cfg: MinuteBacktestConfig, out: MinuteBacktestResult, *, reproduc
     r = out.result
     return {
         "run_id": cfg.run_id, "strategy": cfg.strategy.spec.strategy_id, "version": cfg.strategy.spec.version,
-        "interval": "1m", "symbol": cfg.symbol, "period": [r.days[0].isoformat(), r.days[-1].isoformat()],
+        "interval": "1m", "symbol": cfg.symbol if len(cfg.symbols) == 1 else ",".join(cfg.symbols),
+        "symbols": list(cfg.symbols), "period": [r.days[0].isoformat(), r.days[-1].isoformat()],
         "days": len(r.days), "period_minutes": grid_of(cfg).period_minutes, "lookback_bars": cfg.lookback_bars,
         "margin_s": cfg.margin.total_seconds(), "decisions": out.decisions, "minute_invalid": out.minute_invalid,
         "bars_in_period": out.bars_in_period, "missing_bars": out.missing_bars, "missing_fill": out.missing_fill,
@@ -569,9 +1151,10 @@ def summary_of(cfg: MinuteBacktestConfig, out: MinuteBacktestResult, *, reproduc
         "initial_cash": str(cfg.initial_cash), "signals": len(r.signals),
         "fills": {side: sum(1 for f in r.fills if f[3] == side) for side in ("BUY", "SELL")},
         "round_trips": len(r.trades), "rejects": dict(sorted(r.rejects.items())), "k2_resumes": r.k2_resumes,
-        "buy_hold_return": buy_hold_return(out.first_open, out.last_close, cfg.slippage, cfg.fill_rate),
+        "buy_hold_return": hold_return_of(out, cfg.slippage, cfg.fill_rate),
         "reproducible": reproducible, "lookahead_bad": lookahead_bad, "digest": r.digest, "metrics": r.metrics,
-        "seconds": out.seconds, **out.extras,
+        "seconds": out.seconds, "k2": out.k2, "stop": out.stop, "by_symbol": out.by_symbol,
+        "daily_check": out.daily_check, **out.extras,
         **({"fees": fee_model_summary(cfg.fees)} if cfg.fees is not None else {}),
     }
 
@@ -591,10 +1174,18 @@ def _fmt(x: Decimal | None) -> str | None:
     return None if x is None else format(x.quantize(Decimal("0.0001")), "f")
 
 
+def c7_text(symbols: Sequence[str]) -> str:
+    if tuple(symbols) == ("BTCUSDT",):
+        return "해당 — BTCUSDT 단일 심볼 사후 선택(과대 추정 가능)"
+    return f"해당 — {', '.join(symbols)} 각각 사후 선택(과대 추정 가능, 심볼별)"
+
+
 def decide_verdict_m2(*, pooled_trades: int, c3_expectancy: Decimal | None, c4: Sequence[Decimal | None],
-                      variants_run: bool, reproducible: bool, lookahead_ok: bool) -> dict[str, object]:
-    """CP-030 판정 규칙(D-167 C-2·D-164 C-3·D-165 C-4·D-168 C-7)의 M2 1분봉판. 금액 단위 USDT. BTCUSDT 단일 심볼 = 사후 선택
-    → 통과여도 "통과(과대 추정 가능)". 판정표는 기록·제안이며 전환 승인은 사용자."""
+                      variants_run: bool, reproducible: bool, lookahead_ok: bool,
+                      symbols: Sequence[str] = ("BTCUSDT",)) -> dict[str, object]:
+    """CP-030 판정 규칙(D-167 C-2·D-164 C-3·D-165 C-4·D-168 C-7)의 M2 1분봉판. 금액 단위 USDT. 사후 선택 심볼(BTC·ETH 고정
+    대상도 사후 선택) → 통과여도 "통과(과대 추정 가능)". C-2 = 전략 합산 거래 수(D-275 (7)). 판정표는 기록·제안이며 전환
+    승인은 사용자."""
     c2 = "충족" if pooled_trades >= MIN_TRADES else "판단 불가"
     c3 = "충족" if c3_expectancy is not None and c3_expectancy > 0 else "미충족"
     if not variants_run:
@@ -624,8 +1215,7 @@ def decide_verdict_m2(*, pooled_trades: int, c3_expectancy: Decimal | None, c4: 
         verdict = "판단 불가"
     else:
         verdict = "통과(과대 추정 가능)"
-    return {"verdict": verdict, "C-2": c2, "C-3": c3, "C-4": c4s, "C-7": "해당 — BTCUSDT 단일 심볼 사후 선택(과대 추정 가능)",
-            "reasons": reasons}
+    return {"verdict": verdict, "C-2": c2, "C-3": c3, "C-4": c4s, "C-7": c7_text(symbols), "reasons": reasons}
 
 
 @dataclass(frozen=True)
@@ -638,7 +1228,13 @@ class MinuteValidationInputs:
     skip_variants: bool = False
     perturbation_days: int = 3          # 창마다 교란 검사 표본 날짜 수
     command: str = ""
-    low_frequency: lfm.LowFrequencyInputs | None = None   # [CP-038] 저빈도 선언 전략만. None = 일반 경로(결과 파일 불변, V-313)
+    low_frequency: lfm.LowFrequencyInputs | None = None   # [CP-038] 저빈도 선언 전략만. None = 일반 경로
+
+
+def _window_intraday(r: MinuteBacktestResult) -> dict:
+    return {"k2_days": r.k2.get("days", 0), "k2_close_days": r.k2.get("close_days", 0),
+            "k2_rejected_entries": r.k2.get("rejected_entries", {}), "stop_fills": r.stop.get("fills", 0),
+            "stop_excess": [x["ratio"] for x in r.stop.get("excess", [])]}
 
 
 def run_minute_validation(inp: MinuteValidationInputs) -> dict:
@@ -655,6 +1251,7 @@ def run_minute_validation(inp: MinuteValidationInputs) -> dict:
     var_trades: dict[str, list] = {v.label: [] for v in variants}  # type: ignore[type-arg]
     all_repro = all_lookahead = True
     base_runs: list[tuple[Window, MinuteBacktestResult]] = []
+    excess: list[dict] = []
     for w in inp.windows:
         def one(label: str, slip: Decimal, params: dict | None = None) -> MinuteBacktestResult:
             return run_minute_backtest(replace(t, run_id=f"w{w.k}-{label}", start=w.val_start, end=w.val_end,
@@ -677,7 +1274,8 @@ def run_minute_validation(inp: MinuteValidationInputs) -> dict:
         base_runs.append((w, base))
         base_trades += base.result.trades
         slip2_trades += slip2.result.trades
-        windows_out.append({
+        excess += base.stop.get("excess", [])
+        row = {
             "k": w.k, "train": [w.train_start.isoformat(), w.train_end.isoformat()],
             "train_shortened": w.train_start < inp.data_start,
             "train_effective_start": max(w.train_start, inp.data_start).isoformat(),
@@ -686,15 +1284,20 @@ def run_minute_validation(inp: MinuteValidationInputs) -> dict:
             "total_return": base.result.metrics["total_return"], "max_drawdown": base.result.metrics["max_drawdown"],
             "slip2x_trades": len(slip2.result.trades), "slip2x_expectancy": _fmt(_expectancy(slip2.result.trades)),
             "missing_bars": base.missing_bars, "minute_invalid": base.minute_invalid, "decisions": base.decisions,
-            "buy_hold_return": buy_hold_return(base.first_open, base.last_close, inp.slippage_base, t.fill_rate),
+            "buy_hold_return": hold_return_of(base, inp.slippage_base, t.fill_rate),
             "reproducible": repro, "lookahead_bad": bad, "variants": vrows, "seconds": base.seconds,
-            "digest": base.result.digest,
-        })
+            "digest": base.result.digest, "intraday": _window_intraday(base),
+        }
+        if len(t.symbols) > 1:
+            row["by_symbol"] = {s: {"trades": x["trades"], "pnl": x["pnl"], "missing_bars": x["missing_bars"]}
+                                for s, x in base.by_symbol.items()}
+        windows_out.append(row)
     verdict = decide_verdict_m2(pooled_trades=len(base_trades), c3_expectancy=_expectancy(slip2_trades),
                                 c4=[_expectancy(v) for v in var_trades.values()], variants_run=not inp.skip_variants,
-                                reproducible=all_repro, lookahead_ok=all_lookahead)
+                                reproducible=all_repro, lookahead_ok=all_lookahead, symbols=t.symbols)
     out = {
-        "strategy": t.strategy.spec.strategy_id, "version": t.strategy.spec.version, "symbol": t.symbol,
+        "strategy": t.strategy.spec.strategy_id, "version": t.strategy.spec.version,
+        "symbol": t.symbol if len(t.symbols) == 1 else ",".join(t.symbols), "symbols": list(t.symbols),
         "data_version": t.data_version, "data_start": inp.data_start.isoformat(), "final_from": t.final_from.isoformat(),
         "slippage_base": str(inp.slippage_base), "slippage_double": str(inp.slippage_base * 2),
         "period_minutes": grid_of(t).period_minutes, "lookback_bars": t.lookback_bars,
@@ -703,7 +1306,12 @@ def run_minute_validation(inp: MinuteValidationInputs) -> dict:
                                            "slip2x_expectancy": _fmt(_expectancy(slip2_trades)),
                                            "missing_bars": sum(w["missing_bars"] for w in windows_out),
                                            "loss_windows": sum(1 for w in windows_out
-                                                               if Decimal(w["total_return"]) < 0)},
+                                                               if Decimal(w["total_return"]) < 0),
+                                           "k2_days": sum(w["intraday"]["k2_days"] for w in windows_out),
+                                           "k2_close_days": sum(w["intraday"]["k2_close_days"] for w in windows_out),
+                                           "stop_excess": _excess_summary(excess)},
+        "intraday_note": {"stop_active": STOP_CAPABILITY in t.strategy.spec.capabilities,
+                          "daily_input": DAILY_CAPABILITY in t.strategy.spec.capabilities},
         "variants": [{"label": k, "trades": len(v), "expectancy": _fmt(_expectancy(v))} for k, v in var_trades.items()],
         "verdict": verdict, "command": inp.command,
     }
@@ -718,6 +1326,45 @@ def run_minute_validation(inp: MinuteValidationInputs) -> dict:
                                                 newline="\n")
     (inp.out_dir / "validation.md").write_text(md, encoding="utf-8", newline="\n")
     return out
+
+
+# --- [DP-81, A-124 ④] 최종 확인 실행 (D-163, V-295) -------------------------------------------------------------------
+
+def run_minute_final_check(template: MinuteBacktestConfig, out_dir: Path, *, final_from: date, end: date, ledger: Path,
+                           confirmed_by: str, slippage_base: Decimal = SLIPPAGE_BASE) -> dict:
+    """M1·일봉 경로(app/validation.run_final_check)와 같은 방식: 전략 확정(사용자 선언 A-ID) 뒤 전략 버전당 1회, final_from ~
+    end를 기본·2배 슬리피지로 실행. 입력을 모두 검사한 뒤에만 장부(백테스트 FINAL과 같은 JSONL)에 기록하고 실행한다 —
+    실패한 입력은 1회 사용을 소모하지 않는다. 검사 통과 뒤 실행 중 실패는 1회 사용으로 남는다(M1과 같음)."""
+    if end < final_from:
+        raise ValidationError(f"종료일 {end}가 최종 확인 시작일 {final_from} 전")
+    check_final_guard(final_from, end, final_from, final_check=True)
+    if out_dir.exists():
+        raise ValidationError(f"결과 폴더가 이미 있음: {out_dir}")
+    if not _LEDGER_APPROVAL.fullmatch(confirmed_by or ""):
+        raise ValidationError("최종 확인은 전략 확정(사용자 선언 A-ID) 뒤에만 실행 (D-163)")
+    if not isinstance(slippage_base, Decimal) or slippage_base < 0:
+        raise ValidationError("슬리피지는 0 이상")
+    probe = replace(template, final_from=final_from, final_check=True, start=final_from, end=end,
+                    out_dir=out_dir / "runs")
+    grid_of(probe)
+    _days(probe)   # 입력 검사(BacktestError) — 장부 기록 전
+    claim_final_check(ledger, template.strategy.spec, out_dir.name, confirmed_by=confirmed_by)
+    out_dir.mkdir(parents=True)
+    rows: dict[str, dict] = {}
+    last: MinuteBacktestResult | None = None
+    for label, s in (("final-base", slippage_base), ("final-slip2x", slippage_base * 2)):
+        last = run_minute_backtest(replace(probe, run_id=label, slippage=s))
+        rows[label] = {"metrics": dict(last.result.metrics), "trades": len(last.result.trades),
+                       "expectancy": _fmt(_expectancy(last.result.trades)), "digest": last.result.digest,
+                       "slippage": format(s, "f"), "missing_bars": last.missing_bars,
+                       "intraday": _window_intraday(last)}
+    assert last is not None
+    res = {"strategy_id": template.strategy.spec.strategy_id, "strategy_version": template.strategy.spec.version,
+           "symbols": list(template.symbols), "confirmed_by": confirmed_by,
+           "start": last.result.days[0].isoformat(), "end": last.result.days[-1].isoformat(), **rows}
+    (out_dir / "final-check.json").write_text(json.dumps(res, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+                                              newline="\n")
+    return res
 
 
 # --- [CP-038 T-058] 저빈도 예외 경로 (D-234~D-245) -------------------------------------------------------------------
@@ -756,25 +1403,30 @@ def run_lf8_sample(template: MinuteBacktestConfig, settings: lfm.LowFreqSettings
                    label: str = "base") -> Lf8RunResult:
     """D-244 (3)~(5): 표본 심볼 하나를 단독 계좌로. 배포 전략과 같은 코드·파라미터·한도 프로필, 표본 봉을 배포 심볼 이름
     (alias — 전략 유니버스 안)으로 넣는다(전략 코드 무변경, DP-86). 목록 해 밖 신규 진입·증액 차단, 보유는 청산 신호까지.
-    데이터가 전체 이력 끝 전에 끝나면 남은 보유를 마지막 종가 × haircut으로 청산한 거래로 집계(D-244 (4))."""
+    데이터가 전체 이력 끝 전에 끝나면 남은 보유를 마지막 종가 × haircut으로 청산한 거래로 집계(D-244 (4)).
+    [T-068] 여러 심볼 배포 전략도 별칭 하나씩 단독 실행(sources 없음). CAP-DAT-01 전략은 표본 1d 봉(sample.daily)이 필요.
+    요율은 체결 요율(taker, D-267 (3) — 일반 경로와 같음)."""
     start = max(date(min(sample.years), 1, 1), sample.data_start)
     end = min(sample.data_end, history_end)
     wrapper = lfm.EntryYears(template.strategy, sample.years)
-    cfg = replace(template, run_id=f"lf8-{alias}-{symbol}-{label}", symbol=alias,
+    if DAILY_CAPABILITY in template.strategy.spec.capabilities and sample.daily is None:
+        raise BacktestError(f"LF-8 표본 {symbol}: 일봉 전략인데 표본 1d 봉 없음 (D-276·D-244)")
+    cfg = replace(template, run_id=f"lf8-{alias}-{symbol}-{label}", symbol=alias, sources=None,
+                  daily=None if sample.daily is None else {alias: tuple(sample.daily)},
                   rules={alias: lfm.continuous_rules(alias)}, pairs={alias: (_usdt_base(symbol), "USDT")},
                   source=sample.source, start=start, end=end, slippage=slippage, out_dir=out_dir,
                   strategy=wrapper)  # type: ignore[arg-type]
     out = run_minute_backtest(cfg)
     res = Lf8RunResult(list(out.trade_records), None, wrapper.blocked)
     lot = out.open_lots.get(alias)
+    fee = cfg.fill_rate
     if lot is not None:
         if sample.data_end < history_end and out.end_close is not None:
-            res.trades.append(lfm.close_out(lot, out.end_close, cfg.cost_rates.commission_rate,
-                                            settings.lf8_delist_haircut, end))
+            res.trades.append(lfm.close_out(lot, out.end_close, fee, settings.lf8_delist_haircut, end))
             res.delisted = 1
         else:
             res.open_at_end = 1
-    hold = buy_hold_return(out.first_open, out.end_close, slippage, cfg.cost_rates.commission_rate)
+    hold = buy_hold_return(out.first_open, out.end_close, slippage, fee)
     res.hold_return = None if hold is None else Decimal(hold)
     return res
 
@@ -794,7 +1446,7 @@ def _c5_plus(r: MinuteBacktestResult, slippage: Decimal, fee: Decimal, initial: 
     med = weights[len(weights) // 2] if weights else None
     q = Decimal("0.0001")
     return {"total_return": r.result.metrics["total_return"], "max_drawdown": r.result.metrics["max_drawdown"],
-            "buy_hold_return": buy_hold_return(r.first_open, r.last_close, slippage, fee),
+            "buy_hold_return": hold_return_of(r, slippage, fee),
             "held_day_ratio": format((Decimal(held_days) / Decimal(days)).quantize(q), "f"),
             "held_day_ratio_note": "진입일~청산일 포함 일수 합 ÷ 기간 일수(근사 — 같은 날 왕복도 1일)",
             "entry_weight_median": None if med is None else format(med.quantize(q), "f"),
@@ -847,7 +1499,7 @@ def run_low_frequency_m2(inp: MinuteValidationInputs, verdict: dict, base_runs: 
     slip2 = run_minute_backtest(replace(t, run_id="lf-history-slip2x", start=low.history_start, end=low.history_end,
                                         slippage=inp.slippage_base * s.lf6_slippage_multiplier, out_dir=hist_dir,
                                         params=dict(t.params)))
-    fee = t.cost_rates.commission_rate
+    fee = t.fill_rate   # [재검토 지적] 체결 요율(taker, D-267 (3)) — 일반 경로 buy_hold_return과 같은 요율
     windows = [_window_lf_simple(w, r, inp.slippage_base, fee, t.initial_cash) for w, r in base_runs]
     runs8: dict[str, dict[str, lfm.Lf8SymbolResult]] | None = None
     lf8_counts: dict[str, int] = {}
@@ -892,13 +1544,29 @@ def run_low_frequency_m2(inp: MinuteValidationInputs, verdict: dict, base_runs: 
 
 def _window_lf_simple(w: Window, r: MinuteBacktestResult, slippage: Decimal, fee: Decimal,
                       initial: Decimal) -> lfm.WindowLF:
-    """창별 LF 입력: 그 창에서 청산된 거래(창 실행 거래), 단순 보유 수익률(C-5 방식), 창 끝 미청산 평가 손익
-    = 마지막 평가액 − 초기 자금 − 청산 거래 손익 합 (표시만)."""
-    hold = buy_hold_return(r.first_open, r.last_close, slippage, fee)
+    """창별 LF 입력: 그 창에서 청산된 거래(창 실행 거래), 단순 보유 수익률(C-5 방식 — 일반 경로와 같은 함수·요율), 창 끝 미청산
+    평가 손익 = 마지막 평가액 − 초기 자금 − 청산 거래 손익 합 (표시만)."""
+    hold = hold_return_of(r, slippage, fee)
     pnl = sum((x.pnl for x in r.trade_records), _ZERO)
     final = r.result.equity[-1][1] if r.result.equity else initial
     return lfm.WindowLF(w.k, list(r.trade_records), None if hold is None else Decimal(hold),
                         (final - initial - pnl).quantize(Decimal("0.00000001")))
+
+
+def _intraday_summary_lines(o: dict) -> list[str]:
+    p = o["pooled"]
+    note = o.get("intraday_note", {})
+    ex = p.get("stop_excess", {})
+    lines = [f"- 장중 L4(D-265·D-277, 1분 봉 저가 기준): K2 발동 합계 {p.get('k2_days', 0)}일, 참고 종가 기준 "
+             f"{p.get('k2_close_days', 0)}일 — K2 재개 = 다음 UTC 일 첫 분(낙관). 창별 값은 validation.json intraday"]
+    if note.get("stop_active"):
+        lines.append(f"- 손절 감시(CAP-HLD-02, D-262 — 체결 = 감지 다음 분 시가): 손절 초과 손실 {ex.get('count', 0)}건, "
+                     f"손절가 아래 체결 {ex.get('gaps', 0)}, 평균 비율 {ex.get('mean_ratio')}, 최대 {ex.get('max_ratio')}")
+    else:
+        lines.append("- 손절 감시: 해당 없음(CAP-HLD-02 미선언)")
+    if note.get("daily_input"):
+        lines.append("- 확정 일봉 입력(D-276): 1d 파일·최근 199봉·DP-82 결측 규칙 — 일치 보고는 창별 실행 summary")
+    return lines
 
 
 def render_minute_validation(o: dict) -> str:
@@ -922,19 +1590,26 @@ def render_minute_validation(o: dict) -> str:
                      f"{w['expectancy'] or '—'} | {w['total_return']} | {w['max_drawdown']} | "
                      f"{w['slip2x_expectancy'] or '—'} | {w['missing_bars']} | {'통과' if w['reproducible'] else '실패'} | "
                      f"{'통과' if not w['lookahead_bad'] else '실패'} |")
+    if len(o.get("symbols", [])) > 1:
+        lines += ["", "### 심볼별 (D-275 (7) — 한 계좌 실행, C-2는 합산)", "| 창 | 심볼 | 거래 | 손익(USDT) | 결측 분 |",
+                  "|---|---|---|---|---|"]
+        for w in o["windows"]:
+            for s, x in w.get("by_symbol", {}).items():
+                lines.append(f"| {w['k']} | {s} | {x['trades']} | {x['pnl']} | {x['missing_bars']} |")
     p = o["pooled"]
     lines += ["", "## 판정 (CP-030 M2판 — 기록·제안, 전환 승인은 사용자)", "",
               f"- C-1 비용: 수수료·슬리피지 반영 결과만 — 적용",
               f"- C-2 거래 수 ≥ {MIN_TRADES}: 합산 {p['trades']}건 — {v['C-2']}",
               f"- C-3 슬리피지 2배 거래당 기대값 > 0: {p['slip2x_expectancy'] or '—'} USDT ({p['slip2x_trades']}건) — {v['C-3']}",
-              f"- C-4 파라미터 ±20%(period_minutes·qty_step 제외): "
+              f"- C-4 파라미터 ±20%(period_minutes·qty_step·집계 봉 구조값 제외): "
               + (", ".join(f"{x['label']} {x['expectancy'] or '—'}" for x in o["variants"]) or "변형 없음")
               + f" — {v['C-4']}",
               "- C-5 단순 보유: 창별 참고 값(validation.json buy_hold_return) — 참고",
               "- C-6 무작위 진입: 삭제(A-083) — 미실행",
               f"- C-7 생존편향: {v['C-7']}",
-              "- C-8 최종 확인: 이 실행에서 미사용 — 해당 없음",
+              "- C-8 최종 확인: 이 실행에서 미사용 — 해당 없음(최종 확인은 --final-check, 버전당 1회)",
               f"- 창별 결측 분 합계 {p['missing_bars']}, 손실 창 {p['loss_windows']}/{len(o['windows'])}",
+              *_intraday_summary_lines(o),
               f"- **판정: {v['verdict']}**" + (f" ({lfm.LABEL})" if applied else ""),
               *[f"- 사유: {x}" for x in v["reasons"]],
               "- 공개 실서버 성과는 테스트넷 PAPER 성과와 직접 비교하지 않는다(2-M2.6). PAPER 신호 일치율은 PAPER 중 저장한 "
@@ -992,6 +1667,7 @@ def render_low_frequency(low: dict, v: dict) -> list[str]:
 
 
 __all__ = ["MINUTE_COLUMNS", "MinuteBacktestConfig", "MinuteBacktestResult", "MinuteReadStats", "MinuteValidationInputs",
-           "decision_points", "first_minute_start", "iter_binance_minute_csv", "lf_history_runs", "m2_windows",
-           "perturbation_check_minute", "render_minute_report", "run_lf8_sample", "run_low_frequency_m2",
-           "run_minute_backtest", "run_minute_validation", "summary_of"]
+           "decision_points", "first_minute_start", "hold_return_of", "iter_binance_minute_csv", "last_minute_start",
+           "lf_history_runs", "m2_windows", "minute_request", "perturbation_check_minute", "render_minute_report",
+           "run_lf8_sample", "run_low_frequency_m2", "run_minute_backtest", "run_minute_final_check",
+           "run_minute_validation", "summary_of"]
