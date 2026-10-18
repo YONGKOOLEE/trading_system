@@ -5,6 +5,9 @@
 - 체결 금액(D-118): executionReport `Y`·myTrades `quoteQty`는 거래소 보고 금액(확정). FULL 응답 fills에는 금액 필드가
   없으므로 price × qty를 **임시값**(quote_confirmed=False)으로 두고, 같은 체결의 확정값이 오면 CONFIRMED로 바꾼다.
 - 수수료·수수료 자산(D-101): `n`·`N`, fills·myTrades의 commission·commissionAsset. 순 수령 계산·K4 판정은 호출자.
+- 메이커 여부(CP-040 D-267 (4), T-065 — 기록만): executionReport `m`, myTrades `isMaker`(BN 행 171·164). FULL 응답 fills에는
+  maker 필드가 없다(BN 행 121) → None. 불(bool)이 아니거나 없으면 None — 기록 전용 값이라 체결 해석을 실패시키지 않는다.
+  같은 체결의 값 비교(FillLedger CONFLICT)에는 넣지 않는다.
 - TRADE_PREVENTION 실행 유형은 l·L·Y = 0이라 체결이 아니다. TRADE인데 체결 ID·수량·수수료 자산이 없으면 해석 불가.
 - 주문 조회의 `cummulativeQuoteQty` < 0은 "데이터 없음"(None) — 0으로 보지 않는다.
 - 해석할 수 없는 행이 하나라도 있으면 목록 전체를 실패로 본다("없음"으로 잘못 확정하지 않게).
@@ -37,6 +40,10 @@ def _str(value: object, field: str, *, allow_empty: bool = False) -> str:
     return value
 
 
+def _maker(value: object) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
 @dataclass(frozen=True)
 class Fill:
     symbol: str
@@ -49,6 +56,7 @@ class Fill:
     commission: Decimal
     commission_asset: str
     at: datetime | None
+    is_maker: bool | None = None
 
     @property
     def key(self) -> tuple[str, int]:
@@ -141,7 +149,7 @@ def _execution_report(ev: dict) -> ExecutionReport:
             raise BinanceParseError("TRADE인데 체결 ID·수량 없음")
         fill = Fill(symbol, order_id, trade_id, qty, parse_non_negative(ev.get("L"), "L"),
                     parse_non_negative(ev.get("Y"), "Y"), True, parse_non_negative(ev.get("n"), "n"),
-                    _str(ev.get("N"), "N"), ms_to_utc(parse_int(ev.get("T"), "T")))
+                    _str(ev.get("N"), "N"), ms_to_utc(parse_int(ev.get("T"), "T")), _maker(ev.get("m")))
     else:
         for f in ("l", "Y"):
             parse_decimal(ev.get(f), f)   # 형식 확인만 (TRADE_PREVENTION 등은 0)
@@ -208,7 +216,8 @@ def parse_my_trades(body: object) -> list[Fill]:
                         parse_int(row.get("id"), "id"), parse_non_negative(row.get("qty"), "qty"),
                         parse_non_negative(row.get("price"), "price"), parse_non_negative(row.get("quoteQty"), "quoteQty"),
                         True, parse_non_negative(row.get("commission"), "commission"),
-                        _str(row.get("commissionAsset"), "commissionAsset"), ms_to_utc(parse_int(row.get("time"), "time"))))
+                        _str(row.get("commissionAsset"), "commissionAsset"),
+                        ms_to_utc(parse_int(row.get("time"), "time")), _maker(row.get("isMaker"))))
     return out
 
 

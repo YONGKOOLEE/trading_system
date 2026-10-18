@@ -123,7 +123,8 @@ class SpotUnknownResolver(UnknownResolver):
                 self._executor.apply_event(OrderEvent(
                     kind="FILL", order_no=t.order_no, fill_id=t.fill_id, quantity=t.quantity, price=t.price, at=t.at,
                     account=intent.account, commission=t.commission, commission_asset=t.commission_asset,
-                    instrument=intent.instrument, quote_qty=t.quote_qty, quote_confirmed=t.quote_qty is not None))
+                    instrument=intent.instrument, quote_qty=t.quote_qty, quote_confirmed=t.quote_qty is not None,
+                    is_maker=t.is_maker))
             if rec.state in _TERMINAL:
                 self._executor.apply_event(OrderEvent(kind=rec.state, order_no=rec.order_no, account=intent.account,
                                                       instrument=intent.instrument,

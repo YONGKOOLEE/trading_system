@@ -45,7 +45,7 @@ def to_fill_record(f: Fill) -> FillRecord:
         raise BrokerQueryError(f"{f.symbol} 체결 {f.trade_id}: 체결 시각 없음")
     return FillRecord(order_no=str(f.order_id), fill_id=str(f.trade_id), quantity=f.quantity, price=f.price,
                       at=f.at, commission=f.commission, commission_asset=f.commission_asset, quote_qty=f.quote_qty,
-                      instrument=f.symbol)
+                      instrument=f.symbol, is_maker=f.is_maker)
 
 
 class BinanceReadOnlyQueries:

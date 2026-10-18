@@ -15,6 +15,9 @@ M1 실행기(app/backtest.py — KRX 달력·KST·호가 표)는 그대로 두�
     판정 시각(첫 판정) / 그날 마지막 판정 시각(이후 판정). 일일 손실(K2) 검사·기준 금액은 첫 판정에서만(M1 DP-6과 같음).
   * 판정 시각 1개면 기존 동작과 같다(결과 지문 동일 — 시험 test_tm2_15_backtest_multi).
 - 비용: 수수료는 받는 자산에서 차감(D-101), 매도세 0. 현금(USDT) = 매수 −금액, 매도 +금액 − USDT 수수료.
+  수수료 모델(CP-040 D-267, T-065): `fees`를 주면 체결 요율 = taker(모든 체결 — IOC 지정가 매수·시장가 매도), 게이트 비용 추정 =
+  cost_rates.commission_rate = max(maker, taker)이어야 한다(다르면 실행 거부). 보고서에 두 요율·출처, 자리값 경고.
+  `fees`가 없으면 기존대로 cost_rates.commission_rate 하나를 체결·추정에 쓴다(요율이 같으면 결과 지문 동일).
 - 보유 표시(전략 입력): 청산 가능 수량(보유를 stepSize로 내림)만 보여 주고, minQty 미만(dust)은 미보유로 본다(D-102) [제안].
   왕복(거래 1건)은 매도 뒤 남은 보유가 dust 이하가 되면 끝난다(남은 dust 가치는 손익에 넣지 않음 — 보수).
 - 일일 손실 K2는 판정 시점에 한 번 평가, 다음 날 재개 가정(M1 DP-6과 같음).
@@ -43,6 +46,7 @@ from trading_system.config.strategy_registry import StrategyRegistry
 from trading_system.domain.clock import FixedClock
 from trading_system.domain.daily_input import final_daily, m2_daily_input
 from trading_system.domain.enums import GateResult, HaltType, IntentState, Mode, RequestType, Side
+from trading_system.domain.fees import FeeModel
 from trading_system.domain.limits import AccountLimits
 from trading_system.domain.market import (
     CashView, CostRates, DailyRisk, InstrumentInfo, InstrumentKind, Quote, SessionInfo, TradingStatus,
@@ -90,6 +94,7 @@ class SpotBacktestConfig:
     final_from: date = FINAL_FROM_DEFAULT
     caps: CapabilityTable | None = None    # 주면 전략 등록 검사(M2 열, BACKTEST 대상). None = 등록 검사 생략(기존)
     data_source: str = ""                  # 보고서 "데이터 출처" 문구. 비어 있으면 기존 문구(테스트넷 klines, B-U4)
+    fees: FeeModel | None = None           # 수수료 모델(CP-040 D-267). None = 기존(cost_rates.commission_rate 하나)
 
 
 class _Market:
@@ -190,12 +195,40 @@ def _next_eval(day: date, k: int, times: tuple[time, ...]) -> datetime:
     return datetime.combine(day + timedelta(days=1), times[0], tzinfo=UTC)
 
 
+def fill_rate_of(fees: FeeModel | None, cost_rates: CostRates) -> Decimal:
+    """체결 모델 수수료율: 수수료 모델이 있으면 taker(D-267 (3)), 없으면 기존 단일 요율."""
+    return fees.fill_rate if fees is not None else cost_rates.commission_rate
+
+
+def check_fee_model(fees: FeeModel | None, cost_rates: CostRates) -> None:
+    """게이트 비용 추정 요율(cost_rates.commission_rate)은 max(maker, taker)여야 한다(D-267 (2)). 다르면 실행 거부."""
+    if fees is not None and cost_rates.commission_rate != fees.estimate_rate:
+        raise BacktestError(f"비용 추정 요율 {cost_rates.commission_rate} ≠ max(maker {fees.maker_rate}, taker "
+                            f"{fees.taker_rate}) = {fees.estimate_rate} — 수수료 모델과 추정 요율이 어긋남 (D-267)")
+
+
+def fee_model_lines(fees: FeeModel, costs: object) -> list[str]:
+    """보고서 비용 줄: 두 요율·출처·추정 요율, 자리값이면 경고 (D-267 (3))."""
+    lines = [f"- 비용(D-267): 체결 수수료 = taker {fees.taker_rate}(시스템 주문은 IOC 지정가 매수·시장가 매도 → 모든 체결 테이커 "
+             f"[가정, V-338], 받는 자산에서 차감 D-101), maker {fees.maker_rate}(기록만), 비용 추정 = max {fees.estimate_rate}, "
+             f"요율 출처 `{fees.rate_source}`, 매도세 0, 비용 합계 {costs} USDT"]
+    if fees.is_placeholder:
+        lines.append("- 경고: 요율 자리값(rate_source = placeholder) — 실제 계정 요율이 아니다. 실제 요율은 LIVE 준비 때 "
+                     "account/commission으로 확인(D-267, A-115 Q-5). BNB 할인 미반영(B-U10)")
+    return lines
+
+
+def fee_model_summary(fees: FeeModel) -> dict[str, str]:
+    return {"maker_rate": str(fees.maker_rate), "taker_rate": str(fees.taker_rate), "rate_source": fees.rate_source,
+            "estimate_rate": str(fees.estimate_rate)}
+
+
 def dust_summary(fills: list[tuple[date, str, str, str, str, str]], cfg: SpotBacktestConfig) -> tuple[int, Decimal]:
     """매도 뒤 dust(0 < 남은 보유, 청산 가능 수량 0)가 남은 횟수와 마지막 남은 수량 합 (D-102 관찰용 집계).
 
     결과의 체결 기록(일, 주문번호, 심볼, 방향, 수량, 가격)을 체결 모델과 같은 규칙으로 다시 계산한다: 매수 순 수령 =
     수량 − 수량 × 수수료율(받는 자산 = 기초, D-101), 매도 = 수량만큼 감소."""
-    rate = cfg.cost_rates.commission_rate
+    rate = fill_rate_of(cfg.fees, cfg.cost_rates)
     held: dict[str, Decimal] = {}
     events = 0
     for _, _, inst, side, qty, _ in fills:
@@ -212,6 +245,7 @@ def dust_summary(fills: list[tuple[date, str, str, str, str, str]], cfg: SpotBac
 def _check_config(cfg: SpotBacktestConfig) -> list[date]:
     if not isinstance(cfg.slippage, Decimal) or not cfg.slippage.is_finite() or not _ZERO <= cfg.slippage < 1:
         raise BacktestError("슬리피지는 0 이상 1 미만의 Decimal — 사용자 결정 값(2-M2.2 ▢)을 지정해야 함")
+    check_fee_model(cfg.fees, cfg.cost_rates)
     for inst, bars in cfg.data.items():
         if inst not in cfg.rules or inst not in cfg.pairs:
             raise BacktestError(f"규칙·자산 쌍 없는 심볼: {inst}")
@@ -245,7 +279,7 @@ def run_backtest_m2(cfg: SpotBacktestConfig) -> BacktestResult:
     acct = _Account()
     policy = GatePolicy(cfg.quote_max_age, Decimal("0.05"), cfg.cost_rates, market_time=M2_TIME)
     order_policy = SpotOrderPolicy(cfg.buy_buffer, cfg.sell_buffer, cfg.quote_max_age)
-    broker = SpotBacktestBroker(pairs=cfg.pairs, fee_rate=cfg.cost_rates.commission_rate, slippage=cfg.slippage,
+    broker = SpotBacktestBroker(pairs=cfg.pairs, fee_rate=fill_rate_of(cfg.fees, cfg.cost_rates), slippage=cfg.slippage,
                                 tick_of=lambda i: cfg.rules[i].tick_size, step_of=lambda i: cfg.rules[i].lot_step,
                                 volume_cap=cfg.volume_cap)
     executor = Executor(repo, broker, clock, run_dir / "KILL", asset_pair=cfg.pairs.get, client_ids=True)
@@ -523,7 +557,8 @@ def render_report_m2(cfg: SpotBacktestConfig, result: BacktestResult, *, reprodu
         f"- 체결(2-M2.2){fill_ref}: 매수 = 시가 × (1 + 슬리피지 {cfg.slippage}) tick 올림이 IOC 지정가(시가 × (1 + 완충 "
         f"{cfg.buy_buffer}) tick 내림) 이하일 때만, 매도 = 시가 × (1 − 슬리피지) tick 내림, 가격제한 없음, "
         f"수량 stepSize, 봉 거래량 {cfg.volume_cap:%} 상한",
-        f"- 비용: 수수료율 {cfg.cost_rates.commission_rate}(받는 자산에서 차감, D-101), 매도세 0, 비용 합계 {result.costs} USDT",
+        *(fee_model_lines(cfg.fees, result.costs) if cfg.fees is not None else
+          [f"- 비용: 수수료율 {cfg.cost_rates.commission_rate}(받는 자산에서 차감, D-101), 매도세 0, 비용 합계 {result.costs} USDT"]),
         f"- K2 다음 날 재개 가정: {result.k2_resumes}회",
         "",
         "## 지표 (비용 반영 후, 연환산 365일)",

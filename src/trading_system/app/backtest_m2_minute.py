@@ -42,7 +42,8 @@ from pathlib import Path
 
 from trading_system.app.backtest import BacktestError, BacktestResult
 from trading_system.app.backtest_m2 import (
-    ACCOUNT, _Account, _ClockOk, _Limits, _Market, _round_trips, _Rules, _Strategies, compute_metrics_m2, sellable,
+    ACCOUNT, _Account, _ClockOk, _Limits, _Market, _round_trips, _Rules, _Strategies, check_fee_model,
+    compute_metrics_m2, fee_model_lines, fee_model_summary, fill_rate_of, sellable,
 )
 from trading_system.app.validation import Window, check_final_guard, param_variants, walkforward_windows
 from trading_system.broker.fake.spot_fill_model import SpotBacktestBroker
@@ -51,6 +52,7 @@ from trading_system.config.errors import ConfigError
 from trading_system.config.strategy_registry import StrategyRegistry
 from trading_system.domain.clock import FixedClock
 from trading_system.domain.enums import GateResult, HaltType, IntentState, Mode, Side
+from trading_system.domain.fees import FeeModel
 from trading_system.domain.limits import AccountLimits
 from trading_system.domain.market import CashView, CostRates, DailyRisk, Quote
 from trading_system.domain.market_time import M2_TIME
@@ -233,6 +235,11 @@ class MinuteBacktestConfig:
     data_version: str = ""
     data_source: str = ""
     code_commit: str = ""
+    fees: FeeModel | None = None            # 수수료 모델(CP-040 D-267) — 체결 taker, 추정 max. None = 기존 단일 요율
+
+    @property
+    def fill_rate(self) -> Decimal:
+        return fill_rate_of(self.fees, self.cost_rates)
 
 
 @dataclass
@@ -262,6 +269,7 @@ def grid_of(cfg: MinuteBacktestConfig) -> PeriodGrid:
 def _days(cfg: MinuteBacktestConfig) -> list[date]:
     if not isinstance(cfg.slippage, Decimal) or not cfg.slippage.is_finite() or not _ZERO <= cfg.slippage < 1:
         raise BacktestError("슬리피지는 0 이상 1 미만의 Decimal (CP-030 D-164 기본 0.001)")
+    check_fee_model(cfg.fees, cfg.cost_rates)
     if cfg.symbol not in cfg.rules or cfg.symbol not in cfg.pairs:
         raise BacktestError(f"규칙·자산 쌍 없는 심볼: {cfg.symbol}")
     if not 1 <= cfg.lookback_bars <= 997:
@@ -297,7 +305,7 @@ def run_minute_backtest(cfg: MinuteBacktestConfig) -> MinuteBacktestResult:
     acct = _Account()
     policy = GatePolicy(cfg.quote_max_age, Decimal("0.05"), cfg.cost_rates, market_time=M2_TIME)
     order_policy = SpotOrderPolicy(cfg.buy_buffer, cfg.sell_buffer, cfg.quote_max_age)
-    broker = SpotBacktestBroker(pairs=cfg.pairs, fee_rate=cfg.cost_rates.commission_rate, slippage=cfg.slippage,
+    broker = SpotBacktestBroker(pairs=cfg.pairs, fee_rate=cfg.fill_rate, slippage=cfg.slippage,
                                 tick_of=lambda i: cfg.rules[i].tick_size, step_of=lambda i: cfg.rules[i].lot_step,
                                 volume_cap=cfg.volume_cap)
     executor = Executor(repo, broker, clock, run_dir / "KILL", asset_pair=cfg.pairs.get, client_ids=True)
@@ -517,9 +525,10 @@ def render_minute_report(cfg: MinuteBacktestConfig, out: MinuteBacktestResult, *
         f"- 체결(D-221): 판정 시각이 속한 분의 봉 시가 기준. 매수 = 시가 × (1 + 슬리피지 {cfg.slippage}) tick 올림이 IOC 지정가"
         f"(최근가 = 직전 닫힌 봉 종가 × (1 + 완충 {cfg.buy_buffer}) tick 내림) 이하일 때만, 매도 = 시가 × (1 − 슬리피지) tick 내림, "
         f"봉 거래량 {cfg.volume_cap:%} 상한, 체결 봉 결측 → 미체결({out.missing_fill}건)",
-        f"- 비용: 수수료율 {cfg.cost_rates.commission_rate}(받는 자산에서 차감, BN §9 — 실제 요율 미확인), 비용 합계 {r.costs} USDT",
+        *(fee_model_lines(cfg.fees, r.costs) if cfg.fees is not None else
+          [f"- 비용: 수수료율 {cfg.cost_rates.commission_rate}(받는 자산에서 차감, BN §9 — 실제 요율 미확인), 비용 합계 {r.costs} USDT"]),
         f"- 데이터: 실행 기간 봉 {out.bars_in_period}개, 결측 분 {out.missing_bars}개(채우지 않음 — 판정 창 안이면 무효)",
-        f"- 단순 보유 참고(C-5): {buy_hold_return(out.first_open, out.last_close, cfg.slippage, cfg.cost_rates.commission_rate)}",
+        f"- 단순 보유 참고(C-5): {buy_hold_return(out.first_open, out.last_close, cfg.slippage, cfg.fill_rate)}",
         f"- K2 다음 날 재개 가정: {r.k2_resumes}회 / 실행 시간 {out.seconds}초", "",
         "## 지표 (비용 반영 후, 연환산 365일)", "| 지표 | 값 |", "|---|---|",
         *[f"| {k} | {v} |" for k, v in r.metrics.items()], "",
@@ -546,13 +555,14 @@ def summary_of(cfg: MinuteBacktestConfig, out: MinuteBacktestResult, *, reproduc
         "margin_s": cfg.margin.total_seconds(), "decisions": out.decisions, "minute_invalid": out.minute_invalid,
         "bars_in_period": out.bars_in_period, "missing_bars": out.missing_bars, "missing_fill": out.missing_fill,
         "data_version": cfg.data_version, "final_from": cfg.final_from.isoformat(),
-        "fee_rate": str(cfg.cost_rates.commission_rate), "slippage": str(cfg.slippage),
+        "fee_rate": str(cfg.fill_rate), "slippage": str(cfg.slippage),
         "initial_cash": str(cfg.initial_cash), "signals": len(r.signals),
         "fills": {side: sum(1 for f in r.fills if f[3] == side) for side in ("BUY", "SELL")},
         "round_trips": len(r.trades), "rejects": dict(sorted(r.rejects.items())), "k2_resumes": r.k2_resumes,
-        "buy_hold_return": buy_hold_return(out.first_open, out.last_close, cfg.slippage, cfg.cost_rates.commission_rate),
+        "buy_hold_return": buy_hold_return(out.first_open, out.last_close, cfg.slippage, cfg.fill_rate),
         "reproducible": reproducible, "lookahead_bad": lookahead_bad, "digest": r.digest, "metrics": r.metrics,
         "seconds": out.seconds, **out.extras,
+        **({"fees": fee_model_summary(cfg.fees)} if cfg.fees is not None else {}),
     }
 
 
@@ -663,8 +673,7 @@ def run_minute_validation(inp: MinuteValidationInputs) -> dict:
             "total_return": base.result.metrics["total_return"], "max_drawdown": base.result.metrics["max_drawdown"],
             "slip2x_trades": len(slip2.result.trades), "slip2x_expectancy": _fmt(_expectancy(slip2.result.trades)),
             "missing_bars": base.missing_bars, "minute_invalid": base.minute_invalid, "decisions": base.decisions,
-            "buy_hold_return": buy_hold_return(base.first_open, base.last_close, inp.slippage_base,
-                                               t.cost_rates.commission_rate),
+            "buy_hold_return": buy_hold_return(base.first_open, base.last_close, inp.slippage_base, t.fill_rate),
             "reproducible": repro, "lookahead_bad": bad, "variants": vrows, "seconds": base.seconds,
             "digest": base.result.digest,
         })

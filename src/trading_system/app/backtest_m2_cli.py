@@ -14,7 +14,9 @@
   규칙 검사 범위 = 전략 명세 유니버스 ∩ 거래 규칙 표(TESTNET_RULES 전체 — 설정 유니버스 역할, D-271 (5)). 실행 심볼은 --symbol 하나.
 - 거래 규칙: 테스트넷 실측값 BTCUSDT(broker-specs/binance-spot.md §12, 2026-10-14)·ETHUSDT(§15, 2026-10-18)만 있다 — PAPER 대상과
   같은 규칙으로 과거 가격을 돌린다(실서버 과거 시점의 규칙이 아님, 보고서 한계). 다른 심볼은 규칙이 없어 거부.
-- 비용: 수수료율 기본 = config/m2/market.paper.toml [costs] commission_rate(M2 비용 추정 요율), 슬리피지는 필수 인자(기본값 없음).
+- 비용: 수수료 모델 기본 = config/m2/market.paper.toml [costs](CP-040 D-267 — maker·taker·rate_source, 기존 commission_rate만
+  있으면 maker = taker = 그 값, 출처 placeholder). 체결 = taker, 게이트 비용 추정 = max(maker, taker). --fee를 주면
+  maker = taker = 그 값, 출처 "user"(사용자 지정). 슬리피지는 필수 인자(기본값 없음).
 - 결과: <out>/<실행 ID>/trading.db·report.md·summary.json. 재현성(같은 입력 재실행 지문 비교)·교란 검사(V-91, 표본 = 기간을 약 10등분한 날짜, M1과 같음)를 함께 한다.
 """
 
@@ -32,7 +34,7 @@ from pathlib import Path
 
 from trading_system.app.backtest import BacktestError
 from trading_system.app.backtest_m2 import (
-    SpotBacktestConfig, dust_summary, perturbation_check_m2, render_report_m2, run_backtest_m2,
+    SpotBacktestConfig, dust_summary, fee_model_summary, perturbation_check_m2, render_report_m2, run_backtest_m2,
 )
 from trading_system.app.validation_tool import load_validation_settings
 from trading_system.app.wiring import StrategyInput, load_strategy, period_grid_of, spot_rule_problems
@@ -41,6 +43,7 @@ from trading_system.config.capabilities import load_capabilities
 from trading_system.config.errors import ConfigError
 from trading_system.config.limits_file import load_limits_file
 from trading_system.config.m2_files import load_m2_market
+from trading_system.domain.fees import FeeModel
 from trading_system.domain.market import CostRates
 from trading_system.domain.market_time import Market
 from trading_system.domain.strategy import Bar
@@ -123,6 +126,14 @@ def load_binance_daily_csv(path: Path, incomplete: list[date] | None = None) -> 
     return bars
 
 
+def _fees(fee_arg: str | None, configured: FeeModel) -> FeeModel:
+    """--fee(단일 요율, 사용자 지정) 또는 설정 [costs]의 수수료 모델 (D-267). 형식·범위 오류는 ValueError·InvalidOperation."""
+    if fee_arg is None or fee_arg == "":
+        return configured
+    rate = Decimal(fee_arg)
+    return FeeModel(rate, rate, "user")
+
+
 def _times(text: str) -> tuple[time, ...]:
     try:
         return tuple(time(int(hh), int(mm)) for hh, mm in (part.strip().split(":") for part in text.split(",")))
@@ -147,7 +158,8 @@ def backtest_m2_main(argv: Sequence[str], root: Path) -> int:
     p.add_argument("--cash", default="10000", help="초기 USDT")
     p.add_argument("--eval-time", default="00:15", help="판정 시각 HH:MM(UTC), 여러 개는 쉼표 (예: 01:00,04:00)")
     p.add_argument("--slippage", required=True, help="불리 슬리피지 비율 (예: 0.001). 기본값 없음 — 사용 값을 기록")
-    p.add_argument("--fee", default=None, help="수수료율 (기본: config/m2/market.paper.toml [costs] commission_rate)")
+    p.add_argument("--fee", default=None,
+                   help="수수료율 — maker = taker = 이 값, 출처 user (기본: config/m2/market.paper.toml [costs], D-267)")
     p.add_argument("--limits", default="config/m2/limits.paper.toml", help="M2 한도 파일 (저장소 기준)")
     p.add_argument("--market-config", default="config/m2/market.paper.toml", help="M2 시장 설정 (저장소 기준)")
     p.add_argument("--out", default="var/backtest", help="결과 폴더 (저장소 기준 또는 절대 경로)")
@@ -184,17 +196,19 @@ def backtest_m2_main(argv: Sequence[str], root: Path) -> int:
         if skipped_used:
             source += (f". 불완전 봉(거래 중단으로 일찍 끝난 봉) {len(skipped_used)}개 제외 — "
                        f"{', '.join(d.isoformat() for d in skipped_used)}: 그날 판정 데이터 없음(04 §2.1 결측, 주문 없음)")
-        fee = Decimal(ns.fee) if ns.fee else market.commission_rate
+        fees = _fees(ns.fee, market.fees)
+        fee = fees.fill_rate
         out = Path(ns.out) if Path(ns.out).is_absolute() else root / ns.out
         cfg = SpotBacktestConfig(
             run_id=ns.run_id, strategy=strat, params=dict(params), account_limits=limits, rules=rules, pairs=pairs,
-            cost_rates=CostRates(commission_rate=fee, sell_tax_rate=Decimal("0"), cost_quantum=QUOTE_PRECISION),
+            cost_rates=CostRates(commission_rate=fees.estimate_rate, sell_tax_rate=Decimal("0"),
+                                 cost_quantum=QUOTE_PRECISION),
             data={ns.symbol: used}, start=start, end=end, initial_cash=Decimal(ns.cash), out_dir=out,  # type: ignore[arg-type]
             slippage=Decimal(ns.slippage), eval_time=times[0], eval_times=times, buy_buffer=market.buy_buffer,
             sell_buffer=market.sell_buffer, quote_max_age=timedelta(seconds=market.quote_max_age_seconds),
             data_version=f"{data_path.parent.name}/{data_path.name} sha256:{sha[:16]}",
             final_from=final_from, caps=caps,  # type: ignore[arg-type]
-            data_source=source)
+            data_source=source, fees=fees)
         result = run_backtest_m2(cfg)
     except (ConfigError, BacktestError, ValueError, InvalidOperation, OSError) as exc:
         print(f"백테스트 거부: {exc}")
@@ -212,7 +226,8 @@ def backtest_m2_main(argv: Sequence[str], root: Path) -> int:
         "days": len(days), "data_version": cfg.data_version, "data_rows_used": len(used),
         "data_rows_after_end_dropped": len(bars) - len(used),
         "incomplete_bars_skipped": [d.isoformat() for d in skipped_used], "final_from": final_from.isoformat(),  # type: ignore[attr-defined]
-        "fee_rate": str(fee), "slippage": str(cfg.slippage), "initial_cash": str(cfg.initial_cash),
+        "fee_rate": str(fee), "fees": fee_model_summary(fees), "slippage": str(cfg.slippage),
+        "initial_cash": str(cfg.initial_cash),
         "buy_buffer": str(cfg.buy_buffer), "sell_buffer": str(cfg.sell_buffer),
         "evaluations": len(result.signals_by_eval), "signals": len(result.signals),
         "fills": {side: sum(1 for f in result.fills if f[3] == side) for side in ("BUY", "SELL")},
@@ -247,7 +262,8 @@ def backtest_m2_minute_main(argv: Sequence[str], root: Path) -> int:
     p.add_argument("--lookback", required=True, type=int, help="판정 창 1분봉 수 (설정 [minute] lookback_bars와 같은 의미)")
     p.add_argument("--margin-seconds", default=2, type=int, help="확정 여유 초 (설정 [minute] confirm_margin_seconds, 기본 2)")
     p.add_argument("--slippage", required=True, help="불리 슬리피지 비율 (CP-030 D-164 기본 0.001). 기본값 없음 — 사용 값 기록")
-    p.add_argument("--fee", default=None, help="수수료율 (기본: config/m2/market.paper.toml [costs] commission_rate)")
+    p.add_argument("--fee", default=None,
+                   help="수수료율 — maker = taker = 이 값, 출처 user (기본: config/m2/market.paper.toml [costs], D-267)")
     p.add_argument("--limits", default="config/m2/limits.paper.toml", help="M2 한도 파일 (저장소 기준)")
     p.add_argument("--market-config", default="config/m2/market.paper.toml", help="M2 시장 설정 (저장소 기준)")
     p.add_argument("--out", default="var/backtest", help="결과 폴더 (저장소 기준 또는 절대 경로)")
@@ -283,7 +299,7 @@ def backtest_m2_minute_main(argv: Sequence[str], root: Path) -> int:
             raise ConfigError(f"데이터 파일 없음: {data_path.name}")
         size = data_path.stat().st_size
         source = ns.data_source or f"바이낸스 공개 1m klines CSV `{data_path.name}` ({size} 바이트, A-110)"
-        fee = Decimal(ns.fee) if ns.fee else market.commission_rate
+        fees = _fees(ns.fee, market.fees)
         out = Path(ns.out) if Path(ns.out).is_absolute() else root / ns.out
         if not ns.validate and (ns.start is None or ns.end is None):
             raise ConfigError("--start·--end가 필요 (--validate가 아니면)")
@@ -291,13 +307,14 @@ def backtest_m2_minute_main(argv: Sequence[str], root: Path) -> int:
         end = date.fromisoformat(ns.end) if ns.end else date(2020, 1, 1)
         cfg = MinuteBacktestConfig(
             run_id=ns.run_id, strategy=strat, params=dict(params), account_limits=limits, rules=rules, pairs=pairs,
-            cost_rates=CostRates(commission_rate=fee, sell_tax_rate=Decimal("0"), cost_quantum=QUOTE_PRECISION),
+            cost_rates=CostRates(commission_rate=fees.estimate_rate, sell_tax_rate=Decimal("0"),
+                                 cost_quantum=QUOTE_PRECISION),
             symbol=ns.symbol, source=partial(iter_binance_minute_csv, data_path, final_from=final_from),  # type: ignore[arg-type]
             start=start, end=end, initial_cash=Decimal(ns.cash), out_dir=out, slippage=Decimal(ns.slippage),
             lookback_bars=ns.lookback, margin=timedelta(seconds=ns.margin_seconds), buy_buffer=market.buy_buffer,
             sell_buffer=market.sell_buffer, quote_max_age=timedelta(seconds=market.quote_max_age_seconds),
             final_from=final_from, caps=caps, data_version=f"{data_path.parent.name}/{data_path.name} {size}B",  # type: ignore[arg-type]
-            data_source=source)
+            data_source=source, fees=fees)
         if ns.validate:
             v_out = out / ns.run_id
             if v_out.exists():
