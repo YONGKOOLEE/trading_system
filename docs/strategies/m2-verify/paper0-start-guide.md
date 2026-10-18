@@ -26,10 +26,10 @@ M1 봇과 **다른 봇**이다(시장별 봇, D-117 — 승인 A-109).
 ```
 notepad C:\AI\trading_system\m2-binance\.env.paper
 ```
-5. 파일 끝에 두 줄 추가 후 저장(값은 본인 것으로, 따옴표 없이):
+5. 파일 끝에 두 줄 추가 후 저장(값은 본인 것으로, 따옴표 없이). 키 이름은 **`M2_`로 시작**한다(`app/telegram_run.py:35` — M1 봇 키와 구분):
 ```
-TELEGRAM_BOT_TOKEN=<1의 토큰>
-TELEGRAM_CHAT_ID=<3의 숫자>
+M2_TELEGRAM_BOT_TOKEN=<1의 토큰>
+M2_TELEGRAM_CHAT_ID=<3의 숫자>
 ```
 - 기대: 저장만 하면 끝. 실제 연결 확인은 4단계 run 시작 때.
 
