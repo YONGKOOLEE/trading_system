@@ -999,13 +999,22 @@ def ops_stop_main(argv: Sequence[str] | None = None, environ: Mapping[str, str] 
     p.add_argument("--mode", required=True, help="PAPER만 허용")
     p.add_argument("--root", default=str(REPO_ROOT), help="저장소 루트")
     p.add_argument("--wait", type=int, default=60, help="종료 확인 대기(초), 0이면 쓰기만")
+    p.add_argument("--market", default="M1", help="M1|M2 (기본 M1). M2는 M2 체크아웃(config/m2)에서만 — CP-037 D-227")
     ns = p.parse_args(argv)
     env = dict(os.environ if environ is None else environ)
     why = mode_refusal(ns.mode, env)
     if why:
         print(f"거부: {why}")
         return 2
-    base = Path(ns.root).resolve() / "var" / "paper"
+    root = Path(ns.root).resolve()
+    if ns.market not in ("M1", "M2"):
+        print(f"거부: --market {ns.market!r}는 M1·M2만")
+        return 2
+    if ns.market == "M2" and not (root / "config" / "m2" / "app.paper.toml").is_file():
+        # [CP-037] M1 체크아웃에서 --market M2로 M1 run을 멈추지 않게 — M2 설정이 있는 체크아웃에서만
+        print(f"거부: --market M2인데 이 저장소에 config/m2/app.paper.toml이 없음 ({root}) — M2 체크아웃에서 실행")
+        return 2
+    base = root / "var" / "paper"
     if not instance_running(base):
         print("거부: PAPER run이 실행 중이 아님 — 정지 요청 파일을 만들지 않음")
         return 1

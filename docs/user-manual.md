@@ -1,6 +1,7 @@
 # 사용 설명서 — M1 PAPER 자동 운영 (키움 모의)
 
-- 버전 **v0.3 (2026-10-09, draft)**. 변경 이력:
+- 버전 **v0.4 (2026-10-19, draft)**. 변경 이력:
+  - v0.4 (2026-10-19): §13 M2 무인 운영(바이낸스 테스트넷 감독 프로세스, CP-037 T-054·T-055) 추가 — 예약 작업 등록은 D-231 승인 뒤. §1~§12(M1)는 바꾸지 않음.
   - v0.3 (2026-10-09): §11 모의 서버 조회·구독 실측(CP-032 Q-2, A-085) 추가, §12 전략실 안내 추가, 부록 A 일일 기준 기록(DAILY_BASE) 손상 확인·복구 절차 추가(§4 ⑫·§10 고침 — 집계(paper-review)는 손상 때 실패하지 않음).
   - v0.2 (2026-10-09): v0.1(2026-10-08) 대비: 3일차 결과, 무인 전환 준비 5단계(시간 서버·모드 줄·등록·실행 계정·업데이트 시간), 종료 코드 0/1/2/3과 기록 파일, "확인 필요" 줄의 뜻, 이상할 때 행 추가(자동 운영 거부·K3·장중 K8·일일 기준 기록 손상·K6·다음 해 달력), 정지 표를 코드 기준으로 고침(K3는 청산도 막음).
 - 대상: 사용자(운영자). 터미널 명령은 **복사해 붙이는 전체 명령**으로 적는다.
@@ -460,6 +461,116 @@ WebSocket:
   ```
   notepad C:\AI\strategy-lab\README.md
   ```
+
+## 13. M2 무인 운영 — 바이낸스 테스트넷 감독 프로세스 (CP-037 T-054·T-055, draft)
+- 범위: **M2 PAPER(바이낸스 Spot 테스트넷)만**. LIVE·M1은 이 절의 범위가 아니다. M1 무인 운영(§1~§6)은 바뀌지 않는다.
+- **아직 하지 않는다**: 예약 작업 등록(§13.3)은 **자동 실행 등록 승인(D-231)** 을 대화로 받은 뒤에만. 그 전에 main 병합과 `m2/run`(C:\AI\trading_system\m2-binance) 갱신이 먼저다(사용자 지시). 첫 무인 실행은 T-056(주문 차단 관찰 run, 72시간 이상)이며 M2 PAPER-0 수동 run(T-M2-15)과 **동시에 하지 않는다**(같은 체크아웃·DB).
+- 무인 상태의 테스트넷 주문은 별도 승인(T-M2-17 PAPER-1 전환 + 무인 주문 운영 승인)이고, 주문 스위치(`orders_approved`)는 사용자가 직접 켠다.
+- 근거 코드: `src/trading_system/app/m2_supervisor.py`, `scripts/m2-supervisor.py`, `scripts/schedule-register-m2.ps1`·`schedule-unregister-m2.ps1`, `src/trading_system/app/review_tool.py`(`--market M2`), `src/trading_system/app/autopilot.py`(`ops-stop --market M2`).
+
+### 13.1 감독이 하는 일 (24/7, 시각은 UTC)
+| 언제 | 자동으로 일어나는 일 | 텔레그램(M2 전용 봇, 머리말 `[M2 감독]`) |
+|---|---|---|
+| 로그온 시(또는 매일 07:30 보조) | 모드·설정 확인 → 시작 점검 → run 시작 | `감독 시작 — 시작 점검 통과, run 시작(HH:MM UTC). K8 자동 재개 진행` |
+| 시작 직후 | K8 → 새 대조 + 복구 조건 + M2 조건(서버 시각 0.5초 미만·거래 규칙·사용자 스트림 연결·시세 60초 이내) 확인 → 자동 재개. 안 되면 5분마다, 최대 12회 | `K8 자동 재개 완료(...)` / 첫 실패 `K8 자동 재개 실패(...)` / 12회 `K8 자동 재개 12회 실패 — 자동 재개 중단 ...` |
+| 계속 | run 생존·하트비트(90초) 감시. 사람 확인 정지(K1·K2·K3·K4·K7)는 풀지 않는다 | `사람 확인 정지 ...` (K4는 긴급: 테스트넷 리셋 의심 — `reset-confirm`) |
+| run이 비정상 종료 | 5분(2회째 15분) 뒤 자동 재시작 — 직전 24시간 2회까지. 재시작 run도 K8 → 대조 → 자동 재개 | `run 비정상 종료(코드 N) — 5분 뒤 자동 재시작(...)` |
+| 재시작하지 않는 경우 | 코드 0(정지 요청 파일·ops-stop) → 감독도 끝남. 코드 2·사람 확인 정지 중 종료·상한 도달·재시작 전 시작 점검 실패 → run 없이 대기 | `run 종료(코드 0) — ... 의도된 종료로 봄 ...` / `M2 정지 — 사람 확인: ...` |
+| UTC 00:05 이후(KST 09:05) | 일 경계 대조 확인(최대 00:30까지 기다림) → paper-review → 백업 → 일일 요약 | `[M2 YYYY-MM-DD 일일 요약 — PAPER 감독(UTC)]` + 문제 있으면 `확인 필요: ...` |
+
+- **정지는 청산이 아니다**: 어떤 경우에도 감독은 주문하지 않고, 보유를 자동으로 팔지 않는다.
+- "run 없이 대기" 중에는 텔레그램 명령(`/status` 등)이 처리되지 않는다(명령은 run이 처리). 귀가 후 §13.5.
+- 감독이 꺼져 있거나 로그인이 안 되면 알릴 주체가 없다 → **일일 요약이 KST 09:05~09:35에 안 오면** PC를 확인한다.
+
+### 13.2 처음 한 번 — 준비 (일반 PowerShell, `m2/run` 갱신 뒤)
+1) M2 체크아웃 루트 `.env`의 모드 줄 — 예약 실행에는 `$env:TRADE_MODE`가 없어 감독이 이 줄로 모드를 확인한다(`.env.paper`와 다른 파일, 이 한 줄만):
+```
+cd C:\AI\trading_system\m2-binance
+Test-Path .\.env
+```
+`False`면 만든다(인코딩 `ascii` 필수):
+```
+Set-Content -Path .\.env -Value 'TRADE_MODE=PAPER' -Encoding ascii
+```
+`True`면 확인만:
+```
+Select-String -Path .\.env -Pattern '^TRADE_MODE='
+```
+기대 결과: `.env:1:TRADE_MODE=PAPER`.
+
+2) 텔레그램이 켜져 있어야 감독이 시작한다 — `config\m2\app.paper.toml`의 `[telegram]` 아래 `enabled = true`, `.env.paper`에 `M2_TELEGRAM_BOT_TOKEN`·`M2_TELEGRAM_CHAT_ID`(PAPER-0 가이드 `docs/strategies/m2-verify/paper0-start-guide.md`). 키 이름만 확인하고 값은 출력하지 않는다:
+```
+Select-String -Path .\config\m2\app.paper.toml -Pattern '^enabled'
+Select-String -Path .\.env.paper -Pattern '^M2_TELEGRAM_' | ForEach-Object { $_.Line.Split('=')[0] }
+```
+기대 결과: 첫 줄에 `enabled = true`가 보이고(파일에 `enabled` 줄이 여럿이면 `[telegram]` 아래 것), 둘째 명령은 `M2_TELEGRAM_BOT_TOKEN`과 `M2_TELEGRAM_CHAT_ID` 두 줄.
+
+3) 손으로 한 번 실행해 보기(창을 닫지 않는다 — 끝낼 때는 §13.5의 `--stop`):
+```
+cd C:\AI\trading_system\m2-binance
+C:\AI\trading_system\trading_system\.venv\Scripts\python.exe scripts\m2-supervisor.py --mode PAPER --market M2
+```
+기대 결과: 창에 `감독 시작 (M2 PAPER, 계좌 별칭 ...)`, 텔레그램 `[정보] [M2 감독] 감독 시작 — ...`. 설정이 틀리면 `거부: ...` 또는 `거부(설정): ...` 한 줄 뒤 바로 끝난다(종료 코드 2, 파일을 만들지 않음).
+
+### 13.3 예약 작업 등록 (관리자 권한 PowerShell, **D-231 승인 뒤에만**)
+먼저 확인만(등록 안 함):
+```
+cd C:\AI\trading_system\m2-binance
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\schedule-register-m2.ps1 -DryRun
+```
+기대 결과: `확인만 (등록 안 함)`, `M2 체크아웃: C:\AI\trading_system\m2-binance`, `모드 줄: TRADE_MODE=PAPER 확인`, `시간대: ... (UTC+9 확인)`, `등록될 작업: TradingSystem-PAPER-M2-Supervisor, TradingSystem-PAPER-M2-ClockSync`, `감독 트리거: 로그온 시 + 매일 07:30, 실행 시간 상한 없음(0)`, `등록될 계정: PC이름\사용자`.
+- `M2 체크아웃이 아님`·`파일 없음`·`'TRADE_MODE=PAPER' 한 줄이 없습니다`·`PC 시간대가 UTC+9가 아님`이면 등록하지 않고 멈춘 것이다 — 그 문구를 Claude에게 알린다.
+
+이상 없으면 등록:
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\schedule-register-m2.ps1
+```
+기대 결과: `등록 완료 (사용자: ...)`, 두 작업이 `Ready`, 줄마다 `다음 실행 ...  실행 시간 상한 ...`. `이미 등록된 작업: ...`이면 아무것도 바뀌지 않은 것이다.
+- 시계 동기화 작업을 빼려면 끝에 ` -SkipClockSync`를 붙인다.
+
+등록 확인(일반 PowerShell):
+```
+Get-ScheduledTask -TaskName 'TradingSystem-PAPER-M2-*' | Select-Object TaskName, State, @{n='User';e={$_.Principal.UserId}}, @{n='Limit';e={$_.Settings.ExecutionTimeLimit}}
+```
+기대 결과: 두 줄 모두 `State` `Ready`, `User` = `whoami`의 사용자. 감독 줄의 `Limit`은 상한 없음 값(`PT0S`로 보일 것으로 예상 — **[확인 필요]**).
+- §2.4·§2.7의 `TradingSystem-PAPER-*` 명령은 이제 M2 작업 2개까지 4줄을 보여 준다(정상).
+
+### 13.4 평소 확인
+- 텔레그램 일일 요약(KST 09:05~09:35). `확인 필요:` 줄이 있으면 그 내용을 본다.
+- 기록 파일(UTC 날짜): `C:\AI\trading_system\m2-binance\var\paper\logs\m2-supervisor-YYYYMMDD.log`(감독), `run-console-m2-YYYYMMDD.log`(run 화면 출력), 텔레그램 전송 실패는 `alerts-fallback-m2-supervisor.log`, 감독이 시작도 못 했으면 `m2-supervisor-fatal.log`.
+- 감독 종료 코드(작업 스케줄러 "마지막 실행 결과"): `0` 정상(감독 정지 요청·의도된 run 종료·이미 실행 중) / `2` run 시작 전 거부(설정·모드·텔레그램·수동 run·시작 점검) / `3` 처리하지 못한 예외.
+- PAPER-1 집계 표(판정 없음, 표만):
+```
+cd C:\AI\trading_system\m2-binance
+C:\AI\trading_system\trading_system\.venv\Scripts\python.exe scripts\paper-review.py --mode PAPER --market M2
+```
+기대 결과: `집계 완료: ...\var\paper\review\review-....md (...)`. 파일 끝 `## M2 PAPER-1 집계` 표에 UTC일 수·판정 실행률·가동/계획 정지/비계획 정지·자동 재시작·K8 자동 재개 실패가 있다. 신호 일치율은 아직 `미계산`이다.
+
+### 13.5 끄고 켜기
+- **run만 끝내기**(계획 정지 — 코드 갱신·Windows 업데이트 등): 감독은 의도된 종료로 보고 재시작하지 않고 함께 끝난다.
+```
+cd C:\AI\trading_system\m2-binance
+C:\AI\trading_system\trading_system\.venv\Scripts\python.exe scripts\ops-stop.py --mode PAPER --market M2
+```
+기대 결과: `정지 요청 파일 작성: ...` → `run 종료 확인(실행 잠금 해제)`. 다시 켜기: §13.2 3)의 명령, 또는 다음 로그온·매일 07:30 보조 트리거. **예약 작업이 등록돼 있으면 다음 로그온이나 다음 07:30에 다시 켜진다** — 그때까지 꺼 두려면 작업 스케줄러에서 `TradingSystem-PAPER-M2-Supervisor`를 오른쪽 클릭 → "사용 안 함"(다시 쓰려면 "사용").
+- **감독과 run 끝내기**(대기 상태 포함 — "M2 정지 — 사람 확인" 뒤 귀가해서 처리할 때 먼저):
+```
+cd C:\AI\trading_system\m2-binance
+C:\AI\trading_system\trading_system\.venv\Scripts\python.exe scripts\m2-supervisor.py --mode PAPER --market M2 --stop
+```
+기대 결과: `감독 정지 요청 파일 작성: ...` → `감독 종료 확인(감독 잠금 해제)`. `거부: M2 감독이 실행 중이 아님`이면 이미 꺼져 있다. 작업 스케줄러의 "끝내기"·작업 관리자로 끄지 않는다(run 자식 프로세스가 함께 끝나는지 [확인 필요]).
+- 리셋 의심(K4)·결과 불명(K3) 처리는 감독을 끈 뒤(엔진 정지 중) PAPER-0 가이드의 `reset-confirm` 등 절차로. 처리 뒤 §13.2 3)으로 다시 시작한다.
+- **예약 작업 해제**(관리자 권한 PowerShell):
+```
+cd C:\AI\trading_system\m2-binance
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\schedule-unregister-m2.ps1
+```
+기대 결과: `해제: TradingSystem-PAPER-M2-Supervisor`, `해제: TradingSystem-PAPER-M2-ClockSync`, `남은 TradingSystem-PAPER-M2- 작업: 0개`. 도는 중인 감독은 멈추지 않는다 → 위 `--stop`.
+
+### 13.6 아직 확인되지 않은 것 (2026-10-19)
+- 감독·예약 작업 경로는 실제로 돈 적이 없다(시험은 가짜 run·가짜 시계로만 — T-054 시험). T-056 관찰 run으로 확인한다.
+- 작업 스케줄러 실행 시간 상한 0의 뜻(상한 없음)과 작업 끝내기 때 run 자식 동반 종료 여부 — 공식 문서 미확인.
+- 표의 텔레그램 문구는 코드 문구 그대로지만, 실제 봇 화면 모양은 확인하지 않았다.
 
 ## 부록 A. 일일 기준 기록(DAILY_BASE) 손상 — 확인·복구 절차
 §4 ⑫의 긴급 알림 **"일일 기준 기록 손상 — 사람 확인 필요"**를 받았을 때 쓴다. 아래 시스템 동작은 코드와 자동 시험으로 확인한 것이고(main abb6885), 실제 운영에서 겪은 적은 없다.
