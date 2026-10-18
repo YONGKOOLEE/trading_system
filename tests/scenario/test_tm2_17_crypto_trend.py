@@ -1,11 +1,17 @@
-"""T-M2-17 후보 crypto-trend v2 (전략실 → 운영 복사본, 미등록·미승인 — A-118 A·A-119 ①, docs/strategies/crypto-trend/review-v2.md).
+"""T-M2-17 후보 crypto-trend v3 (전략실 → 운영 복사본, 미등록·미승인 — A-118 A·A-119 ①·A-123 ①,
+docs/strategies/crypto-trend/review-v3.md).
 
+v3(전략실 작업 트리 strategy.py sha256 f6f23ef7…, 2026-10-18)는 v2에 CP-041 D-270 종목별 시작 규칙 검사
+validate_symbol_rules(params, symbol, rules: SymbolRules)만 더했다 — 판정·수량·신호·파라미터 값은 v2와 같다(diff 확인, 아래 규칙
+동작 시험 그대로 통과). 기존 validate_rules는 T-070 전 호환용으로 남았다(D-271 (2)).
 v2(전략실 커밋 a5c1405)는 운영 v1 검토(9fdb517)의 F-1·F-2를 반영했다 — 파라미터 period_minutes(= 60) 추가, validate_deploy는
-eval_times 빈 목록·period_minutes 60·M2를 요구. 판정·수량·신호 로직은 v1과 같다(전략실 표시, 아래 규칙 동작 시험 그대로 통과).
-v1 시험 이력은 커밋 9fdb517(F-1·F-2 xfail strict → 이 파일에서 통과 시험으로 전환).
+eval_times 빈 목록·period_minutes 60·M2를 요구. v1 시험 이력은 9fdb517, v2 시험 이력은 b8fb28c.
 
 검증 범위(구조·적재·등록 가능 여부만 — 재현·성과 판정은 장중 엔진 T-068 확장 뒤):
-- 파라미터 파일 2개(config/strategies/crypto-trend-v2.toml, -paper.toml)가 명세로 적재·검증되는지(period_minutes 60 포함).
+- validate_symbol_rules(D-270): 실측 규칙 통과(BTCUSDT 테스트넷 §12, ETHUSDT §15 값), 거부 4종(STEPS 밖 심볼·규칙 심볼 이름 다름·
+  LOT_SIZE 단위 다름·MARKET_LOT_SIZE 단위 배수 아님), MARKET step 0·배수 통과. 운영 시작 검사(app.wiring.spot_rule_problems)는 아직
+  validate_rules만 부른다(T-070 몫) — F-3 xfail strict는 그 때문에 남는다.
+- 파라미터 파일 2개(config/strategies/crypto-trend-v3.toml, -paper.toml)가 명세로 적재·검증되는지(period_minutes 60 포함).
 - 명세 능력: CAP-TRG-02·CAP-DAT-01·CAP-ORD-01·CAP-INS-05만(CAP-INS-01·CAP-DAT-02·CAP-HLD-02 없음). 코드가 실제로 읽는
   입력이 확정 일봉(daily_bars)·판정 시세(last_price)·상태 입력뿐인지 — AST와 동작으로 확인.
 - 등록(docs/capabilities.md M2 열, 이 브랜치): BACKTEST 통과(CAP-TRG-02 "검증 중"), PAPER 거부(능력 4개 "검증 중").
@@ -14,7 +20,8 @@ v1 시험 이력은 커밋 9fdb517(F-1·F-2 xfail strict → 이 파일에서 �
   없음은 F-3 xfail strict(A-119 ② CP 대기).
 - 재현 가능 여부: 1분봉 실행기(T-053)는 이제 이 전략을 받아 끝까지 돌지만 일봉 입력을 주지 않아(daily_bars ()) 신호 0 — 재현 아님.
 - 규칙 동작 최소 확인(가상 봉): 돌파 + 게이트 진입·수량 내림·손절가, 게이트 차단, EXIT-1, EXIT-2 우선, 수동 보유 무시, 두 종목 독립.
-가격·잔고는 가상값이다. 네트워크 없음. 전략 코드·파라미터 파일은 전략실 원본(a5c1405)과 바이트 단위로 같다.
+가격·잔고는 가상값이다. 네트워크 없음. 파라미터 파일은 전략실 원본과 바이트 단위로 같고, 전략 코드는 CRLF → LF 변환(D-063)만
+다르다(줄 내용 동일).
 """
 
 from __future__ import annotations
@@ -43,7 +50,7 @@ from trading_system.config.strategy_registry import StrategyRegistry, validate_s
 from trading_system.domain.enums import Mode, OrderType, RequestType
 from trading_system.domain.strategy import Bar, EvaluationSnapshot, InstrumentView, PositionView
 from trading_system.strategy import crypto_trend
-from trading_system.strategy.crypto_trend import CryptoTrendV2
+from trading_system.strategy.crypto_trend import CryptoTrendV3
 
 ROOT = Path(__file__).resolve().parents[2]
 D = Decimal
@@ -55,7 +62,7 @@ AT = datetime(2026, 10, 20, 5, 0, 2, tzinfo=UTC)
 
 
 def params(name: str) -> dict[str, object]:
-    return load_params_file(CryptoTrendV2().spec, ROOT / "config" / "strategies" / name)
+    return load_params_file(CryptoTrendV3().spec, ROOT / "config" / "strategies" / name)
 
 
 def m2_paper_limits():  # type: ignore[no-untyped-def]
@@ -65,7 +72,7 @@ def m2_paper_limits():  # type: ignore[no-untyped-def]
 # --- 파라미터 파일 ------------------------------------------------------------------------------------
 
 def test_both_param_files_load_with_lab_values() -> None:
-    full, paper = params("crypto-trend-v2.toml"), params("crypto-trend-v2-paper.toml")
+    full, paper = params("crypto-trend-v3.toml"), params("crypto-trend-v3-paper.toml")
     rules_part = {"entry_n": 25, "exit_n": 50, "stop_atr": D("2"), "period_minutes": 60}   # v2: period_minutes (F-1 해소)
     assert {k: full[k] for k in rules_part} == rules_part == {k: paper[k] for k in rules_part}
     assert (full["risk_ratio"], full["max_weight"], full["order_cap"]) == (D("0.025"), D("0.49"), D("1000000000"))
@@ -76,8 +83,8 @@ def test_both_param_files_load_with_lab_values() -> None:
 # --- 명세·능력 ----------------------------------------------------------------------------------------
 
 def test_spec_rules_priorities_and_capabilities() -> None:
-    spec = CryptoTrendV2().spec
-    assert (spec.strategy_id, spec.version, spec.markets, spec.universe) == ("crypto-trend", 2, ("M2",), (BTC, ETH))
+    spec = CryptoTrendV3().spec
+    assert (spec.strategy_id, spec.version, spec.markets, spec.universe) == ("crypto-trend", 3, ("M2",), (BTC, ETH))
     assert [(r.rule_id, r.kind, r.priority) for r in spec.rules] == [("EXIT-2", "EXIT", 1), ("EXIT-1", "EXIT", 2),
                                                                      ("ENTRY-1", "ENTRY", 1)]
     assert all(r.trigger == "CAP-TRG-02" and r.inputs == ("CAP-DAT-01", "상태 입력") for r in spec.rules)
@@ -97,19 +104,19 @@ def test_code_reads_only_daily_bars_last_price_and_state_inputs() -> None:
 
 
 def test_minute_bars_do_not_change_signals_and_daily_bars_are_required() -> None:
-    p = params("crypto-trend-v2-paper.toml")
+    p = params("crypto-trend-v3-paper.toml")
     bars, last = breakout_bars(D("60000")), D("60001")   # 판정 시세가 마지막 확정 종가(60000)를 넘음
-    base = CryptoTrendV2().evaluate(snapshot([view(BTC, bars, last)]), p)
+    base = CryptoTrendV3().evaluate(snapshot([view(BTC, bars, last)]), p)
     junk = tuple(Bar(datetime(2026, 10, 20, 4, m, tzinfo=UTC), D("1"), D("1"), D("1"), D("1"), D("1")) for m in range(60))
-    assert CryptoTrendV2().evaluate(snapshot([replace(view(BTC, bars, last), minute_bars=junk)]), p) == base != []
-    assert CryptoTrendV2().evaluate(snapshot([view(BTC, [], last)]), p) == []          # 일봉 없음 → 신호 없음
-    assert CryptoTrendV2().evaluate(snapshot([view(BTC, bars[:49], last)]), p) == []   # 확정 일봉 < 50 → 무효
+    assert CryptoTrendV3().evaluate(snapshot([replace(view(BTC, bars, last), minute_bars=junk)]), p) == base != []
+    assert CryptoTrendV3().evaluate(snapshot([view(BTC, [], last)]), p) == []          # 일봉 없음 → 신호 없음
+    assert CryptoTrendV3().evaluate(snapshot([view(BTC, bars[:49], last)]), p) == []   # 확정 일봉 < 50 → 무효
 
 
 # --- 등록 (capabilities.md M2 열, 이 브랜치) ---------------------------------------------------------
 
 def test_registration_backtest_passes_with_trg02_verifying_and_paper_refused() -> None:
-    spec = CryptoTrendV2().spec
+    spec = CryptoTrendV3().spec
     assert validate_spec(spec, CAPS, m2_paper_limits(), Mode.BACKTEST) == []
     refused = validate_spec(spec, CAPS, m2_paper_limits(), Mode.PAPER)
     assert sorted(p.split(":")[0] for p in refused) == ["CAP-DAT-01", "CAP-INS-05", "CAP-ORD-01", "CAP-TRG-02"]
@@ -124,33 +131,33 @@ def test_registration_backtest_passes_with_trg02_verifying_and_paper_refused() -
 def test_m2_assembly_refuses_ethusdt_outside_universe_a096() -> None:
     """운영 M2 유니버스(A-096, config/m2/universe.paper.toml)는 BTCUSDT만 → ETHUSDT는 조립 단계 거부.
     A-119 ③(ETHUSDT 추가)은 F-3 반영 뒤 설정 변경(순서 고정) — 이 브랜치는 유니버스·거래 규칙 무변경."""
-    si = [StrategyInput(CryptoTrendV2(), params("crypto-trend-v2-paper.toml"), ())]
+    si = [StrategyInput(CryptoTrendV3(), params("crypto-trend-v3-paper.toml"), ())]
     [problem] = _spot_strategy_problems(si, PAIRS)
     assert "유니버스 밖 심볼 ETHUSDT" in problem
     assert ETH not in TESTNET_RULES   # 이 브랜치의 1분봉 실행기 거래 규칙 표는 BTCUSDT만
 
 
-@pytest.mark.parametrize("name", ["crypto-trend-v2.toml", "crypto-trend-v2-paper.toml"])
+@pytest.mark.parametrize("name", ["crypto-trend-v3.toml", "crypto-trend-v3-paper.toml"])
 def test_f1_resolved_period_grid_gives_60min_grid_of_23_decisions(name: str) -> None:
     """F-1 해소(v2): D-219·D-258(A-115 Q-1) 주기 격자 검사 통과 → 60분 격자, 01:00~23:00 하루 23회(00:00 판정 없음)."""
-    grid = period_grid_of(StrategyInput(CryptoTrendV2(), params(name), ()), "M2")
+    grid = period_grid_of(StrategyInput(CryptoTrendV3(), params(name), ()), "M2")
     assert grid is not None and grid.period_minutes == 60
     times = grid.day_times(date(2026, 10, 20))
     assert len(times) == 23 and times[0].hour == 1 and times[-1].hour == 23
 
 
 def test_period_grid_still_refuses_eval_times_and_m1() -> None:
-    p = params("crypto-trend-v2-paper.toml")
+    p = params("crypto-trend-v3-paper.toml")
     with pytest.raises(ConfigError, match="eval_times는 빈 목록"):
-        period_grid_of(StrategyInput(CryptoTrendV2(), p, HOURLY), "M2")
+        period_grid_of(StrategyInput(CryptoTrendV3(), p, HOURLY), "M2")
     with pytest.raises(ConfigError, match="M1 프로파일에서 열지 않는다"):
-        period_grid_of(StrategyInput(CryptoTrendV2(), p, ()), "M1")
+        period_grid_of(StrategyInput(CryptoTrendV3(), p, ()), "M1")
 
 
 def test_operational_registration_path_builds_60min_grid_in_backtest(tmp_path: Path) -> None:
     """실운영 조립의 등록 경로(app.wiring._register_strategies — 등록부 검사 → 파라미터 검증·형 변환 → period_grid_of)를
     M2·BACKTEST 저장소로 통과하고 LoadedStrategy에 60분 격자가 실린다. PAPER 저장소·등록이면 같은 경로가 거부한다."""
-    si = StrategyInput(CryptoTrendV2(), params("crypto-trend-v2-paper.toml"), ())
+    si = StrategyInput(CryptoTrendV3(), params("crypto-trend-v3-paper.toml"), ())
     env = build_m2_env(tmp_path / "bt", mode=Mode.BACKTEST)
     try:
         reg = StrategyRegistry(env.repo, env.clock, env.halts, market="M2")
@@ -171,10 +178,10 @@ def test_operational_registration_path_builds_60min_grid_in_backtest(tmp_path: P
 
 def test_f2_resolved_validate_deploy_accepts_d219_periodic_deploy() -> None:
     """F-2 해소(v2): eval_times [] + period_minutes 60 + M2만 통과. 판정 시각 23개·15분·M1·period_minutes 없음은 거부."""
-    p = params("crypto-trend-v2-paper.toml")
-    s = CryptoTrendV2()
+    p = params("crypto-trend-v3-paper.toml")
+    s = CryptoTrendV3()
     assert s.validate_deploy(p, ()) == [] and s.validate_deploy(p, (), market="M2") == []
-    assert s.validate_deploy(params("crypto-trend-v2.toml"), (), market="M2") == []
+    assert s.validate_deploy(params("crypto-trend-v3.toml"), (), market="M2") == []
     [times] = s.validate_deploy(p, HOURLY)
     assert "빈 목록" in times and "23개" in times
     [fifteen] = s.validate_deploy({**p, "period_minutes": 15}, ())
@@ -188,34 +195,117 @@ def test_f2_resolved_validate_deploy_accepts_d219_periodic_deploy() -> None:
 def test_period_15_passes_grid_but_validate_deploy_refuses() -> None:
     """D-258은 M2 등록 period_minutes ∈ {15, 60}이고 명세 범위도 15~60 — 15분은 격자 검사를 통과하지만 이 전략의
     validate_deploy가 막는다(전략실 근거는 60분, 15분은 열위). 1분봉 실행기도 validate_deploy를 부른다."""
-    p = {**params("crypto-trend-v2-paper.toml"), "period_minutes": 15}
-    grid = period_grid_of(StrategyInput(CryptoTrendV2(), p, ()), "M2")
+    p = {**params("crypto-trend-v3-paper.toml"), "period_minutes": 15}
+    grid = period_grid_of(StrategyInput(CryptoTrendV3(), p, ()), "M2")
     assert grid is not None and grid.period_minutes == 15
-    assert CryptoTrendV2().validate_deploy(p, ()) != []
+    assert CryptoTrendV3().validate_deploy(p, ()) != []
 
 
-@pytest.mark.xfail(strict=True, reason="F-3: validate_rules 서명에 종목이 없어 BTCUSDT에 ETH 단위 0.0001이 와도 통과 — "
-                   "A-119 ② 공통 CP(서명에 종목 추가) 대기, 전략 안에서는 해결 불가")
+@pytest.mark.xfail(strict=True, reason="F-3: 운영 시작 검사(app.wiring.spot_rule_problems)가 아직 종목 없는 validate_rules만 "
+                   "불러 BTCUSDT에 ETH 단위 0.0001이 와도 통과 — 전략 쪽 validate_symbol_rules(v3)는 거부한다(아래 시험). "
+                   "호출부 전환은 CP-041 T-070(D-270·D-271)")
 def test_f3_start_rule_check_refuses_other_symbols_step() -> None:
-    p = params("crypto-trend-v2-paper.toml")
-    si = [StrategyInput(CryptoTrendV2(), p, ())]
+    p = params("crypto-trend-v3-paper.toml")
+    si = [StrategyInput(CryptoTrendV3(), p, ())]
     assert spot_rule_problems(si, {BTC: replace(RULES, lot_step=D("0.0001"))}, PAIRS) != []
 
 
 def test_start_rule_check_current_behaviour() -> None:
     """현재 validate_rules: 어느 종목의 고정 단위와도 다르면 거부, 같으면(종목 무관) 통과. 실측 BTC 단위는 통과."""
-    p = params("crypto-trend-v2-paper.toml")
+    p = params("crypto-trend-v3-paper.toml")
     assert crypto_trend.STEPS[BTC] == RULES.lot_step == D("0.00001")
-    assert spot_rule_problems([StrategyInput(CryptoTrendV2(), p, ())], {BTC: RULES}, PAIRS) == []
-    [problem] = CryptoTrendV2.validate_rules(p, D("0.001"), RULES.min_notional)
+    assert spot_rule_problems([StrategyInput(CryptoTrendV3(), p, ())], {BTC: RULES}, PAIRS) == []
+    [problem] = CryptoTrendV3.validate_rules(p, D("0.001"), RULES.min_notional)
     assert "0.001" in problem
-    assert CryptoTrendV2.validate_rules(p, D("0.0001"), RULES.min_notional) == []   # F-3 (종목 구분 없음)
+    assert CryptoTrendV3.validate_rules(p, D("0.0001"), RULES.min_notional) == []   # F-3 (종목 구분 없음)
+
+
+# --- v3 종목별 시작 규칙 검사 validate_symbol_rules (CP-041 D-270·D-271, A-122) ----------------------------
+
+# ETHUSDT 테스트넷 규칙 (main 655b47d binance-spot.md §15, 2026-10-18): LOT step 0.0001·minQty 0.0001·maxQty 9000,
+# MARKET_LOT minQty 0·stepSize 0, tick 0.01, minNotional 5·applyMinToMarket True. 이 브랜치의 TESTNET_RULES에는 ETH가 없다
+# (T-070 몫) — 시험에서만 만든다. MARKET maxQty·maxNotional은 §15에 기록이 없어 BTCUSDT 값을 빌린 가상값(검사에 쓰이지 않음).
+ETH_RULES = replace(RULES, instrument=ETH, lot_min_qty=D("0.0001"), lot_max_qty=D("9000"), lot_step=D("0.0001"),
+                    market_min_qty=D("0"), market_step=D("0"), tick_size=D("0.01"), min_notional=D("5"),
+                    apply_min_to_market=True)
+
+
+def test_v3_has_new_and_legacy_rule_checks() -> None:
+    """D-271 (2): 두 형식을 모두 가진 전략 — 운영은 T-070 뒤 새 형식만 부른다. 둘 다 정적 메서드, 반환은 문자열 목록."""
+    assert isinstance(CryptoTrendV3.__dict__["validate_symbol_rules"], staticmethod)
+    assert isinstance(CryptoTrendV3.__dict__["validate_rules"], staticmethod)
+    p = params("crypto-trend-v3-paper.toml")
+    assert CryptoTrendV3().validate_symbol_rules(p, BTC, RULES) == []   # 인스턴스로 불러도 같음
+
+
+@pytest.mark.parametrize("name", ["crypto-trend-v3.toml", "crypto-trend-v3-paper.toml"])
+def test_symbol_rules_pass_with_measured_testnet_rules(name: str) -> None:
+    """V-340 정상: 테스트넷 실측 규칙(BTC §12 = TESTNET_RULES, ETH §15)이면 두 심볼 모두 문제 0. params는 쓰지 않는다."""
+    p = params(name)
+    assert ETH_RULES.instrument == ETH and ETH_RULES.lot_step == crypto_trend.STEPS[ETH]
+    assert CryptoTrendV3.validate_symbol_rules(p, BTC, RULES) == []
+    assert CryptoTrendV3.validate_symbol_rules(p, ETH, ETH_RULES) == []
+    assert CryptoTrendV3.validate_symbol_rules({}, BTC, RULES) == []
+
+
+def test_symbol_rules_refuse_swapped_lot_steps_with_symbol_name() -> None:
+    """V-340 거부: BTC에 ETH 단위, ETH에 BTC 단위 → 심볼 이름이 든 문제 각 1건. F-3의 바로 그 경우(기존 validate_rules는 통과)."""
+    p = params("crypto-trend-v3-paper.toml")
+    [btc] = CryptoTrendV3.validate_symbol_rules(p, BTC, replace(RULES, lot_step=D("0.0001")))
+    assert btc.startswith(f"{BTC}:") and "LOT_SIZE stepSize 0.0001" in btc and "0.00001" in btc
+    [eth] = CryptoTrendV3.validate_symbol_rules(p, ETH, replace(ETH_RULES, lot_step=D("0.00001")))
+    assert eth.startswith(f"{ETH}:") and "LOT_SIZE stepSize 0.00001" in eth
+    assert CryptoTrendV3.validate_rules(p, D("0.0001"), RULES.min_notional) == []   # 비교: 기존 형식은 같은 경우를 통과
+
+
+def test_symbol_rules_refuse_symbol_outside_steps() -> None:
+    """거부: 전략 수량 단위 표(STEPS) 밖 심볼 → 문제 1건(나머지 검사 생략). 규칙 내용이 맞아 보여도 거부."""
+    [problem] = CryptoTrendV3.validate_symbol_rules({}, "SOLUSDT", replace(RULES, instrument="SOLUSDT"))
+    assert problem.startswith("SOLUSDT:") and "STEPS" in problem and BTC in problem and ETH in problem
+
+
+def test_symbol_rules_refuse_rules_for_other_instrument() -> None:
+    """거부: 넘겨받은 규칙의 심볼 이름이 다름(호출부가 규칙을 잘못 짝지은 경우). 단위가 같아도 거부, 단위까지 다르면 2건."""
+    [name_only] = CryptoTrendV3.validate_symbol_rules({}, BTC, replace(RULES, instrument="BTCUSDC"))
+    assert name_only.startswith(f"{BTC}:") and "'BTCUSDC'" in name_only
+    problems = CryptoTrendV3.validate_symbol_rules({}, BTC, ETH_RULES)
+    assert len(problems) == 2 and all(x.startswith(f"{BTC}:") for x in problems)
+
+
+@pytest.mark.parametrize(("sym", "market_step", "ok"), [
+    (BTC, "0", True),            # 0 = LOT_SIZE stepSize와 같음(D-208) → 검사 생략
+    (BTC, "0.00001", True),      # 같은 단위
+    (BTC, "0.000001", True),     # 전략 단위가 MARKET 단위의 배수
+    (BTC, "0.00002", False),     # 0.00001 % 0.00002 ≠ 0
+    (BTC, "0.001", False),
+    (ETH, "0", True),
+    (ETH, "0.00005", True),
+    (ETH, "0.0003", False),
+])
+def test_symbol_rules_market_step_multiple(sym: str, market_step: str, ok: bool) -> None:
+    """거부: MARKET_LOT_SIZE stepSize(> 0)의 배수가 아닌 전략 단위 — 청산은 시장가로 매수 수량 그대로 내므로."""
+    rules = replace(RULES if sym == BTC else ETH_RULES, market_step=D(market_step))
+    problems = CryptoTrendV3.validate_symbol_rules({}, sym, rules)
+    if ok:
+        assert problems == []
+    else:
+        [problem] = problems
+        assert problem.startswith(f"{sym}:") and "MARKET_LOT_SIZE" in problem and "배수가 아님" in problem
+
+
+def test_operational_start_check_still_uses_legacy_form_until_t070() -> None:
+    """현재 운영 시작 검사(app.wiring.spot_rule_problems)는 validate_rules만 부른다 — validate_symbol_rules가 거부할 규칙을
+    줘도 기존 형식 결과(통과)가 나온다. T-070(D-271 (2))에서 바뀔 동작의 현재 기록. 이 작업은 wiring을 고치지 않는다."""
+    si = [StrategyInput(CryptoTrendV3(), params("crypto-trend-v3-paper.toml"), ())]
+    bad = replace(RULES, lot_step=D("0.0001"))
+    assert CryptoTrendV3.validate_symbol_rules({}, BTC, bad) != []
+    assert spot_rule_problems(si, {BTC: bad}, PAIRS) == []
 
 
 # --- 재현 가능 여부: 1분봉 실행기 (T-053) ------------------------------------------------------------
 
 def test_minute_backtest_cli_now_accepts_but_gives_no_signal(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """v2는 1분봉 실행기의 실운영 같은 일정 검사(주기 격자·validate_deploy·거래 규칙)를 통과해 끝까지 돈다. 그러나 이
+    """v3(v2와 같음)는 1분봉 실행기의 실운영 같은 일정 검사(주기 격자·validate_deploy·거래 규칙)를 통과해 끝까지 돈다. 그러나 이
     실행기는 일봉 입력을 주지 않으므로(daily_bars ()) 가격이 계속 올라도 신호 0 — 재현이 아니다(T-068 확장 범위, A-119 ②).
     가상 1분봉 2일(매분 +0.01 상승)."""
     first = datetime(2025, 3, 3, tzinfo=UTC)
@@ -225,24 +315,24 @@ def test_minute_backtest_cli_now_accepts_but_gives_no_signal(tmp_path: Path, cap
         rows.append(mrow(first + timedelta(minutes=i), o=c, h=c, lo=c, c=c))
     data = write_csv(tmp_path / "BTCUSDT-1m.csv", rows)
     code = backtest_m2_minute_main(
-        ["--strategy", "trading_system.strategy.crypto_trend:CryptoTrendV2",
-         "--params", "config/strategies/crypto-trend-v2-paper.toml", "--data", str(data),
+        ["--strategy", "trading_system.strategy.crypto_trend:CryptoTrendV3",
+         "--params", "config/strategies/crypto-trend-v3-paper.toml", "--data", str(data),
          "--start", "2025-03-03", "--end", "2025-03-04", "--run-id", "t", "--lookback", "60",
          "--slippage", "0.001", "--out", str(tmp_path / "out")], ROOT)
     assert code == 0, capsys.readouterr().out
     s = json.loads((tmp_path / "out" / "t" / "summary.json").read_text(encoding="utf-8"))
-    assert (s["version"], s["period_minutes"], s["decisions"]) == (2, 60, 2 * 23)
+    assert (s["version"], s["period_minutes"], s["decisions"]) == (3, 60, 2 * 23)
     assert s["signals"] == 0 and s["round_trips"] == 0 and s["fills"] == {"BUY": 0, "SELL": 0}
 
 
 def test_minute_engine_input_shape_gives_no_signal() -> None:
     """1분봉 실행기의 판정 입력 모양(daily_bars (), 최근가 = 직전 닫힌 1분봉 종가, 단일 심볼)으로는 이 전략이 신호를 낼 수
     없다 — F-1·F-2가 해소돼도 일봉 입력·두 심볼이 없으면 재현이 아니다(T-068 범위 확장, A-119 ②)."""
-    p = params("crypto-trend-v2-paper.toml")
+    p = params("crypto-trend-v3-paper.toml")
     minute = tuple(Bar(datetime(2026, 10, 20, 4, m, tzinfo=UTC), D("60000"), D("60100"), D("59900"), D("60050"), D("1"))
                    for m in range(60))
     v = InstrumentView(BTC, minute_bars=minute, last_price=D("60050"))
-    assert CryptoTrendV2().evaluate(snapshot([v]), p) == []
+    assert CryptoTrendV3().evaluate(snapshot([v]), p) == []
 
 
 # --- 규칙 동작 (가상 봉) ------------------------------------------------------------------------------
@@ -271,13 +361,13 @@ def snapshot(views: list[InstrumentView]) -> EvaluationSnapshot:
 def test_entry_needs_price_above_prior_high_and_sma_gate() -> None:
     bars = flat_bars(59)
     bars.append(Bar(bars[-1].at + timedelta(days=1), D("50000"), D("50500"), D("49500"), D("50000"), D("10")))
-    p = params("crypto-trend-v2-paper.toml")
+    p = params("crypto-trend-v3-paper.toml")
     atr = D("1000")                                         # TR 모두 1000
-    [s] = CryptoTrendV2().evaluate(snapshot([view(BTC, bars, D("50100"))]), p)   # 판정 시세가 확정 종가 최고 50000 위
+    [s] = CryptoTrendV3().evaluate(snapshot([view(BTC, bars, D("50100"))]), p)   # 판정 시세가 확정 종가 최고 50000 위
     assert (s.rule_id, s.kind, s.order_type, s.price) == ("ENTRY-1", RequestType.ENTRY, OrderType.LIMIT, D("50100"))
     assert s.quantity == D("0.00188")      # min(20/2000=0.01, 500/50100=0.00998, 95/(50100×1.006)=0.0018848…) 내림
     assert s.stop_price == D("50100") - 2 * atr and s.valid_until == AT + timedelta(minutes=30)
-    assert CryptoTrendV2().evaluate(snapshot([view(BTC, bars, D("50000"))]), p) == []   # 같은 값은 돌파 아님
+    assert CryptoTrendV3().evaluate(snapshot([view(BTC, bars, D("50000"))]), p) == []   # 같은 값은 돌파 아님
 
 
 def test_gate_blocks_breakout_below_sma() -> None:
@@ -285,45 +375,45 @@ def test_gate_blocks_breakout_below_sma() -> None:
     bars = flat_bars(35, D("60000")) + [
         Bar(date(2026, 9, 5) + timedelta(days=i), D("50000"), D("50500"), D("49500"), D("50000"), D("10"))
         for i in range(25)]
-    p = params("crypto-trend-v2-paper.toml")
-    assert CryptoTrendV2().evaluate(snapshot([view(BTC, bars, D("51000"))]), p) == []    # SMA50 = 55000
-    assert CryptoTrendV2().evaluate(snapshot([view(BTC, bars, D("56000"))]), p) != []    # 둘 다 넘으면 진입
+    p = params("crypto-trend-v3-paper.toml")
+    assert CryptoTrendV3().evaluate(snapshot([view(BTC, bars, D("51000"))]), p) == []    # SMA50 = 55000
+    assert CryptoTrendV3().evaluate(snapshot([view(BTC, bars, D("56000"))]), p) != []    # 둘 다 넘으면 진입
 
 
 def test_exit1_below_sma_and_exit2_takes_priority() -> None:
     bars = flat_bars(60)
-    p = params("crypto-trend-v2-paper.toml")
+    p = params("crypto-trend-v3-paper.toml")
     mine = PositionView(D("0.002"), D("50000"), 3, True)
-    [x] = CryptoTrendV2().evaluate(snapshot([view(BTC, bars, D("49900"), mine)]), p)
+    [x] = CryptoTrendV3().evaluate(snapshot([view(BTC, bars, D("49900"), mine)]), p)
     assert (x.rule_id, x.kind, x.order_type, x.quantity) == ("EXIT-1", RequestType.EXIT, OrderType.MARKET, D("0.002"))
     high_cost = PositionView(D("0.002"), D("60000"), 3, True)   # 60000 − 2·1000 > 49900 → 손절
-    [y] = CryptoTrendV2().evaluate(snapshot([view(BTC, bars, D("49900"), high_cost)]), p)
+    [y] = CryptoTrendV3().evaluate(snapshot([view(BTC, bars, D("49900"), high_cost)]), p)
     assert y.rule_id == "EXIT-2"
-    assert CryptoTrendV2().evaluate(snapshot([view(BTC, bars, D("50100"), mine)]), p) == []   # SMA 위 보유 유지
+    assert CryptoTrendV3().evaluate(snapshot([view(BTC, bars, D("50100"), mine)]), p) == []   # SMA 위 보유 유지
 
 
 def test_manual_holding_blocks_entry_and_is_never_exited() -> None:
     manual = PositionView(D("1"), D("0"), 0, False)
-    p = params("crypto-trend-v2-paper.toml")
-    assert CryptoTrendV2().evaluate(snapshot([view(BTC, breakout_bars(D("60000")), D("60001"), manual)]), p) == []
-    assert CryptoTrendV2().evaluate(snapshot([view(BTC, flat_bars(60), D("49000"), manual)]), p) == []
+    p = params("crypto-trend-v3-paper.toml")
+    assert CryptoTrendV3().evaluate(snapshot([view(BTC, breakout_bars(D("60000")), D("60001"), manual)]), p) == []
+    assert CryptoTrendV3().evaluate(snapshot([view(BTC, flat_bars(60), D("49000"), manual)]), p) == []
 
 
 def test_two_symbols_independent_with_own_lot_steps() -> None:
-    p = params("crypto-trend-v2-paper.toml")
+    p = params("crypto-trend-v3-paper.toml")
     eth_bars = breakout_bars(D("3000"), D("30"))
-    sigs = CryptoTrendV2().evaluate(snapshot([view(BTC, flat_bars(60), D("49000")),
+    sigs = CryptoTrendV3().evaluate(snapshot([view(BTC, flat_bars(60), D("49000")),
                                               view(ETH, eth_bars, D("3001"))]), p)
     [s] = sigs
     assert s.instrument == ETH and s.rule_id == "ENTRY-1"
     assert s.quantity == D("0.0314")       # 95/(3001×1.006)=0.03146… → ETH 단위 0.0001(main 655b47d binance-spot §15 테스트넷 확인값)로 내림
-    assert CryptoTrendV2().evaluate(snapshot([view("XRPUSDT", eth_bars, D("3001"))]), p) == []   # 명세 밖 종목 무시
+    assert CryptoTrendV3().evaluate(snapshot([view("XRPUSDT", eth_bars, D("3001"))]), p) == []   # 명세 밖 종목 무시
 
 
 @pytest.mark.parametrize("price", ["15000.00", "60000.00", "126000.00", "999999.99"])
 def test_paper_size_stays_inside_l7_and_above_min_notional(price: str) -> None:
     """PAPER 축소판(order_cap 95): IOC 지정가(시세 × 1.005) 기준 주문 금액 ≤ L7 100 USDT(A-064), 내림 뒤 ≥ minNotional 5."""
     pr = D(price)
-    [s] = CryptoTrendV2().evaluate(snapshot([view(BTC, breakout_bars(pr), pr + 1)]), params("crypto-trend-v2-paper.toml"))
+    [s] = CryptoTrendV3().evaluate(snapshot([view(BTC, breakout_bars(pr), pr + 1)]), params("crypto-trend-v3-paper.toml"))
     assert s.quantity * s.price * D("1.005") <= m2_paper_limits().l7_max_order_amount
     assert s.quantity * s.price >= RULES.min_notional

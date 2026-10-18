@@ -1,10 +1,10 @@
-# 전략 crypto-trend v2
+# 전략 crypto-trend v3
 
-> **운영 복사본 (2026-10-18, A-119 ① — T-M2-17 v2 재검토, 미등록·미승인)** — 원본 `C:\AI\strategy-lab\candidates\crypto_trend\strategy.md`(전략실 커밋 a5c1405, 커밋 내용 sha256 앞 16자리 `c05354f6b4dd35d0`, LF). 본문은 원본 그대로이며 **운영 수정 없음**(코드·파라미터 파일도 원본과 같음). v1 사본은 커밋 9fdb517. 운영 검토·결함 F-1~F-3·재현 가능 여부: [review-v2.md](review-v2.md). 전략실 원문: [lab-handoff.md](lab-handoff.md), [lab-notes.md](lab-notes.md).
+> **운영 복사본 (2026-10-18, A-123 ① — T-M2-17 v3 재검토, 미등록·미승인)** — 원본 `C:\AI\strategy-lab\candidates\crypto_trend\strategy.md`(작업 트리 파일 sha256 앞 16자리 `0e43e848b9fe8367`, CRLF → LF 변환 뒤 `329634b5ea20055b`). 본문은 원본 그대로이며 **운영 수정 없음**(코드·파라미터 파일도 원본과 같음 — 코드는 LF 변환만). v2 사본은 커밋 b8fb28c, v1 사본은 9fdb517. 운영 검토·결함·재현 가능 여부: [review-v3.md](review-v3.md). 전략실 원문: [lab-handoff.md](lab-handoff.md), [lab-notes.md](lab-notes.md).
 
 - 상태: **전략실 연구 후보** — strategy.py 작성(2026-10-18, 기존 스냅샷의 확정 일봉 + 판정 시세만 사용 — 장중 봉 불필요), 구조 검사 통과, 간이 재생(운영 도메인 객체)으로 시뮬레이터와 일치 확인, critic 차단 4건 반영(2026-10-18). 공식 재현은 운영 장중 엔진(CP-040 T-068) 뒤. 탐색 결과는 판정이 아님.
 - 작성: 2026-10-18 전략실(밤샘 연구). 근거 research/2026-10-18-overnight-design.md A·B·K·L·M·N·O·P·Q·V·W, research/2026-10-18-intraday-design.md.
-- 버전: **v2**(2026-10-18 03:04 — 운영 검토 F-1·F-2 반영: 파라미터 period_minutes = 60 추가, validate_deploy는 eval_times 빈 목록·period_minutes 60 요구. 판정·수량·신호 무변경, 재생 결과 v1과 같음 105건·+6,964%. v1 = strategy-v1.py·params-v1*.toml). v1 설명: (btc-trend v1과 별개 ID — 유니버스·판정 주기·진입 게이트·크기가 다름. 이전 결과 승계 없음 — D-011)
+- 버전: **v3**(2026-10-18 21:47 — 운영 CP-041 D-270·D-271 승인 A-122 반영: 종목별 시작 규칙 검사 validate_symbol_rules(params, symbol, rules: SymbolRules) 추가 — STEPS[심볼] = LOT_SIZE stepSize, MARKET_LOT_SIZE stepSize 배수, 범위 밖 심볼 거부. 기존 validate_rules는 T-070 전 호환용으로 남김. 판정·수량·신호·파라미터 값 무변경. v2 = strategy-v2.py·params-v2*.toml). 이전 v2(2026-10-18 03:04 — 운영 검토 F-1·F-2 반영: 파라미터 period_minutes = 60 추가, validate_deploy는 eval_times 빈 목록·period_minutes 60 요구. 판정·수량·신호 무변경, 재생 결과 v1과 같음 105건·+6,964%. v1 = strategy-v1.py·params-v1*.toml). v1 설명: (btc-trend v1과 별개 ID — 유니버스·판정 주기·진입 게이트·크기가 다름. 이전 결과 승계 없음 — D-011)
 - 설명: btc-trend v1의 수준(확정 UTC 일봉 25일 종가 최고 돌파·50일 종가 평균 이탈 청산·ATR14 손절)을 **60분마다** 확인한다. 진입은 "판정 가격 > 50일 평균"일 때만(진입 즉시 청산 상태 금지 — 1시간 판정의 헛매매 제거). BTCUSDT·ETHUSDT 2종목, 한 계좌에서 종목별 위험 2.5%·종목 상한 49%.
 
 - 대상 시장: M2(바이낸스 현물). 기준 통화 USDT, 레버리지·공매도 없음.
@@ -52,7 +52,7 @@
 | period_minutes | int | 분 | 15~60 | 주기 판정 격자(CAP-TRG-02, 운영 D-219) — 이 전략은 60만 허용(validate_deploy) (60) |
 
 ## 포지션 크기 (§2.8)
-- S-3: 수량 = min(기준 금액 × risk_ratio ÷ (stop_atr × ATR14), 기준 금액 × max_weight ÷ 판정 가격, order_cap ÷ (판정 가격 × 1.006)), 종목별 수량 단위로 내림(BTCUSDT 0.00001, ETHUSDT 0.0001 가정 — validate_rules로 확인).
+- S-3: 수량 = min(기준 금액 × risk_ratio ÷ (stop_atr × ATR14), 기준 금액 × max_weight ÷ 판정 가격, order_cap ÷ (판정 가격 × 1.006)), 종목별 수량 단위로 내림(BTCUSDT 0.00001, ETHUSDT 0.0001 — 둘 다 테스트넷 확인값, 운영 binance-spot §15·2026-10-18; 최소 주문 5 USDT).
 - 기준 금액 = 운영 snapshot.base_amount(01 §2.4). **남은 현금 항은 전략에 없다** — 두 종목이 같은 판정에서 매수 신호를 내고 현금이 모자라면 운영 게이트·현금 예약이 축소 또는 거부(운영 동작 미확인). 처리 순서는 운영 스냅샷 종목 순서. 전략실 재생은 "현금 한도로 축소, 종목 순서대로"로 근사.
 
 ## 전략실 근거 (판정 아님, 과대 추정 — 사후 선택 2종목, 게이트·1시간 판정은 결과를 본 뒤 설계)
@@ -87,4 +87,4 @@
 - 생존편향·과대 추정: BTC·ETH 모두 사후 선택. 게이트·1시간 판정은 일봉 탐색·헛매매 진단을 본 뒤 설계(시도 기록 notes.md·trials.jsonl). 2026 최종 확인 미사용.
 - 전략실 1시간 봉은 운영 1분봉 사본에서 "있는 분만" 묶음(빈 구간 35곳·8,632분) — 일봉도 그 1시간 봉에서 만듦. 운영 일봉(CAP-DAT-01)과 같은지 미확인.
 - IOC 0.5% 완충·미체결(EXPIRED)이 모형에 없음(다음 봉 시가 무조건 체결) — T-068에서 EXPIRED 수 기록.
-- 창 끝 미청산 처리(기대값에서 제외)가 운영 엔진과 같은지 미확인. ETH 수량 단위·최소 주문 가정, 수수료 요율 B-U10, 세금 U-17.
+- 창 끝 미청산 처리(기대값에서 제외)가 운영 엔진과 같은지 미확인. 수수료 요율 B-U10, 세금 U-17.

@@ -1,4 +1,4 @@
-> 전략실 노트 원문 사본(2026-10-18, 원본 `C:\AI\strategy-lab\candidates\crypto_trend\notes.md`, 전략실 커밋 a5c1405, 커밋 내용 sha256 앞 16자리 `c6a4918267c386ac`, LF). 수정 없음. 맨 위 "폐기 기준"은 운영 재현(T-068 뒤)에 그대로 적용한다 — [review-v2.md](review-v2.md) §6.
+> 전략실 노트 원문 사본(2026-10-18, 원본 `C:\AI\strategy-lab\candidates\crypto_trend\notes.md`, 작업 트리 파일 sha256 앞 16자리 `08047f251f2be4f2`, CRLF → LF 변환 뒤 `47998e2e168cfb65`). 수정 없음. 운영 검토: [review-v3.md](review-v3.md). 맨 위 "폐기 기준"은 운영 재현(T-068 뒤)에 그대로 적용한다 — [review-v3.md](review-v3.md) §7.
 
 # crypto-trend — 노트
 
@@ -49,3 +49,15 @@
 - F-1(period_minutes 없음)·F-2(validate_deploy 23개 요구 vs D-219 빈 목록) → **전략실 v2로 수정**: ParamSpec period_minutes(15~60, 값 60), validate_deploy = eval_times 빈 목록 + period_minutes 60 + M2. 구조 검사 통과(CryptoTrendV2), validate_deploy 시험(빈 목록·60 통과 / 23개·15분·M1 거부), 재생 105건·+6,963.7%·MDD 33.5%(v1과 같음).
 - F-3(validate_rules 서명에 종목 없음 → BTCUSDT에 ETH 단위 0.0001이 와도 통과, ETH 0.0001도 가정): 전략 안에서는 고칠 수 없음 — **운영 공통 CP(서명에 종목 추가) 권장**, 전략 파라미터로 단위를 받는 방식은 오설정 위험이 같아 비권장.
 - 사전 등록 폐기 기준(맨 위)은 v2에 그대로 적용(규칙·수치 무변경이라 v1 근거 수치 그대로 비교).
+
+## 재검토 (2026-10-18 08:1x) — review-2026-10-18.md
+- BB L4 1% 공존(K2 연 약 100일), CC·DD 연간 상위 5 다종목 일봉 = v3 후보(7창 194건 C-2 충족·C-3·C-4 충족). 권장: v3를 1순위로, v2는 T-068 뒤.
+
+## LF-8 미리 보기 (2026-10-18 21:38, 연구 참고·공식 아님 — research/2026-10-18-lf8-preview-design.md)
+- v2(params-v2) 표본 29심볼(운영 수집용 목록): 610건·거래당 로그 +0.0246(슬리피지 0.2% +0.0226)·양수 심볼 72%·1위(BNB) 제외 +0.0198 → **LF-8.1~8.4 모두 충족**. 배포 BTC·ETH 거래당 평균은 표본의 4.0배 — 백테스트 수치는 일반 코인 기준 크게 과대일 수 있음.
+- 한계: 수집용 목록(공식 T-073 아님)·N=10 규칙은 결과 본 뒤 정함·전략실 재생(운영 엔진 아님)·종목 이름 BTCUSDT 대체·소형 코인 체결 가정. 생존편향 일부 남음, 과대 추정.
+
+## v3 (2026-10-18 21:52 — 운영 CP-041 D-270·D-271 승인 A-122, 사용자 "60분판으로 간다")
+- strategy.py에 validate_symbol_rules(params, symbol, rules: SymbolRules) 추가(STEPS 밖 심볼·심볼 이름 다름·LOT_SIZE 단위 다름·MARKET_LOT 배수 아님 → 거부), 기존 validate_rules는 T-070 전 호환용으로 남김. 판정·수량·신호·파라미터 값 무변경. v2 = strategy-v2.py·params-v2*.toml 보존.
+- 확인: 구조 검사 통과(CryptoTrendV3 v3), 규칙 검사 시험 8/8, 재생 거래 목록 v2와 같음(23회 105건·+6,964%·MDD 33.5% / 24회 109건), 운영 엔진(하루 1회) 55건·거부 0(v2와 같음), LF-8 미리 보기 trades.csv 바이트 동일.
+- 시도 수 변화 없음(매매 규칙 바꾸지 않음). 이전 결과 승계는 규칙 동일성 확인에 한함 — 운영 공식 판정은 v3로 새로.

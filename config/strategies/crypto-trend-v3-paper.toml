@@ -1,6 +1,6 @@
-# crypto-trend v2 — M2 PAPER 축소판(운영 M2 PAPER 한도 A-064: L1 0.5%·L2 10%·L3 50%·L4 1%·L6 3·L7 100 USDT 안). 규칙·기간 값은 params-v1과 같다.
+# crypto-trend v3 — M2 PAPER 축소판(운영 M2 PAPER 한도 A-064: L1 0.5%·L2 10%·L3 50%·L4 1%·L6 3·L7 100 USDT 안). 규칙·기간 값은 params-v1과 같다.
 strategy = "crypto-trend"
-version = 2
+version = 3
 
 [params]
 entry_n = 25

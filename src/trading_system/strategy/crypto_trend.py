@@ -1,4 +1,4 @@
-"""후보 crypto-trend v2 — BTC·ETH 현물(M2, 바이낸스) 일봉 수준 추세 추종을 60분마다 판정. 전략실 연구 후보(운영 미등록).
+"""후보 crypto-trend v3 — BTC·ETH 현물(M2, 바이낸스) 일봉 수준 추세 추종을 60분마다 판정. 전략실 연구 후보(운영 미등록).
 
 근거: research/2026-10-18-overnight-design.md(A·B·K·L·M·N·O·V·W), btc-trend v1(candidates/btc_trend)과 같은 수준·파라미터 값.
 규칙(판정 = CAP-TRG-02 60분 주기, 매시 정각 + 확정 여유 — 운영 CP-040 D-258. 스냅샷 일봉은 확정된 UTC 일봉만(그날 진행 중 봉 제외),
@@ -14,6 +14,9 @@
 순수 함수. 파일·네트워크·현재 시각·난수 없음.
 v2(2026-10-18, 운영 검토 F-1·F-2 반영 — 판정·수량·신호 무변경, v1 = strategy-v1.py): CAP-TRG-02 주기 판정 규약(운영 D-219·D-258)에 맞춰
 정수 파라미터 period_minutes(= 60)를 두고, validate_deploy는 eval_times 빈 목록·period_minutes 60을 요구한다.
+v3(2026-10-18, 운영 CP-041 D-270·D-271 승인 A-122 — 판정·수량·신호 무변경, v2 = strategy-v2.py): 종목별 시작 규칙 검사
+validate_symbol_rules(params, symbol, rules: SymbolRules)를 둔다(운영 F-3 해소 — 2심볼 전략은 이 형식이 있어야 조립·백테스트가 시작된다).
+기존 형식 validate_rules는 T-070 전 운영 코드 호환용으로 남긴다(D-271 (2): 둘 다 있으면 새 형식만 호출).
 """
 
 from __future__ import annotations
@@ -26,11 +29,12 @@ from trading_system.domain.enums import OrderType, RequestType
 from trading_system.domain.models import Signal
 from trading_system.domain.strategy import (
     Bar, EvaluationSnapshot, InstrumentView, ParamSpec, RuleSpec, StrategyLimits, StrategySpec)
+from trading_system.domain.trading_rules import SymbolRules
 from trading_system.strategy.base import ParamValues, make_signal
 
 STRATEGY_ID = "crypto-trend"
-VERSION = 2
-# 종목 → 수량 단위(바이낸스 LOT_SIZE stepSize). BTCUSDT는 테스트넷 확인값(binance-spot.md), ETHUSDT 0.0001은 가정 — 운영 exchangeInfo로 확인
+VERSION = 3
+# 종목 → 수량 단위(바이낸스 LOT_SIZE stepSize). BTCUSDT는 테스트넷 확인값(binance-spot.md), ETHUSDT 0.0001도 테스트넷 확인값(운영 binance-spot §15, 2026-10-18)
 STEPS = {"BTCUSDT": Decimal("0.00001"), "ETHUSDT": Decimal("0.0001")}
 PERIOD_MINUTES = 60                # 60분 주기(01:00~23:00 하루 23회, 운영 CP-040 D-258·V-337) — 15분은 전략실 시험에서 열위(research M)
 _ATR_N = 14
@@ -80,7 +84,7 @@ def build_spec() -> StrategySpec:
         unfilled_policy="시스템 기본", sizing="S-3", holding="수 일~수 개월", limits=StrategyLimits())
 
 
-class CryptoTrendV2:
+class CryptoTrendV3:
     def __init__(self) -> None:
         self.spec = build_spec()
 
@@ -122,9 +126,27 @@ class CryptoTrendV2:
         return out
 
     @staticmethod
+    def validate_symbol_rules(params: ParamValues, symbol: str, rules: SymbolRules) -> list[str]:
+        """운영 CP-041 D-270 형식 — 시스템이 전략 범위 심볼마다 한 번 부른다. 문제가 있으면 시작 거부(주문 0).
+        전략은 수량을 STEPS[심볼]로 내리므로 그 값이 거래소 LOT_SIZE stepSize와 같아야 하고, 청산(시장가) 수량은 매수 수량 그대로라
+        MARKET_LOT_SIZE stepSize(0 = LOT_SIZE와 같음, D-208)의 배수여야 한다."""
+        del params
+        step = STEPS.get(symbol)
+        if step is None:
+            return [f"{symbol}: 전략 수량 단위 표(STEPS)에 없는 심볼 — 이 전략은 {sorted(STEPS)}만"]
+        problems: list[str] = []
+        if rules.instrument != symbol:
+            problems.append(f"{symbol}: 거래 규칙의 심볼 {rules.instrument!r}가 다름")
+        if rules.lot_step != step:
+            problems.append(f"{symbol}: 전략 수량 단위 {step:f} ≠ 거래소 LOT_SIZE stepSize {rules.lot_step:f}")
+        if rules.market_step > 0 and step % rules.market_step != 0:
+            problems.append(f"{symbol}: 전략 수량 단위 {step:f}가 MARKET_LOT_SIZE stepSize {rules.market_step:f}의 배수가 아님")
+        return problems
+
+    @staticmethod
     def validate_rules(params: ParamValues, lot_step: Decimal, min_notional: Decimal) -> list[str]:
-        """btc-trend F-2와 같은 서명(DP-54). 서명에 종목이 없어 '어느 종목의 수량 단위와도 같지 않으면' 거부한다 —
-        종목별 대조는 운영이 서명에 종목을 넣거나 STEPS를 exchangeInfo로 맞춰야 정확해진다(인계 시 확인 항목)."""
+        """btc-trend F-2와 같은 기존 서명(DP-54) — T-070 전 운영 코드 호환용. 서명에 종목이 없어 '어느 종목의 수량 단위와도 같지 않으면'
+        거부한다. 종목별 정확한 대조는 validate_symbol_rules(CP-041 D-270 — 운영은 둘 다 있으면 새 형식만 부른다, D-271 (2))."""
         del params, min_notional
         if lot_step not in STEPS.values():
             return [f"거래소 LOT_SIZE stepSize {lot_step:f}가 전략 고정 수량 단위 {sorted(f'{s:f}' for s in STEPS.values())}와 다름"]

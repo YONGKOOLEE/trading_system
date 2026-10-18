@@ -1,6 +1,6 @@
-# crypto-trend v2 (초안) — BTCUSDT·ETHUSDT, 60분 판정, 진입 게이트(가격 > SMA(exit_n)). 근거 research/2026-10-18-overnight-design.md.
+# crypto-trend v3 (v2와 값 같음 — strategy.py에 validate_symbol_rules 추가, CP-041 D-270) — BTCUSDT·ETHUSDT, 60분 판정, 진입 게이트(가격 > SMA(exit_n)). 근거 research/2026-10-18-overnight-design.md.
 strategy = "crypto-trend"
-version = 2
+version = 3
 
 [params]
 entry_n = 25
