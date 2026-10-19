@@ -46,7 +46,19 @@ def test_incomplete_bar_skipped_and_recorded_when_set_given(tmp_path: Path) -> N
     assert seen == {datetime(2020, 2, 19, 11, 35, tzinfo=UTC)}
 
 
-@pytest.mark.parametrize("end", ["2020-02-19T11:36:00.000Z", "2020-02-19T11:35:00.000Z"])
+def test_zero_length_bar_also_skipped_when_set_given(tmp_path: Path) -> None:
+    """[개정 2026-10-19] 끝 = 시작인 길이 0 봉(공개 데이터 2017-09-06 16:00 — 거래소 결함)도 결측으로. 처음에는 일봉 규칙
+    (시작 < 끝)과 같게 거부로 고정했으나, crypto-trend 공식 검증의 전체 이력 실행이 이 봉에서 거부되어 같은 결함 범주로 처리한다
+    (결측 → 판정 무효, 보수적). 기본(집합 없음)은 여전히 거부."""
+    rows = [ROWS[0], line("2020-02-19T11:35:00.000Z", "2020-02-19T11:35:00.000Z"), ROWS[2]]
+    with pytest.raises(ConfigError, match="불완전 봉"):
+        list(iter_binance_minute_csv(write(tmp_path, rows), START, STOP, final_from=date(2026, 1, 1)))
+    seen: set[datetime] = set()
+    bars = list(iter_binance_minute_csv(write(tmp_path, rows), START, STOP, final_from=date(2026, 1, 1), incomplete=seen))
+    assert [b.at.strftime("%H:%M") for b in bars] == ["11:34", "17:30"] and len(seen) == 1
+
+
+@pytest.mark.parametrize("end", ["2020-02-19T11:36:00.000Z", "2020-02-19T11:34:59.000Z"])
 def test_other_close_time_violations_still_rejected(tmp_path: Path, end: str) -> None:
     rows = [ROWS[0], line("2020-02-19T11:35:00.000Z", end), ROWS[2]]
     with pytest.raises(ConfigError, match="불완전 봉"):
