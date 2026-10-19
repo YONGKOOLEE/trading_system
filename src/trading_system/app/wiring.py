@@ -332,6 +332,21 @@ def _spot_strategy_problems(strategies: list[StrategyInput], pairs: Mapping[str,
     return out
 
 
+SIGNAL_PRICE_REFERENCE = "reference_price"   # [CP-039 D-249 (3)] 전략 클래스 속성 SIGNAL_PRICE_FIELD 값
+
+
+def signal_price_problems(strategies: list[StrategyInput], *, public: bool) -> list[str]:
+    """[CP-039 D-249 (3), 재검토 2026-10-19] 신호 출처 binance-public이면 신호 조건을 reference_price(신호 출처 참조 시세)로
+    판정한다고 밝힌 전략(클래스 속성 SIGNAL_PRICE_FIELD = "reference_price")만 시작한다. last_price(테스트넷)로 신호 조건을
+    보는 전략은 봉(실서버)과 현재가(테스트넷)가 섞여 청산·손절이 틀릴 수 있다 — 불확실하면 시작하지 않음(주문 0).
+    testnet 출처(기본)는 검사하지 않는다(종전 동작)."""
+    if not public:
+        return []
+    return [f"{si.strategy.spec.owner}: 신호 출처 binance-public에는 신호 조건을 reference_price로 판정하는 전략만 "
+            f"(SIGNAL_PRICE_FIELD = \"{SIGNAL_PRICE_REFERENCE}\" 선언 없음 — CP-039 D-249 (3))"
+            for si in strategies if getattr(si.strategy, "SIGNAL_PRICE_FIELD", None) != SIGNAL_PRICE_REFERENCE]
+
+
 LEGACY_RULES_MULTI_SYMBOL = "종목별 규칙 검사 불가 — validate_symbol_rules 필요 (CP-041 D-271)"
 
 

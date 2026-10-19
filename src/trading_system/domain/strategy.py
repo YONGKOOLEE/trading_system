@@ -206,7 +206,7 @@ class InstrumentView:
     daily_exit: tuple[Bar, ...] | None = None
     # [CP-039 D-248·D-249] M2 신호 출처 참조 시세(P_s). 신호 출처 testnet(기본)이면 last_price와 같은 값, binance-public이면 실서버
     # 공개 시세(모르거나 60초 넘게 늙었으면 None). 신호 조건은 봉·이 값으로, 수량 산정·주문 가격은 last_price(실행 출처)로 쓴다.
-    # M1·백테스트는 None(종전 그대로)
+    # M1은 None(종전 그대로). M2 백테스트는 출처가 하나라 last_price와 같은 값(재검토 2026-10-19)
     reference_price: Decimal | None = None
 
 

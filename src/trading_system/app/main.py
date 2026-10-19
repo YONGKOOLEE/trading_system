@@ -53,7 +53,7 @@ from .engine import Engine
 from .instance_lock import InstanceLocked, acquire_instance_lock
 from .startup import LiveNotAvailable, check_m2_startup, check_startup, m2_paper_problems
 from .supervisor import QueuedHalts, Supervisor, write_fallback
-from .wiring import SignalInputs, StrategyInput, build_engine, load_strategy
+from .wiring import SignalInputs, StrategyInput, build_engine, load_strategy, signal_price_problems
 
 
 def record_fatal(path: Path, exc: BaseException) -> None:
@@ -404,6 +404,9 @@ def _m2_inputs(root: Path, mode: Mode, base: Path, connector=None, signal_transp
     check_strategy_slots(cfg.app.strategies, cfg.limits.l6_max_positions)   # [CP-034 D-197] 연결 전
     caps = load_capabilities(root / "docs" / "capabilities.md")
     strategies = _strategies(cfg.app)
+    sig_problems = signal_price_problems(strategies, public=cfg.app.signal_source.is_public)   # [CP-039 D-249 (3)] 연결 전
+    if sig_problems:
+        raise ConfigError(sig_problems)
     ms = cfg.market_settings
     pairs = {s: (cfg.universe.base_asset(s) or "", cfg.universe.quote_asset) for s in cfg.universe.symbols}
     # 비용 추정 올림 단위 = 호가 자산 자릿수(D-118). fake는 가상값, PAPER는 exchangeInfo quoteAssetPrecision으로 바꾼다

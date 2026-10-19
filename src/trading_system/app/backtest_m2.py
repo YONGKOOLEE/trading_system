@@ -366,6 +366,7 @@ def run_backtest_m2(cfg: SpotBacktestConfig) -> BacktestResult:
                 di = m2_daily_input(cfg.data[inst], now, final_bars)   # 실시간과 같은 함수 (D-088, DP-82)
                 views.append(InstrumentView(inst, daily_bars=di.bars,
                                             last_price=qt.price if qt else None, position=pv,
+                                            reference_price=qt.price if qt else None,   # 출처 하나 (CP-039 D-249)
                                             has_pending_order=pending, data_ok=qt is not None,
                                             daily_ok=di.ok, daily_exit=di.daily_exit))
             snap = EvaluationSnapshot(ev_id, "M2", ACCOUNT, now, base, tuple(views),
@@ -502,6 +503,7 @@ def perturbation_check_m2(cfg: SpotBacktestConfig, check_days: list[date]) -> li
                 di = m2_daily_input(data[inst], now, final_bars)
                 views.append(InstrumentView(inst, daily_bars=di.bars,
                                             last_price=today.open if today else None,
+                                            reference_price=today.open if today else None,
                                             data_ok=today is not None, daily_ok=di.ok, daily_exit=di.daily_exit))
             ev = evaluation_id_of(spec.strategy_id, spec.version, "M2", f"{day.isoformat()}T{et:%H:%M}Z")
             snap = EvaluationSnapshot(ev, "M2", ACCOUNT, now, cfg.initial_cash, tuple(views),

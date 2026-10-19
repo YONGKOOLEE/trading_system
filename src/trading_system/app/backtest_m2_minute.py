@@ -807,6 +807,7 @@ def run_minute_backtest(cfg: MinuteBacktestConfig) -> MinuteBacktestResult:
                 out.minute_invalid += 0 if mv.ok else 1
                 qt = quotes.get(s)
                 views.append(InstrumentView(s, minute_bars=mv.bars, last_price=qt.price if qt is not None else None,
+                                            reference_price=qt.price if qt is not None else None,   # 출처 하나 (CP-039 D-249)
                                             position=pv, has_pending_order=pending, data_ok=qt is not None,
                                             minute_ok=mv.ok, agg_bars=mv.agg_bars, agg_missing=mv.agg_missing,
                                             **_daily_view(daily_feed, s, at)))
@@ -989,7 +990,8 @@ def _flat_signals(cfg: MinuteBacktestConfig, grid: PeriodGrid, dps: Mapping[str,
         price = dp.last.close if dp.last is not None else None
         agg = [_minute_bar(s, b) for b in hist[s] if b.at < dp.boundary] if req.agg_minutes else ()  # type: ignore[operator]
         mv = _minute_view(req, dp, agg, cfg.margin) if declared else _MinuteView((), True)
-        views.append(InstrumentView(s, minute_bars=mv.bars, last_price=price, data_ok=price is not None, minute_ok=mv.ok,
+        views.append(InstrumentView(s, minute_bars=mv.bars, last_price=price, reference_price=price,
+                                    data_ok=price is not None, minute_ok=mv.ok,
                                     agg_bars=mv.agg_bars, agg_missing=mv.agg_missing, **_daily_view(feed, s, at)))
     ev = evaluation_id_of(spec.strategy_id, spec.version, "M2", at.isoformat())
     snap = EvaluationSnapshot(ev, "M2", ACCOUNT, at, cfg.initial_cash, tuple(views), next_evaluation_at=grid.next_after(at))
