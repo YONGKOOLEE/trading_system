@@ -393,6 +393,10 @@ def test_cli_minute_validate_six_windows(tmp_path: Path, capsys: pytest.CaptureF
     assert v["windows"][0]["train_shortened"] and v["data_start"] == "2021-06-01"
     assert v["verdict"]["C-4"] == "미실행" and v["verdict"]["verdict"] == "판단 불가"
     assert all(w["missing_bars"] > 0 for w in v["windows"])
+    # [CP-041 T-072 D-278] 검증 기간 연속 실행 분류 절 — 실행 조건 파일 기록 (추가 확인, 기존 기대값 불변)
+    pp = v["paper_period"]
+    assert pp["period"] == ["2020-01-01", "2025-12-31"] and pp["windows"]["28"]["count"] == 2192 - 27
+    assert pp["params_file"]["name"] == "p.toml" and pp["limits_file"]["name"] == "limits.paper.toml"
 
 
 def test_cli_daily_path_unchanged_with_explicit_interval(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

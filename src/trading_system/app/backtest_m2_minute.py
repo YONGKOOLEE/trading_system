@@ -63,6 +63,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from trading_system.app import low_frequency as lfm
+from trading_system.app import paper_period as pp
 from trading_system.app.backtest import BacktestError, BacktestResult
 from trading_system.app.backtest_m2 import (
     ACCOUNT, _Account, _ClockOk, _Limits, _Market, _round_trips, _Rules, _Strategies, check_fee_model,
@@ -1237,6 +1238,8 @@ class MinuteValidationInputs:
     perturbation_days: int = 3          # 창마다 교란 검사 표본 날짜 수
     command: str = ""
     low_frequency: lfm.LowFrequencyInputs | None = None   # [CP-038] 저빈도 선언 전략만. None = 일반 경로
+    params_file: Path | None = None     # [CP-041 D-278] PAPER 기간 분류 실행 조건 기록(이름·SHA-256). None = 출처 미기록
+    limits_file: Path | None = None
 
 
 def _window_intraday(r: MinuteBacktestResult) -> dict:
@@ -1323,6 +1326,7 @@ def run_minute_validation(inp: MinuteValidationInputs) -> dict:
         "variants": [{"label": k, "trades": len(v), "expectancy": _fmt(_expectancy(v))} for k, v in var_trades.items()],
         "verdict": verdict, "command": inp.command,
     }
+    out["paper_period"] = paper_period_m2(inp)
     if inp.low_frequency is not None:   # [CP-038 D-234] 같은 실행 묶음에서 추가 판정 — 선언 없는 전략은 이 칸 자체가 없다
         out["low_frequency"] = run_low_frequency_m2(inp, verdict, base_runs, variants, reproducible=all_repro,
                                                     lookahead_ok=all_lookahead)
@@ -1334,6 +1338,25 @@ def run_minute_validation(inp: MinuteValidationInputs) -> dict:
                                                 newline="\n")
     (inp.out_dir / "validation.md").write_text(md, encoding="utf-8", newline="\n")
     return out
+
+
+def paper_period_m2(inp: MinuteValidationInputs) -> dict:
+    """[CP-041 D-278, T-072] 검증 기간(창 검증 구간 처음~끝) 연속 1회 실행(기본 슬리피지·같은 파라미터·한도)의 왕복으로 PAPER
+    기간 분류. 창별 실행을 이어 붙이지 않는다 — 해마다 무보유로 다시 시작해 해 경계 왕복이 끊기므로 [임시 판단]. 분류 거부(창 수
+    0 등)는 판정표에 '분류 불가'로 적고 일반 판정 경로는 막지 않는다."""
+    t = inp.template
+    start, end = min(w.val_start for w in inp.windows), max(w.val_end for w in inp.windows)
+    if (end - start).days + 1 < pp.WINDOW_DAYS[0]:
+        return {"error": f"창 수 0 — 기간 {start}~{end} {(end - start).days + 1}일 < {pp.WINDOW_DAYS[0]}일"}
+    r = run_minute_backtest(replace(t, run_id="paper-period", start=start, end=end, slippage=inp.slippage_base,
+                                    out_dir=inp.out_dir / "runs", params=dict(t.params)))
+    lots = [pp.Lot(x.entry_day, x.exit_day) for x in r.result.trades]
+    lots += [pp.Lot(x.entry_day, None) for x in r.open_lots.values()]
+    try:
+        return pp.classify_paper_period(lots, start=start, end=end, final_from=t.final_from,
+                                        params_file=inp.params_file, limits_file=inp.limits_file)
+    except pp.PaperPeriodError as exc:
+        return {"error": str(exc)}
 
 
 # --- [DP-81, A-124 ④] 최종 확인 실행 (D-163, V-295) -------------------------------------------------------------------
@@ -1624,6 +1647,8 @@ def render_minute_validation(o: dict) -> str:
               "테스트넷 봉으로 다시 계산(D-222)."]
     if low:
         lines += render_low_frequency(low, v)
+    if "paper_period" in o:
+        lines += pp.render_paper_period(o["paper_period"])
     return "\n".join(lines) + "\n"
 
 

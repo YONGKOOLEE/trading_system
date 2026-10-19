@@ -11,6 +11,16 @@
   EVALUATION 수(늦은 판정은 금지라 기록 시각 ≈ 예정 시각). 일정을 모르면 "일정 미확인".
 - 자동 재시작: 감독 감사 RESTART(시각·사유). K8 자동 재개 실패: K8_AUTO_RESUME_GAVE_UP 수, AUTO 채널 거부 명령 수.
 - 신호 일치율(D-220 저장 봉 기준 재계산): **미계산** — 저장 봉으로 전략을 다시 돌리는 재계산 도구가 아직 없다(DP, T-M2-17 전 필요).
+- [CP-041 T-072·CP-038 T-059] 전략별 PAPER-1 기간 조건(classes를 줄 때만 — 안 주면 표는 종전 그대로, V-303):
+  * 규칙: 저빈도 예외(CP-038 판정표 "저빈도 예외(CP-038)") → **CP-038 D-238**(최소 90 UTC일 + PAPER 안 완결 왕복 1건, 없으면
+    왕복 완료까지 연장, 상한 180 UTC일 → "판단 불가(거래 미관찰)"·사용자 결정). D-278 저빈도이지만 예외 판정이 아님 → **CP-041
+    D-279**(최소 90 UTC일, 90일 뒤 왕복 0건이면 "판정 보류" → 사용자 결정, 자동 연장·상한 없음). 일반(D-278 저빈도 아님) →
+    **CP-037 D-232**(최소 28 UTC일). 분류 없음 → "미분류". 두 규칙이 겹치면(예외이면서 D-278 저빈도) 더 구체적이고 긴 D-238을
+    적용한다(CP-041 D-279 "둘 중 긴 기간", CP-038 D-238 v0.2).
+  * UTC일 수·왕복은 PAPER 기간 시작(리셋 확인이면 그 시점)부터 다시 센다(D-232 리셋 재계산).
+  * 완결 왕복(04 D-078): 그 전략(owner = "전략:버전") 소유권이 기간 안에 생겨 "전량 청산" 또는 "dust 확정"으로 해제됐고, 그 사이에
+    같은 owner·심볼의 매수 체결과 매도 체결이 모두 있는 것. 리셋·외부 거래·체결 0주 해제는 왕복이 아니다.
+  * 판정 실행률·안전성 등 나머지 D-232 기준은 모든 규칙에 그대로 적용된다(이 칸은 기간 조건만 표시 — 판정은 사용자).
 민감값: 계좌 식별·금액 없음.
 """
 
@@ -31,6 +41,8 @@ SUPERVISOR_AUDIT = "M2_SUPERVISOR"            # app/m2_supervisor.AUDIT_KIND와 
 PLANNED_EVENTS = frozenset({"PLANNED_STOP", "SUPERVISOR_STOP"})
 PLANNED_LEAD = timedelta(minutes=5)
 DEFAULT_GAP = timedelta(minutes=3)
+LF_LABEL = "저빈도 예외(CP-038)"          # app/low_frequency.LABEL과 같은 값 (D-240 표시 — reporting은 app을 import하지 않는다)
+FULL_EXIT_REASONS = ("전량 청산", "dust 확정")   # execution/executor 해제 사유·storage.repository.DUST_RELEASE_REASON
 SIGNAL_MATCH_NOTE = "미계산 — 저장 봉(D-220) 재계산 도구 없음(T-M2-17 전 필요, DP)"
 
 
@@ -51,6 +63,69 @@ class EvalSchedule:
             out += [x for x in day if start <= x <= end]
             d += timedelta(days=1)
         return out
+
+
+@dataclass(frozen=True)
+class PeriodClass:
+    """배포 전략 하나의 PAPER 기간 분류(PAPER 전환 승인 때 함께 승인 — CP-041 D-278 (4)). low_frequency None = D-278 미분류."""
+    strategy_id: str
+    version: int
+    low_frequency: bool | None
+    exception: bool = False            # CP-038 판정표 "통과(저빈도 예외, CP-038…)"
+    approved_by: str | None = None
+    note: str = ""                     # 분류 파일 없음·오류 등
+
+    @property
+    def owner(self) -> str:
+        return f"{self.strategy_id}:{self.version}"
+
+
+@dataclass(frozen=True)
+class StrategyPeriod:
+    owner: str
+    rule: str                  # "CP-038 D-238" | "CP-041 D-279" | "CP-037 D-232" | "미분류"
+    min_days: int | None
+    cap_days: int | None
+    utc_days: int
+    round_trips: int
+    status: str
+    label: str                 # 저빈도 예외면 LF_LABEL (D-240), 아니면 ""
+    cls: PeriodClass
+
+
+def period_status(cls: PeriodClass, utc_days: int, round_trips: int) -> StrategyPeriod:
+    """기간 조건 상태 문구(판정 아님). 규칙 선택은 모듈 머리말."""
+    d, rt = utc_days, round_trips
+    rule: str
+    lo: int | None
+    cap: int | None
+    if cls.exception:
+        rule, lo, cap = "CP-038 D-238", 90, 180
+        if d < lo:
+            st = f"최소 기간 전 ({d}/{lo} UTC일, 완결 왕복 {rt}건)"
+        elif rt >= 1:
+            st = f"기간 조건 충족 ({lo} UTC일 + 완결 왕복 {rt}건)"
+        elif d < cap:
+            st = f"연장 중 — 완결 왕복 1건 완료까지 (상한 {cap} UTC일, 현재 {d}일)"
+        else:
+            st = (f"판단 불가(거래 미관찰) — 상한 {cap} UTC일 도달, 완결 왕복 0건. 연장·중단은 사용자 결정"
+                  "(합격 불가, CP-038 D-238)")
+    elif cls.low_frequency is True:
+        rule, lo, cap = "CP-041 D-279", 90, None
+        if d < lo:
+            st = f"최소 기간 전 ({d}/{lo} UTC일, 완결 왕복 {rt}건)"
+        elif rt >= 1:
+            st = f"기간 조건 충족 ({lo} UTC일, 완결 왕복 {rt}건)"
+        else:
+            st = (f"판정 보류(왕복 0) — {d} UTC일 경과, 완결 왕복 0건. 30일 단위 연장 또는 중단은 사용자 결정"
+                  "(자동 연장 없음, D-279)")
+    elif cls.low_frequency is False:
+        rule, lo, cap = "CP-037 D-232", 28, None
+        st = f"최소 기간 전 ({d}/{lo} UTC일)" if d < lo else f"기간 조건 충족 ({lo} UTC일)"
+    else:
+        rule, lo, cap = "미분류", None, None
+        st = "미분류 — 최소 기간 미확정 (CP-041 D-278 분류는 PAPER 전환 승인 때 함께 승인)"
+    return StrategyPeriod(cls.owner, rule, lo, cap, d, rt, st, LF_LABEL if cls.exception else "", cls)
 
 
 @dataclass
@@ -74,17 +149,34 @@ class Paper1Table:
     k8_gave_up: int = 0
     k8_rejected: int = 0
     signal_match: str = SIGNAL_MATCH_NOTE
+    strategies: list[StrategyPeriod] = field(default_factory=list)
 
 
 def build_m2_paper1(db: Path, account: str, as_of: datetime, schedules: Sequence[EvalSchedule], *,
-                    reconcile_gap: timedelta = DEFAULT_GAP) -> Paper1Table:
+                    reconcile_gap: timedelta = DEFAULT_GAP, classes: Sequence[PeriodClass] = ()) -> Paper1Table:
     if not db.is_file():
         raise FileNotFoundError(db)
     repo = Repository(db, Mode.PAPER, order_identity=OrderIdentity.SYMBOL)
     try:
-        return _build(repo, account, as_of, schedules, reconcile_gap)
+        t = _build(repo, account, as_of, schedules, reconcile_gap)
+        t.strategies = [period_status(c, t.utc_days, _round_trips(repo, account, c.owner, t.period_start, as_of))
+                        for c in classes]
+        return t
     finally:
         repo.close()
+
+
+def _round_trips(repo: Repository, account: str, owner: str, start: datetime, as_of: datetime) -> int:
+    """기간 안 완결 왕복 수(04 D-078) — 모듈 머리말 정의."""
+    marks = ",".join("?" for _ in FULL_EXIT_REASONS)
+    fill_exists = ("EXISTS (SELECT 1 FROM fill f JOIN broker_order b ON f.order_key=b.order_key "
+                   "JOIN intent i ON i.intent_id=b.intent_id WHERE i.owner=o.owner AND i.account=o.account "
+                   "AND i.instrument=o.instrument AND i.side=? AND f.at>=o.created_at AND f.at<=o.released_at)")
+    row = repo.select(
+        f"SELECT COUNT(*) AS n FROM ownership o WHERE o.account=? AND o.owner=? AND o.state='RELEASED' "
+        f"AND o.released_reason IN ({marks}) AND o.created_at>=? AND o.released_at<=? AND {fill_exists} AND {fill_exists}",
+        (account, owner, *FULL_EXIT_REASONS, to_iso(start.astimezone(UTC)), to_iso(as_of.astimezone(UTC)), "BUY", "SELL"))
+    return int(row[0]["n"])
 
 
 def _audits(repo: Repository, kinds: Sequence[str], until: datetime) -> list[dict]:
@@ -146,6 +238,24 @@ def _utc(at: datetime) -> str:
     return at.astimezone(UTC).strftime("%Y-%m-%d %H:%M")
 
 
+def _strategy_lines(rows: Sequence[StrategyPeriod]) -> list[str]:
+    out = ["", "### PAPER-1 기간 조건 (전략별 — CP-041 D-278·D-279, CP-038 D-238·D-240. 표시만, 판정은 사용자)", "",
+           "| 전략 | 표시 | 분류(D-278) | 적용 규칙 | 최소 기간 | 상한 | UTC일 | 완결 왕복 | 상태 | 분류 승인 |",
+           "|---|---|---|---|---|---|---|---|---|---|"]
+    for r in rows:
+        c = r.cls
+        d278 = {True: "저빈도", False: "일반", None: "미분류"}[c.low_frequency]
+        lo = "—" if r.min_days is None else f"{r.min_days} UTC일"
+        cap = "—" if r.cap_days is None else f"{r.cap_days} UTC일"
+        note = f" — {c.note}" if c.note else ""
+        out.append(f"| {r.owner} | {r.label or '—'} | {d278} | {r.rule} | {lo} | {cap} | {r.utc_days} | "
+                   f"{r.round_trips} | {r.status} | {c.approved_by or '—'}{note} |")
+    out += ["", "적용 규칙: 저빈도 예외 = CP-038 D-238(90일 + 왕복 1건, 상한 180일), D-278 저빈도만 = CP-041 D-279(90일, "
+            "왕복 0건이면 판정 보류), 일반 = CP-037 D-232(28일). 예외이면서 D-278 저빈도면 더 긴 D-238. UTC일·왕복은 리셋 확인 "
+            "뒤부터 다시 센다."]
+    return out
+
+
 def render_m2_paper1(t: Paper1Table) -> str:
     """마크다운 표. 판정(합격·불합격)은 쓰지 않는다 — D-232 기준과의 비교는 사용자가 한다."""
     if t.schedule_known and t.rate is not None:
@@ -176,9 +286,12 @@ def render_m2_paper1(t: Paper1Table) -> str:
     if t.gaps:
         lines += ["", "| 정지 구간 시작(UTC) | 끝(UTC) | 길이 | 구분 |", "|---|---|---|---|"]
         lines += [f"| {_utc(a)} | {_utc(b)} | {_hours(b - a)} | {'계획' if p else '비계획'} |" for a, b, p in t.gaps]
+    if t.strategies:
+        lines += _strategy_lines(t.strategies)
     lines += ["", "가동 시간은 대조 기록 간격으로 추정한다(간격이 기준 이하인 구간 = 가동). 감독 밖에서 손으로 돌린 run도 대조를 "
               "남기므로 포함된다."]
     return "\n".join(lines) + "\n"
 
 
-__all__ = ["EvalSchedule", "Paper1Table", "build_m2_paper1", "render_m2_paper1", "SIGNAL_MATCH_NOTE"]
+__all__ = ["EvalSchedule", "LF_LABEL", "Paper1Table", "PeriodClass", "StrategyPeriod", "build_m2_paper1",
+           "period_status", "render_m2_paper1", "SIGNAL_MATCH_NOTE"]

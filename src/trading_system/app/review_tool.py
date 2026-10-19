@@ -87,10 +87,91 @@ def _m2_paper1_section(root: Path, mode: Mode, db: Path) -> str:
     schedules = _m2_schedules(root, mode, app)
     gap = timedelta(minutes=3 * max(1, int(app.reconcile_minutes)))
     try:
-        table = build_m2_paper1(db, app.account, datetime.now(UTC), schedules, reconcile_gap=gap)
+        table = build_m2_paper1(db, app.account, datetime.now(UTC), schedules, reconcile_gap=gap,
+                                classes=_m2_period_classes(root, app))
     except Exception as exc:  # noqa: BLE001 — 표 실패가 기존 집계 파일을 막지 않게
         return f"## M2 PAPER-1 집계\n\n집계 실패 ({type(exc).__name__})\n"
     return render_m2_paper1(table)
+
+
+CLASS_FILE = "paper-period.toml"
+_CLASS_KEYS = {"strategy", "version", "low_frequency", "low_frequency_exception", "approved_by"}
+
+
+def _m2_period_classes(root: Path, app):  # type: ignore[no-untyped-def]
+    """[CP-041 T-072·CP-038 T-059] 배포 전략(파라미터 파일의 strategy·version)마다 PAPER 기간 분류. 분류는 PAPER 전환 승인 때
+    함께 승인한 값을 사람이 config/m2/paper-period.toml에 적는다(D-278 (4)) — 파일이 없거나, 형식이 틀리거나, 전략이 없으면
+    "미분류"(보수 — 추정하지 않음). 형식:
+        [[strategies]]
+        strategy = "전략 ID"
+        version = 1
+        low_frequency = true                # CP-041 D-278 분류(검증 판정표 "PAPER 기간 분류" 절)
+        low_frequency_exception = true      # CP-038 판정표 "통과(저빈도 예외, CP-038…)" — 없으면 false
+        approved_by = "A-…"                 # 분류 승인(PAPER 전환 승인) A-ID
+    """
+    import tomllib
+
+    from trading_system.reporting.m2_paper1 import PeriodClass
+    deployed: list[tuple[str, int]] = []
+    for dep in app.strategies:
+        try:
+            with Path(dep.params).open("rb") as f:
+                raw = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        sid, ver = raw.get("strategy"), raw.get("version")
+        if isinstance(sid, str) and isinstance(ver, int) and not isinstance(ver, bool):
+            deployed.append((sid, ver))
+    path = root / "config" / "m2" / CLASS_FILE
+    if not path.is_file():
+        return [PeriodClass(s, v, None, note=f"분류 파일 없음(config/m2/{CLASS_FILE})") for s, v in deployed]
+    try:
+        entries = _parse_class_file(path)
+    except ConfigError as exc:
+        return [PeriodClass(s, v, None, note=f"분류 파일 오류: {exc}") for s, v in deployed]
+    return [entries.get((s, v)) or PeriodClass(s, v, None, note="분류 파일에 이 전략·버전 없음") for s, v in deployed]
+
+
+def _parse_class_file(path: Path):  # type: ignore[no-untyped-def]
+    import re
+    import tomllib
+
+    from trading_system.reporting.m2_paper1 import PeriodClass
+    try:
+        with path.open("rb") as f:
+            raw = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ConfigError(f"{CLASS_FILE}: 읽기 실패 ({type(exc).__name__})") from None
+    problems: list[str] = []
+    if set(raw) - {"strategies"}:
+        problems.append(f"모르는 최상위 키: {', '.join(sorted(set(raw) - {'strategies'}))}")
+    out: dict[tuple[str, int], PeriodClass] = {}
+    for i, e in enumerate(raw.get("strategies") or []):
+        where = f"strategies[{i}]"
+        if not isinstance(e, dict):
+            problems.append(f"{where}: 표 형식 아님")
+            continue
+        if set(e) - _CLASS_KEYS:
+            problems.append(f"{where}: 모르는 키 {', '.join(sorted(set(e) - _CLASS_KEYS))}")
+        sid, ver, low = e.get("strategy"), e.get("version"), e.get("low_frequency")
+        exc_flag, appr = e.get("low_frequency_exception", False), e.get("approved_by")
+        if not isinstance(sid, str) or not sid:
+            problems.append(f"{where}.strategy: 문자열")
+        if not isinstance(ver, int) or isinstance(ver, bool):
+            problems.append(f"{where}.version: 정수")
+        if not isinstance(low, bool):
+            problems.append(f"{where}.low_frequency: true|false")
+        if not isinstance(exc_flag, bool):
+            problems.append(f"{where}.low_frequency_exception: true|false")
+        if not isinstance(appr, str) or not re.fullmatch(r"A-\d{3,}", appr):
+            problems.append(f"{where}.approved_by: 승인 A-ID(A-숫자)")
+        if not problems:
+            if (sid, ver) in out:
+                problems.append(f"{where}: 같은 전략·버전 중복")
+            out[(sid, ver)] = PeriodClass(sid, ver, low, exc_flag, appr)  # type: ignore[arg-type]
+    if problems:
+        raise ConfigError(problems)
+    return out
 
 
 def _m2_schedules(root: Path, mode: Mode, app):  # type: ignore[no-untyped-def]

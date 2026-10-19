@@ -539,7 +539,8 @@ def backtest_m2_minute_main(argv: Sequence[str], root: Path) -> int:
                 daily_needed=DAILY_CAPABILITY in strat.spec.capabilities, incomplete=skipped_min)
             res = run_minute_validation(MinuteValidationInputs(
                 template=cfg, out_dir=v_out, data_start=data_start, skip_variants=ns.skip_variants,
-                command=" ".join(["backtest --market M2 --interval 1m", *argv]), low_frequency=low))
+                command=" ".join(["backtest --market M2 --interval 1m", *argv]), low_frequency=low,
+                params_file=(root / ns.params).resolve(), limits_file=root / ns.limits))   # [CP-041 D-278] 분류 실행 조건
             _write_incomplete(v_out, skipped_min)
             print(f"검증 완료: {v_out / 'validation.md'} — 판정 {res['verdict']['verdict']}")
             return 0

@@ -608,6 +608,12 @@ def test_v313_general_path_bytes_unchanged(tmp_path: Path) -> None:
         w.pop("intraday")                     # [T-068] 창별 장중 L4·손절 칸 (CP-040 T-068 보고서 칸)
     for k in ("symbols", "intraday_note"):    # [T-068] 여러 심볼·장중 측정 표시 칸
         o.pop(k)
+    # [CP-041 T-072 D-278] 판정표 끝에 붙는 "PAPER 기간 분류" 절·JSON paper_period 칸은 새 칸 — 떼어 낸 나머지가 종전 바이트와
+    # 같아야 한다(일반 경로 판정 결과·문구 불변 확인은 그대로)
+    o.pop("paper_period")
+    cut = md.index("\n## PAPER 기간 분류".encode())
+    assert md[cut:].count(b"\n## ") == 1                  # 분류 절이 마지막 절
+    md = md[:cut]                                        # "…마지막 줄\n" + "\n## PAPER 기간 분류…" → 종전 끝 그대로
     for k in ("k2_days", "k2_close_days", "stop_excess"):
         o["pooled"].pop(k)
     # [T-068 개정] 판정표 md는 T-068 보고서 칸(장중 L4·손절 줄, C-4·C-8 문구)이 더해져 해시가 바뀐다(이전 6f078b33…).
