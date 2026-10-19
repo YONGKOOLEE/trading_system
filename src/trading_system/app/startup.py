@@ -20,11 +20,11 @@ from trading_system.config.envfile import SecretStore, parse_env_file
 from trading_system.config.errors import ConfigError
 from trading_system.config.limits_file import load_limits_file
 from trading_system.config.m2_files import M2MarketSettings, Universe, load_m2_market, load_universe
-from trading_system.config.market_scope import MarketScopeError, check_start_scope, config_dir
+from trading_system.config.market_scope import MarketScopeError, check_signal_source, check_start_scope, config_dir
 from trading_system.domain.enums import Mode
 from trading_system.domain.limits import AccountLimits
 from trading_system.domain.market_time import Market
-from trading_system.storage.market_meta import check_db_file
+from trading_system.storage.market_meta import check_db_file, check_db_signal_source
 from trading_system.storage.repository import ModeMismatch, StorageFailure
 
 
@@ -104,7 +104,8 @@ class M2StartupConfig:
     secrets: SecretStore | None = field(default=None, repr=False)
 
 
-def check_m2_startup(mode: Mode, repo_root: Path, storage_path: Path, env_file: Path | None) -> M2StartupConfig:
+def check_m2_startup(mode: Mode, repo_root: Path, storage_path: Path, env_file: Path | None, *,
+                     signal_meta: bool = True) -> M2StartupConfig:
     """M2 시작 검사: 모드·저장소 경로·자격정보 파일(M1과 같은 규칙) + `config/m2/` 네 파일 + 시작 일치 표 + DB 메타.
 
     DB를 만들거나 쓰지 않는다(메타 검사는 읽기 전용). 접속 도메인은 연결을 조립할 때(T-M2-14) 검사한다 — 지금은
@@ -129,8 +130,11 @@ def check_m2_startup(mode: Mode, repo_root: Path, storage_path: Path, env_file: 
     if not universe.symbols:
         raise ConfigError("M2 유니버스 미결정 (config/m2/universe 심볼 없음 — D-105, PV-M2-03 뒤 사용자 결정)")
     check_start_scope(mode, Market.M2, app.broker, app.account, None)
+    check_signal_source(mode, Market.M2, app.signal_source)   # [CP-039 D-245] 신호 출처 종류 표 (연결 전)
     try:
         check_db_file(storage_path, mode, Market.M2, app.broker)
+        if signal_meta:   # [CP-039 D-248] DB 신호 출처 메타 — 다르면 엔진·도구가 열지 않는다 (기간 재시작 도구만 False)
+            check_db_signal_source(storage_path, app.signal_source.kind)
     except ModeMismatch as exc:
         raise MarketScopeError(f"DB 메타 불일치: {exc}") from None
     except StorageFailure as exc:
@@ -212,6 +216,11 @@ def m2_paper_problems(cfg: M2StartupConfig) -> tuple[list[str], OrderSwitch | No
         # [CP-037 D-220, DP-71] 테스트넷 1m klines 주기 조회는 별도 승인 — 기록된 A-ID만 켠다(주문 스위치 DP-66과 같은 방식)
         out.append(f"config/m2/market.paper.toml [minute] approval {minute.approval}가 승인 기록 표"
                    f"({cfg.repo_root / APPROVALS_FILE})의 A-ID 행에 없다 — 1분봉 주기 조회는 기록된 승인으로만 켠다")
+    sig = cfg.app.signal_source
+    if sig.is_public and sig.approval not in recorded_approval_ids(cfg.repo_root / APPROVALS_FILE):
+        # [CP-039 D-243] 실서버 공개 시세 연결은 별도 승인(T-064) — 기록된 A-ID만 (주문 스위치 DP-66과 같은 방식)
+        out.append(f"config/m2/app.paper.toml [signal_source] approval {sig.approval}가 승인 기록 표"
+                   f"({cfg.repo_root / APPROVALS_FILE})의 A-ID 행에 없다 — 실서버 공개 시세 신호 출처는 기록된 승인으로만 켠다")
     return out, switch
 
 

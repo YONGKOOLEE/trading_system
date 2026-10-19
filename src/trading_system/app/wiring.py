@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Protocol
 
 from trading_system.broker.base import BrokerAdapter
 from trading_system.config.app_file import StrategyDeploy, check_strategy_slots
@@ -30,7 +31,7 @@ from trading_system.domain.models import Account
 from trading_system.execution.executor import Executor
 from trading_system.execution.resolver import UnknownResolver
 from trading_system.gate.gate import Gate
-from trading_system.gate.ports import ClockHealth, GateInputs, GatePolicy
+from trading_system.gate.ports import ClockHealth, GateInputs, GatePolicy, SignalCheck
 from trading_system.halt.manager import HaltManager
 from trading_system.marketdata.store import MarketDataStore
 from trading_system.monitoring.market_log import MarketDataRecorder
@@ -83,6 +84,23 @@ class StrategyInput:
     l6_slots: int | None = None                # [CP-034 D-197] 전략별 보유 슬롯. None = 슬롯 검사 없음
 
 
+class SignalPriceSource(Protocol):
+    """[CP-039 D-248·D-251] 신호 출처 참조 시세 공급 계약 (marketdata/signal_feed.SignalFacts)."""
+
+    def reference_quote(self, instrument: str) -> Quote | None: ...
+
+    def fill_reference(self, instrument: str) -> tuple[Decimal, datetime] | None: ...
+
+
+@dataclass(frozen=True)
+class SignalInputs:
+    """[CP-039] 신호 출처 binance-public일 때만 (승인 A-115). prices: 실서버 공개 참조 시세, max_divergence: G11-S θ(비율).
+    None(기본) = 신호 출처 testnet — 판정 입력·게이트·체결 기록 모두 종전과 같다(V-326)."""
+
+    prices: SignalPriceSource
+    max_divergence: Decimal
+
+
 @dataclass(frozen=True)
 class SpotInputs:
     """M2(크립토 현물) 조립 입력 (CP-036 D-202). 값은 시작 경로(run --market M2)가 설정·거래소 규칙에서 만든다.
@@ -96,6 +114,7 @@ class SpotInputs:
     order_policy: SpotOrderPolicy
     cash_max_age: timedelta = timedelta(minutes=3)
     minutes: M2MinuteInput | None = None   # [CP-037 D-220] 1분봉 저장·판정 입력. None = 분봉 공급 꺼짐(기본)
+    signal: SignalInputs | None = None     # [CP-039 D-243] 신호 출처 binance-public. None = testnet(기본, 종전 동작)
 
 
 def spot_execution(repo: Repository, broker: BrokerAdapter, clock: Clock, kill_file: Path, gate: Gate, *,
@@ -397,8 +416,9 @@ def _build_spot_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: Br
                             reference_time=account_limits.daily_reference_time, max_age=spot.cash_max_age,
                             market_time=M2_TIME)
     registry = StrategyRegistry(repo, clock, None, market=Market.M2.value)
+    signal_check = SignalCheck(spot.signal.prices, spot.signal.max_divergence) if spot.signal is not None else None
     gate = Gate(repo, clock, GateInputs(settings, facts, acct, registry, clock_health, spot_rules=facts,
-                                        strategy_slots=slot_table),
+                                        strategy_slots=slot_table, signal=signal_check),
                 GatePolicy(quote_age, gate_settings.price_limit_ratio, gate_settings.cost_rates,
                            market_time=M2_TIME))
     executor, halts, dust = spot_execution(
@@ -407,6 +427,8 @@ def _build_spot_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: Br
         rules_of=facts.rules, market_prices_of=facts.market_prices, quote_of=facts.quote,
         order_policy=spot.order_policy, alerts=alerts, dust_alerts=alerts)
     registry.attach_halts(halts)
+    if spot.signal is not None:   # [CP-039 D-251] 체결 시각 P_s 기록 (testnet 출처면 기록 없음)
+        executor.fill_reference = spot.signal.prices.fill_reference
     for name, value in (("halts", halts), ("alerts", alerts), ("account", account)):
         if hasattr(facts, name):
             setattr(facts, name, value)   # 공급 품질 실패 → K10 (공급자가 쓴다)
@@ -431,7 +453,8 @@ def _build_spot_engine(*, mode: Mode, repo: Repository, clock: Clock, broker: Br
                                account_limits.daily_reference_time, market_time=M2_TIME)
     schedule = SpotReconcileSchedule(reconcile_every, M2_TIME, account_limits.daily_reference_time)
     profile = SpotProfile(facts=facts, pairs=spot.pairs, quote_asset=spot.quote_asset, account_facts=acct,
-                          order_policy=spot.order_policy, dust=dust, schedule=schedule, minutes=spot.minutes)
+                          order_policy=spot.order_policy, dust=dust, schedule=schedule, minutes=spot.minutes,
+                          signal=spot.signal.prices if spot.signal is not None else None)
     reconciler.balance_listeners.append(profile.observe_balances)
     ops.prepare = profile.prepare_ops   # [CP-036 D-211] 운영 요청도 M2 주문 조건(유형·가격·dust·수량 단위)을 탄다
     profile.cycle = SpotReconcileCycle(reconciler, account, schedule, on_day_close=profile.day_closed)

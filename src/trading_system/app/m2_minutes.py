@@ -183,7 +183,8 @@ def _record(status: str, first: datetime, last: datetime, *, count: int = 0, mis
 
 class M2MinuteInput:
     def __init__(self, book: SpotMinuteBook, *, lookback_bars: int,
-                 margin: timedelta = DEFAULT_CONFIRM_MARGIN, period_minutes: int | None = None) -> None:
+                 margin: timedelta = DEFAULT_CONFIRM_MARGIN, period_minutes: int | None = None,
+                 source: str = MINUTE_SOURCE) -> None:
         if lookback_bars <= 0:
             raise ValueError("lookback_bars는 1 이상")
         self.book = book
@@ -196,6 +197,8 @@ class M2MinuteInput:
         self._unaudited: list[MinuteQualityEvent] = []   # 저장 실패로 감사하지 못한 품질 사건 (다음 flush 재시도)
         self.last_ext: tuple[int, int, int] = (0, 0, 0)  # [D-260] 마지막 flush의 확장 열 (새로 넣음, 같음, 다름)
         self.history: History | None = None              # [D-261] 이력 채우기 상태 (None = 채우기 없음)
+        # [CP-039 D-248] minute_bar.source — 기본 테스트넷. 신호 출처 binance-public이면 실서버 공개 봉만 저장한다
+        self.source = source
 
     def __repr__(self) -> str:
         return f"M2MinuteInput(lookback={self.lookback}, margin={self.margin}, book={self.book!r})"
@@ -218,8 +221,8 @@ class M2MinuteInput:
         try:
             with repo.tx():
                 if bars:
-                    inserted, same, differing = repo.insert_minute_bars(bars, MINUTE_SOURCE, now)
-                    ext = repo.insert_minute_bar_ext(bars, MINUTE_SOURCE, now)   # [D-260] 같은 저장 단위
+                    inserted, same, differing = repo.insert_minute_bars(bars, self.source, now)
+                    ext = repo.insert_minute_bar_ext(bars, self.source, now)   # [D-260] 같은 저장 단위
                 if differing or ext[2]:
                     repo.audit(now, MINUTE_STORED_AUDIT, "marketdata", None, {
                         "inserted": inserted, "same": same, "differing": differing, "ext_differing": ext[2],

@@ -25,6 +25,7 @@ from trading_system.domain.halts import HaltView, RequestView, halt_rejection
 from trading_system.domain.limits import AccountLimits
 from trading_system.domain.market import BLOCKS_RISK_REDUCTION, InstrumentInfo, Quote, estimate_cost, price_limits
 from trading_system.domain.models import ApprovedIntent, GateDecision, GateRequest
+from trading_system.domain.signal_source import divergence
 from trading_system.domain.trading_rules import filter_violation
 from trading_system.storage.repository import BrokerOrderRow, Repository, new_id
 
@@ -495,13 +496,54 @@ class Gate:
         return True
 
     def _g11_freshness(self, ctx: _Ctx) -> None:
-        """시세 신선도 (01 G11, Q-C): 위험 확대는 지연 시 거부, 위험 축소는 시장가만 거부."""
+        """시세 신선도 (01 G11, Q-C): 위험 확대는 지연 시 거부, 위험 축소는 시장가만 거부.
+        [CP-039 D-250] G11-S — 신호 출처 binance-public일 때만(GateInputs.signal), **위험 확대만**: 실행 출처 시세 검사 뒤
+        (a) 신호 출처 참조 시세가 없거나 미래 시각이거나 신선도 기준(60초)을 넘겨 늙었으면 거부, (b) 괴리 d = |P_x ÷ P_s − 1|가
+        θ 초과면 거부(d = θ 통과). P_s·P_x·d를 판정 스냅샷에 남긴다. 감액·청산·취소는 기존 규칙만(§8-3)."""
         req = ctx.req
         if req.request_type is RequestType.CANCEL:
             return
+        if self._in.signal is not None and req.request_type.is_new_order and not req.is_risk_increasing:
+            self._record_signal_prices(ctx)   # [CP-039 D-251] 감액·청산은 기록만 — 거부하지 않는다
         if not req.is_risk_increasing and req.order_type is OrderType.LIMIT:
             return
-        self._fresh_quote(req.instrument, ctx)
+        q = self._fresh_quote(req.instrument, ctx)
+        if req.is_risk_increasing and self._in.signal is not None:
+            self._g11_signal(ctx, q)
+
+    def _record_signal_prices(self, ctx: _Ctx) -> None:
+        """[CP-039 D-251] 위험 축소 주문의 판정 시점 P_x·P_s·d 기록(진단용). 값이 없으면 그 칸만 비운다 — 판정에 쓰지 않는다."""
+        sig = self._in.signal
+        assert sig is not None
+        q = self._in.market.quote(ctx.req.instrument)
+        ref = sig.prices.reference_quote(ctx.req.instrument)
+        if q is not None and q.price > 0:
+            ctx.snapshot["exec_price"] = str(q.price)
+        if ref is not None and ref.price > 0:
+            ctx.snapshot["signal_price"] = str(ref.price)
+            ctx.snapshot["signal_price_at"] = to_iso(ref.at)
+            if q is not None and q.price > 0:
+                ctx.snapshot["divergence"] = str(divergence(q.price, ref.price))
+
+    def _g11_signal(self, ctx: _Ctx, q: Quote) -> None:
+        sig = self._in.signal
+        assert sig is not None
+        inst = ctx.req.instrument
+        ref = sig.prices.reference_quote(inst)
+        ctx.snapshot["exec_price"] = str(q.price)
+        if ref is None or ref.price <= 0:
+            raise _Reject(Check.G11, f"G11-S 신호 출처 참조 시세 없음: {inst} — 위험 확대 거부 (CP-039 D-250)")
+        ctx.snapshot["signal_price"] = str(ref.price)
+        ctx.snapshot["signal_price_at"] = to_iso(ref.at)
+        if ref.at > ctx.now or ctx.now - ref.at > self._policy.quote_max_age:
+            raise _Reject(Check.G11, f"G11-S 신호 출처 참조 시세 신선도 초과: {inst} ({to_iso(ref.at)}) — 위험 확대 거부 "
+                                     "(CP-039 D-250)")
+        d = divergence(q.price, ref.price)
+        ctx.snapshot["divergence"] = str(d)
+        ctx.snapshot["divergence_max"] = str(sig.max_divergence)
+        if d > sig.max_divergence:
+            raise _Reject(Check.G11, f"G11-S 신호가–실행가 괴리 {inst}: d {d:.4%} > θ {sig.max_divergence:.2%} "
+                                     f"(P_x {q.price}, P_s {ref.price}) — 위험 확대 거부 (CP-039 D-250)")
 
     def _g12_session(self, ctx: _Ctx) -> None:
         """거래 가능 시간·시장 달력 (01 G12, L8, R-14)."""

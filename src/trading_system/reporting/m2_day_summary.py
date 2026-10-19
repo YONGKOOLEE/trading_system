@@ -29,7 +29,7 @@ def build_m2_day_summary(db: Path, account: str, day: date, notes: Sequence[str]
     lines = [head]
     repo = Repository(db, Mode.PAPER, order_identity=OrderIdentity.SYMBOL)
     try:
-        for part in (_fills, _halts, _recon):
+        for part in (_fills, _halts, _recon, _signal):
             try:
                 lines += part(repo, account, day)
             except Exception as exc:  # noqa: BLE001
@@ -78,6 +78,14 @@ def _recon(repo: Repository, account: str, day: date) -> list[str]:
     text = "없음" if last is None else (
         f"{last['trigger']} {last['result']} ({from_iso(last['created_at']).astimezone(UTC):%m-%d %H:%M} UTC)")
     return [f"마지막 대조: {text}, 열린 불일치 {len(items)}건" + (f" ({', '.join(kinds)})" if kinds else "")]
+
+
+def _signal(repo: Repository, account: str, day: date) -> list[str]:
+    """[CP-039 D-250] 신호 출처 괴리·참조 시세 지연 거부(G11-S) 건수 — 그날 1건 이상일 때만 한 줄(묶음 알림, 정지 아님)."""
+    n = sum(1 for r in repo.select("SELECT created_at FROM gate_decision WHERE account=? AND result='REJECTED' "
+                                   "AND failed_check='G11' AND reason LIKE 'G11-S%'", (account,))
+            if from_iso(r["created_at"]).astimezone(UTC).date() == day)
+    return [f"신호 출처 괴리·지연 진입 거부(G11-S) {n}건 — 정지 아님, 청산 영향 없음"] if n else []
 
 
 __all__ = ["build_m2_day_summary"]

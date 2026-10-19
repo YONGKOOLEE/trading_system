@@ -115,19 +115,50 @@ def test_allowed_hosts_match_adapter_constants() -> None:
     assert all(h.endswith(TESTNET) for h in BINANCE_TESTNET_HOSTS)
 
 
-def test_no_live_or_demo_binance_domain_constants_anywhere_in_src() -> None:
-    """D-098: 코드 전체(바이낸스 패키지 밖 포함)에 실전·Demo 바이낸스 도메인 상수가 없다."""
-    host = re.compile(r"(?:[a-z0-9-]+\.)*binance\.(?:com|vision|us|me|info|cc)\b")
+_BINANCE_HOST = re.compile(r"(?:[a-z0-9-]+\.)*binance\.(?:com|vision|us|me|info|cc)\b")
+# [CP-039 D-244, 승인 A-115 Q-1 (가)] D-098 좁은 개정: 실서버 도메인 상수는 **공개 시세 전용 모듈 하나**에만, 그 모듈의 허용 호스트
+# 집합만 둔다(키·서명·계좌·주문 경로 없음 — tests/scenario/test_t060_signal_source V-314·V-315). 그 밖의 파일·호스트는 기존과
+# 같이 실패하고, Demo 호스트는 어디서나 실패한다. 허용 파일·호스트를 늘리려면 새 CP·승인이 필요하다.
+LIVE_HOST_EXCEPTION_FILE = Path("marketdata") / "binance_public.py"
+LIVE_HOST_EXCEPTION_HOSTS = frozenset({"api.binance.com"})
+
+
+def _live_host_violations(src: Path) -> tuple[list[str], int]:
     bad, seen = [], 0
-    for p in SRC.rglob("*.py"):
+    for p in src.rglob("*.py"):
+        rel = p.relative_to(src)
         tree = ast.parse(p.read_text(encoding="utf-8"))
         for n in ast.walk(tree):
             if isinstance(n, ast.Constant) and isinstance(n.value, str):
-                for h in host.findall(n.value.lower()):
+                for h in _BINANCE_HOST.findall(n.value.lower()):
                     seen += 1
-                    if not h.endswith(TESTNET):
-                        bad.append(f"{p.relative_to(SRC)}:{n.lineno}:{h}")
+                    if h.endswith(TESTNET):
+                        continue
+                    if rel == LIVE_HOST_EXCEPTION_FILE and h in LIVE_HOST_EXCEPTION_HOSTS:
+                        continue
+                    bad.append(f"{rel}:{n.lineno}:{h}")
+    return bad, seen
+
+
+def test_no_live_or_demo_binance_domain_constants_anywhere_in_src() -> None:
+    """D-098 (CP-039 D-244·A-115로 좁게 개정): 실전 도메인 상수는 공개 시세 모듈 1개 × 허용 호스트만, Demo는 어디에도 없다."""
+    bad, seen = _live_host_violations(SRC)
     assert bad == [] and seen > 0
+
+
+def test_d098_exception_is_one_file_one_host_set(tmp_path: Path) -> None:
+    """V-316: 허용 파일 밖에 실서버 호스트를 넣은 가짜 파일, 허용 파일 안의 다른 실서버·Demo 호스트는 실패한다."""
+    src = tmp_path / "src"
+    (src / "marketdata").mkdir(parents=True)
+    (src / "app").mkdir()
+    (src / "marketdata" / "binance_public.py").write_text('A = "https://api.binance.com"\n', encoding="utf-8")
+    assert _live_host_violations(src) == ([], 1)
+    (src / "app" / "x.py").write_text('B = "https://api.binance.com"\n', encoding="utf-8")
+    (src / "marketdata" / "binance_public.py").write_text(
+        'A = "https://api.binance.com"\nC = "https://api1.binance.com"\nD = "https://demo-api.binance.com"\n',
+        encoding="utf-8")
+    bad, _ = _live_host_violations(src)
+    assert sorted(b.split(":")[-1] for b in bad) == ["api.binance.com", "api1.binance.com", "demo-api.binance.com"]
 
 
 # --- 앱 설정 market·broker (M1 기본값, V-152) ----------------------------------------------------

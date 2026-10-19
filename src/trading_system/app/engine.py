@@ -701,6 +701,7 @@ class Engine:
                                 **({"entry_block": block} if block is not None else {}))
         summary: dict[str, object] = {"strategy": owner, "signals": len(result.signals),
                                       "dropped": len(result.dropped), "error": result.error}
+        summary.update(self.profile.evaluation_record(snap))   # [CP-039 D-248] M1·testnet 출처는 빈 사전(기록 불변)
         if ub is not None:
             summary["universe_list"] = ub.record   # 판정 입력에 쓴 목록 버전 (D-198 (3))
         if alloc is not None:

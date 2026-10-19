@@ -6,7 +6,11 @@
 - 접속 도메인: 브로커가 연결할 호스트 집합. BACKTEST(fake)는 연결이 없으므로 빈 집합이어야 한다. PAPER는 하나 이상이고
   전부 허용 집합 안이어야 한다. None은 "연결 대상을 아직 조립하지 않음"이다 — 그 경로는 연결 전에 거부되어야 한다(M2 실행
   경로는 T-M2-14 전까지 없음).
-- 바이낸스 도메인은 테스트넷만 둔다(D-098). 실전·Demo 도메인 상수는 없다.
+- 바이낸스 도메인은 테스트넷만 둔다(D-098). 실전·Demo 도메인 상수는 없다. [CP-039 D-244, A-115] 실서버 공개 시세 호스트는
+  공개 시세 모듈(marketdata/binance_public.py) 하나에만 있다 — 이 파일에는 두지 않는다.
+- [CP-039 D-245] 신호 출처 종류 표(SIGNAL_SOURCE_KINDS): (모드, 시장)마다 허용하는 `[signal_source] kind`. 실행 행(START_TABLE)은
+  바꾸지 않는다. 데이터 출처의 호스트·메서드·경로 행(DATA_SOURCE_TABLE)은 호스트 상수가 있는 공개 시세 모듈에 있다(config는
+  marketdata를 import하지 않는다 — 03 §7). LIVE 행은 어느 표에도 없다.
 - 비밀정보 없음. 표준 라이브러리와 domain만 쓴다.
 """
 
@@ -18,6 +22,7 @@ from pathlib import Path
 
 from trading_system.domain.enums import Mode
 from trading_system.domain.market_time import Market
+from trading_system.domain.signal_source import KIND_PUBLIC, KIND_TESTNET, SignalSourceSettings
 
 from .errors import ConfigError
 
@@ -90,3 +95,25 @@ def check_start_scope(mode: Mode, market: Market, broker: str, account: str,
             problems.append(f"접속 도메인이 허용 표 밖: {', '.join(sorted(hs - rule.hosts))}")
     if problems:
         raise MarketScopeError(problems)
+
+
+# [CP-039 D-245] 신호 출처 종류 표 — 없는 (모드, 시장)은 `[signal_source]` 절 자체를 받지 않는다(M1·LIVE).
+SIGNAL_SOURCE_KINDS: dict[tuple[Mode, Market], frozenset[str]] = {
+    (Mode.PAPER, Market.M2): frozenset({KIND_TESTNET, KIND_PUBLIC}),
+    (Mode.BACKTEST, Market.M2): frozenset({KIND_TESTNET}),     # BACKTEST는 연결 없음 — 실서버 호스트 불가
+}
+
+
+def check_signal_source(mode: Mode, market: Market, signal: SignalSourceSettings) -> None:
+    """설정의 신호 출처가 표와 맞지 않으면 MarketScopeError (V-317, 연결 전). 절이 없는(기본 testnet) 설정은 늘 통과."""
+    if not signal.configured and signal.kind == KIND_TESTNET:
+        return
+    kinds = SIGNAL_SOURCE_KINDS.get((mode, market))
+    if kinds is None:
+        raise MarketScopeError(f"신호 출처 표에 ({mode.value}, {market.value}) 행이 없다 — [signal_source]를 두지 않는다 "
+                               "(CP-039 D-245)")
+    if signal.kind not in kinds:
+        raise MarketScopeError(f"신호 출처 {signal.kind}는 {mode.value}·{market.value}에서 허용되지 않는다 "
+                               f"(허용: {', '.join(sorted(kinds))}, CP-039 D-245 — BACKTEST는 연결 없음)")
+    if signal.kind == KIND_PUBLIC and not signal.approval:
+        raise MarketScopeError("신호 출처 binance-public은 연결 승인 A-ID가 필요 (CP-039 D-243)")

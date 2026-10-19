@@ -71,6 +71,11 @@ class M2Relay:
                 self._e().alerts.alert("WARNING", f"바이낸스 {kind}: {message}", None)
         self._soon(run)
 
+    def notify(self, level: str, message: str) -> None:
+        """[CP-039 D-254] 신호 출처 공급 알림 — 정지 없이 알림만(수준 그대로). K5·K6 다리를 타지 않는다."""
+        lvl = level if level in ("EMERGENCY", "WARNING", "INFO") else "WARNING"
+        self._soon(lambda: self._e().alerts.alert(lvl, f"신호 출처: {message}", None))
+
     # --- 사용자 스트림 상태 ---
     def stream_state(self, state: str, message: str) -> None:
         acct = self._account

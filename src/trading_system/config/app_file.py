@@ -16,6 +16,11 @@
 [telegram]                      (PAPER만, 선택)
   enabled                       텔레그램 알림·원격 명령 연결 (true/false, 기본 false). true면 .env.paper에
                                 TELEGRAM_BOT_TOKEN·TELEGRAM_CHAT_ID가 있어야 시작 (03 D-052, 01 §2.9·§2.10)
+[signal_source]                 (M2만, 선택 — CP-039 D-243, 승인 A-115) 신호 시세 출처. **절이 없으면 testnet**(현 동작 그대로).
+  kind                          "testnet" | "binance-public"(실서버 공개 시세 — 사용자가 연결 승인 뒤 직접 쓴다)
+  approval                      binance-public이면 필수: 실서버 공개 시세 연결 승인 A-ID("A-숫자"). 기록 확인은 app/startup
+  max_divergence_percent        (선택) 괴리 임계 θ(%, 문자열 소수, 0 초과 10 이하). 기본 "1.0"(A-115 Q-3, D-250)
+                                M1 설정에 이 절이 있으면 시작 거부. 모드·시장 조합은 시작 표(config.market_scope)가 본다
 [[instruments]]  code, kind(STOCK|ETF|ETN), leverage(문자열, 부호), lot_size(문자열). M1만 — M2 종목은 config/m2/universe
 [[strategies]]   module("패키지.모듈:클래스"), params(파라미터 파일 경로, 저장소 기준), eval_times(["HH:MM"] KST)
                  — M2는 UTC, CAP-TRG-02 주기 판정 전략은 eval_times = [] (CP-037 D-219, app.wiring.period_grid_of)
@@ -39,6 +44,9 @@ from pathlib import Path
 from trading_system.domain.enums import Mode
 from trading_system.domain.market import InstrumentInfo, InstrumentKind
 from trading_system.domain.market_time import Market
+from trading_system.domain.signal_source import (
+    DEFAULT_MAX_DIVERGENCE, KIND_PUBLIC, MAX_DIVERGENCE_CEILING, SIGNAL_KINDS, SignalSourceSettings,
+)
 
 from .errors import ConfigError
 from .market_scope import default_broker
@@ -70,6 +78,7 @@ class AppSettings:
     broker: str = ""                # 시작 일치 표로 검사 (config.market_scope)
     paper_orders_approved: bool = False        # M2 주문 전송 스위치 (CP-036 D-204). M1은 항상 False
     paper_orders_approval: str | None = None   # M2 주문 전송 승인 A-ID (형식 검사는 app/startup.check_order_switch)
+    signal_source: SignalSourceSettings = SignalSourceSettings()   # [CP-039 D-243] 절이 없으면 testnet
 
 
 def _dec(raw: object, name: str, problems: list[str]) -> Decimal | None:
@@ -89,7 +98,8 @@ def _dec(raw: object, name: str, problems: list[str]) -> Decimal | None:
 
 def parse_app_settings(raw: dict, mode: Mode, repo_root: Path) -> AppSettings:
     problems: list[str] = []
-    allowed = {"app", "instruments", "strategies"} | ({"paper", "telegram"} if mode is Mode.PAPER else set())
+    allowed = {"app", "instruments", "strategies", "signal_source"} | (
+        {"paper", "telegram"} if mode is Mode.PAPER else set())
     for k in raw:
         if k not in allowed:
             problems.append(f"{k}: 알 수 없는 키 (이 모드에서 허용: {', '.join(sorted(allowed))})")
@@ -145,6 +155,7 @@ def parse_app_settings(raw: dict, mode: Mode, repo_root: Path) -> AppSettings:
                 problems.append("paper.orders_approval: 문자열 A-ID (D-204)")
             orders_id = oid if isinstance(oid, str) else None
 
+    signal = _signal_source(raw, market, problems)
     telegram = False
     if mode is Mode.PAPER and "telegram" in raw:
         tgr = raw["telegram"]
@@ -218,7 +229,43 @@ def parse_app_settings(raw: dict, mode: Mode, repo_root: Path) -> AppSettings:
     if problems:
         raise ConfigError(problems)
     return AppSettings(account, loop, rec, tuple(servers), infos, tuple(strategies), approved,  # type: ignore[arg-type]
-                       telegram, market, broker, orders_ok, orders_id)
+                       telegram, market, broker, orders_ok, orders_id, signal)
+
+
+_APPROVAL = re.compile(r"A-\d{3,}")
+_SIGNAL_KEYS = frozenset({"kind", "approval", "max_divergence_percent"})
+
+
+def _signal_source(raw: dict, market: str, problems: list[str]) -> SignalSourceSettings:
+    """[signal_source] (CP-039 D-243). 없으면 testnet(기본). M1에 있으면 거부. 값 검사만 — 모드·시장 조합은 시작 표가 본다."""
+    if "signal_source" not in raw:
+        return SignalSourceSettings()
+    sec = raw["signal_source"]
+    if market != Market.M2.value:
+        problems.append("[signal_source]: M1 설정에는 두지 않는다 (M2만, CP-039 D-243)")
+        return SignalSourceSettings()
+    if not isinstance(sec, dict) or any(k not in _SIGNAL_KEYS for k in sec):
+        problems.append("[signal_source]에는 kind·approval·max_divergence_percent만 둔다 (CP-039 D-243)")
+        return SignalSourceSettings()
+    kind = sec.get("kind")
+    if not isinstance(kind, str) or kind not in SIGNAL_KINDS:
+        problems.append(f"signal_source.kind: {' | '.join(sorted(SIGNAL_KINDS))}")
+        return SignalSourceSettings()
+    approval = sec.get("approval")
+    if approval is not None and (not isinstance(approval, str) or not _APPROVAL.fullmatch(approval)):
+        problems.append("signal_source.approval: 승인 A-ID(A-숫자)")
+        approval = None
+    elif kind == KIND_PUBLIC and approval is None:
+        problems.append("signal_source.approval: binance-public은 실서버 공개 시세 연결 승인 A-ID가 필요 (CP-039 D-243)")
+    theta = DEFAULT_MAX_DIVERGENCE
+    if "max_divergence_percent" in sec:
+        pct = _dec(sec["max_divergence_percent"], "signal_source.max_divergence_percent", problems)
+        if pct is not None:
+            if not Decimal("0") < pct / 100 <= MAX_DIVERGENCE_CEILING:
+                problems.append("signal_source.max_divergence_percent: 0 초과 10 이하 (D-250)")
+            else:
+                theta = pct / 100
+    return SignalSourceSettings(kind, approval, theta, configured=True)
 
 
 def check_strategy_slots(strategies: Iterable[object], l6_max_positions: int) -> None:

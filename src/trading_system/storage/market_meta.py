@@ -107,3 +107,60 @@ def stamp_market_meta(db: Path, backup_dir: Path, mode: Mode, market: Market, br
     finally:
         repo.close()
     return "기록"
+
+
+# --- 신호 출처 메타 (CP-039 D-248, V-318) ------------------------------------------------------------------------------
+# 메타 키 `signal_source`(meta 키-값 표, 스키마 버전 불변). 새 DB는 생성 시 기록한다. 기존 DB에 메타가 없으면 "testnet"
+# (CP-039 이전 DB)로 본다 — testnet 설정이면 열고 **쓰지 않는다**(기존 DB 바이트 불변, V-326), binance-public 설정이면 거부
+# (출처 변경은 PAPER 기간 단절 — 기간 재시작 기록 절차로만: scripts/reconcile-resolve.py ... signal-source-change).
+META_SIGNAL = "signal_source"
+LEGACY_SIGNAL_KIND = "testnet"
+
+
+def read_signal_meta(conn: sqlite3.Connection) -> str | None:
+    row = conn.execute("SELECT value FROM meta WHERE key=?", (META_SIGNAL,)).fetchone()
+    return None if row is None else str(row[0])
+
+
+def _verify_signal(meta: str | None, kind: str) -> None:
+    have = meta or LEGACY_SIGNAL_KIND
+    if have != kind:
+        how = ("신호 출처 메타 없는 기존 DB(= testnet)" if meta is None else f"이 DB의 신호 출처는 {meta}")
+        raise MarketMismatch(f"{how} — 설정 {kind}와 다르다. 신호 출처 변경은 PAPER 기간 재시작 기록 절차로만 "
+                             "(scripts/reconcile-resolve.py --market M2 signal-source-change, CP-039 D-248)")
+
+
+def bind_signal_source(conn: sqlite3.Connection, kind: str, *, created: bool) -> None:
+    """엔진이 DB를 열 때. created = 이번에 새로 만든 DB. 다르면 MarketMismatch(열지 않음)."""
+    meta = read_signal_meta(conn)
+    if meta is None and created:
+        conn.execute("INSERT INTO meta(key, value) VALUES(?, ?)", (META_SIGNAL, kind))
+        return
+    _verify_signal(meta, kind)
+
+
+def restamp_signal_source(conn: sqlite3.Connection, kind: str) -> str | None:
+    """기간 재시작 절차 안에서만(사람 도구, 엔진 정지 중): 메타를 새 출처로 기록. 이전 값(없으면 None)을 돌려준다."""
+    before = read_signal_meta(conn)
+    conn.execute("INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                 (META_SIGNAL, kind))
+    return before
+
+
+def check_db_signal_source(path: Path, kind: str) -> None:
+    """DB를 만들거나 쓰지 않고 검사한다(시작 검사·운영 도구). 파일이 없으면 통과 — 생성 시 기록된다."""
+    p = path.resolve()
+    if not p.exists():
+        return
+    try:
+        conn = sqlite3.connect(f"file:{quote(p.as_posix(), safe='/:')}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error as exc:
+        raise StorageFailure(f"DB 열기 실패 ({type(exc).__name__})") from exc
+    try:
+        try:
+            meta = read_signal_meta(conn)
+        except sqlite3.Error as exc:
+            raise StorageFailure(f"DB 메타 읽기 실패 ({type(exc).__name__})") from exc
+    finally:
+        conn.close()
+    _verify_signal(meta, kind)
