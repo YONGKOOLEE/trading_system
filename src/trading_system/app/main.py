@@ -44,7 +44,8 @@ from trading_system.marketdata.ticks import load_ticks
 from trading_system.ops.cli import REPO_ROOT
 from trading_system.config.market_scope import MarketScopeError, check_start_scope, parse_market
 from trading_system.domain.market_time import Market
-from trading_system.storage.market_meta import bind_market
+from trading_system.domain.signal_source import PUBLIC_BAR_SOURCE
+from trading_system.storage.market_meta import bind_market, bind_signal_source
 from trading_system.storage.oplog import log_exception
 from trading_system.storage.repository import ModeMismatch, Repository
 
@@ -52,7 +53,7 @@ from .engine import Engine
 from .instance_lock import InstanceLocked, acquire_instance_lock
 from .startup import LiveNotAvailable, check_m2_startup, check_startup, m2_paper_problems
 from .supervisor import QueuedHalts, Supervisor, write_fallback
-from .wiring import StrategyInput, build_engine, load_strategy
+from .wiring import SignalInputs, StrategyInput, build_engine, load_strategy
 
 
 def record_fatal(path: Path, exc: BaseException) -> None:
@@ -222,11 +223,12 @@ def _m1_hosts(mode: Mode) -> frozenset[str]:
 
 
 def run_main(root: Path, environ: dict[str, str] | None = None, max_seconds: float | None = None,
-             market: str = "M1", *, m2_connector=None) -> int:  # type: ignore[no-untyped-def]
+             market: str = "M1", *, m2_connector=None, m2_signal_transport=None) -> int:  # type: ignore[no-untyped-def]
     """market: 실행할 시장 (CP-024 D-097). 기본 M1 = 기존 경로(config/*.<mode>.toml) 그대로.
     M2는 run_m2_main (CP-036 T-045·T-048): BACKTEST = fake 현물 브로커로 엔진을 돌린다. PAPER(바이낸스 테스트넷)는
     m2_connector(scripts/run-m2.py가 주입하는 바이낸스 연결 묶음)와 연결 전 조건(접속·주문 전송 스위치, 비밀 키)이
-    모두 있어야 시작한다 — 없으면 빠진 것을 모두 출력하고 거부(기본 설정 = 거부)."""
+    모두 있어야 시작한다 — 없으면 빠진 것을 모두 출력하고 거부(기본 설정 = 거부).
+    m2_signal_transport: [CP-039] 신호 출처 binance-public일 때만 쓰는 실서버 공개 시세 전송(scripts/run-m2.py가 주입). 기본 None."""
     env = os.environ if environ is None else environ
     try:
         mode = read_trade_mode(env, root / ".env")
@@ -236,7 +238,7 @@ def run_main(root: Path, environ: dict[str, str] | None = None, max_seconds: flo
         return 2
     base = root / "var" / mode.value.lower()
     if mkt is Market.M2:
-        return run_m2_main(root, mode, base, max_seconds, connector=m2_connector)
+        return run_m2_main(root, mode, base, max_seconds, connector=m2_connector, signal_transport=m2_signal_transport)
     try:
         env_file = None if mode is Mode.BACKTEST else root / f".env.{mode.value.lower()}"
         startup = check_startup(mode, root, base / "trading.db", env_file)
@@ -374,7 +376,7 @@ def _run(root: Path, mode: Mode, base: Path, startup, app: AppSettings, gate_set
         repo.close()
 
 
-def _m2_inputs(root: Path, mode: Mode, base: Path, connector=None):  # type: ignore[no-untyped-def]
+def _m2_inputs(root: Path, mode: Mode, base: Path, connector=None, signal_transport=None):  # type: ignore[no-untyped-def]
     """M2 시작 검사·설정 (CP-036 D-209 앞부분). 브로커 연결·DB 생성 없음. 실패하면 ConfigError.
     PAPER: 연결 전 조건(접속 스위치·비밀 키 존재·주문 전송 스위치 D-204)을 모두 모아 거부 사유로 보여 준다. 바이낸스 연결
     묶음(어댑터·사용자 스트림·시세 공급)은 scripts/run-m2.py가 주입한다(app은 바이낸스 패키지를 모름, D-119)."""
@@ -397,6 +399,8 @@ def _m2_inputs(root: Path, mode: Mode, base: Path, connector=None):  # type: ign
             raise ConfigError("M2 PAPER는 바이낸스 연결 묶음이 필요하다 — scripts/run-m2.py로 실행 "
                               "(app은 바이낸스 패키지를 import하지 않는다, D-119)")
         check_start_scope(mode, Market.M2, cfg.broker, cfg.account, connector.hosts)   # 테스트넷 REST·WS API만
+        if cfg.app.signal_source.is_public:   # [CP-039 D-245·D-247] 데이터 출처 행·전송 주입·별도 예산 — 연결 전
+            _check_signal_start(mode, cfg, signal_transport)
     check_strategy_slots(cfg.app.strategies, cfg.limits.l6_max_positions)   # [CP-034 D-197] 연결 전
     caps = load_capabilities(root / "docs" / "capabilities.md")
     strategies = _strategies(cfg.app)
@@ -423,14 +427,44 @@ def _m2_exchange_rules(mode: Mode, symbols: tuple[str, ...]):  # type: ignore[no
     return {s: virtual_symbol_rules(s) for s in symbols}, None
 
 
-def run_m2_main(root: Path, mode: Mode, base: Path, max_seconds: float | None, connector=None) -> int:  # type: ignore[no-untyped-def]
+def _signal_plan(cfg):  # type: ignore[no-untyped-def]
+    """[CP-039] 신호 출처 공급 일정 — 1m klines는 설정 [minute]이 켜졌을 때만(같은 격자·창·여유)."""
+    from datetime import timedelta
+
+    from trading_system.marketdata.binance_public import PublicMinutePlan, SignalPlan
+    m = cfg.market_settings.minute
+    return SignalPlan(minute=PublicMinutePlan(m.period_minutes, m.lookback_bars,
+                                              timedelta(seconds=m.confirm_margin_seconds)) if m.enabled else None)
+
+
+def _check_signal_start(mode: Mode, cfg, signal_transport) -> None:  # type: ignore[no-untyped-def]
+    """[CP-039 D-245·D-247] binance-public 신호 출처의 연결 전 조건: 데이터 출처 시작 표 행, 실서버 공개 시세 전송 주입,
+    일정 추정이 별도 예산(분당 60) 안. 하나라도 어긋나면 ConfigError(연결 0)."""
+    from trading_system.marketdata.binance_public import DataSourceRefused, data_source_rule, public_budget_problem
+    problems: list[str] = []
+    try:
+        data_source_rule(mode, Market.M2, cfg.app.signal_source.kind)
+    except DataSourceRefused as exc:
+        problems.append(str(exc))
+    if signal_transport is None:
+        problems.append("신호 출처 binance-public에는 실서버 공개 시세 전송이 필요하다 — scripts/run-m2.py로 실행 (CP-039 D-244)")
+    problem = public_budget_problem(_signal_plan(cfg), len(cfg.universe.symbols))
+    if problem:
+        problems.append(problem)
+    if problems:
+        raise ConfigError(problems)
+
+
+def run_m2_main(root: Path, mode: Mode, base: Path, max_seconds: float | None, connector=None,  # type: ignore[no-untyped-def]
+                signal_transport=None) -> int:
     """`run --market M2` (CP-036 D-202·D-209). 시작 순서: check_m2_startup(설정·시작 일치 표·DB 메타) → PAPER 연결 전
     조건(접속 스위치·비밀 키·주문 전송 스위치 D-204·주입 연결·접속 도메인) → 실행 잠금 → [PAPER: 서버 시각 → exchangeInfo
     (규칙·rateLimits — 실패하면 시작 거부) → 예산·어댑터] → 전략 규칙 검사 → DB(SYMBOL 식별·M2 메타) → build_engine(M2)
     (등록) → engine.start(): 판정 기록 복원 → 결과 불명 재시작 정리 → K8 → 잔고 조회 → 시작 대조 → [PAPER: 시세 공급·
     사용자 스트림 스레드]. K8은 사용자 재개로만. BACKTEST = fake 현물 브로커 연습 실행."""
     try:
-        cfg, caps, strategies, pairs, gate_settings, policy, switch = _m2_inputs(root, mode, base, connector)
+        cfg, caps, strategies, pairs, gate_settings, policy, switch = _m2_inputs(root, mode, base, connector,
+                                                                                 signal_transport)
     except (LiveNotAvailable, ConfigError) as exc:
         print(f"시작 거부(브로커 연결 없음): {exc}")
         return 2
@@ -452,7 +486,7 @@ def run_m2_main(root: Path, mode: Mode, base: Path, max_seconds: float | None, c
     threading.excepthook = thread_died
     try:
         return _run_m2(mode, base, cfg, caps, strategies, pairs, gate_settings, policy, max_seconds,
-                       connector=connector, switch=switch)
+                       connector=connector, switch=switch, signal_transport=signal_transport)
     except BaseException as exc:
         record_fatal(fatal_log, exc)
         raise
@@ -461,10 +495,13 @@ def run_m2_main(root: Path, mode: Mode, base: Path, max_seconds: float | None, c
         lock.release()
 
 
-def _m2_connect(cfg, pairs, clock, facts, relay, switch, connector, minute_book=None):  # type: ignore[no-untyped-def]
+def _m2_connect(cfg, pairs, clock, facts, relay, switch, connector, minute_book=None,  # type: ignore[no-untyped-def]
+                testnet_bars: bool = True):
     """PAPER 바이낸스 연결 묶음 (D-209): 서버 시각 → exchangeInfo(규칙·rateLimits) → 예산 → 어댑터·스트림·공급.
     비밀 값은 Secret 그대로 넘긴다(읽어 출력하지 않음). 준비 실패면 거부 사유(문자열).
-    minute_book: [CP-037 D-220] 설정 [minute] enabled일 때만 — 1m klines 조회 계획(N분·창·여유)과 받는 쪽을 넘긴다."""
+    minute_book: [CP-037 D-220] 설정 [minute] enabled일 때만 — 1m klines 조회 계획(N분·창·여유)과 받는 쪽을 넘긴다.
+    [CP-039 D-248] 신호 출처 binance-public이면 호출자가 testnet_bars=False(테스트넷 1d klines 조회 없음 — 쓰지 않는 봉의
+    K10도 없음), 1d 봉을 버리는 받는 쪽(BarsDroppedSink — 이중 방어), minute_book=None(테스트넷 1m 조회 없음)을 넘긴다."""
     from .startup import BINANCE_SECRET_KEYS
     s = cfg.secrets
     m = cfg.market_settings.minute
@@ -473,11 +510,12 @@ def _m2_connect(cfg, pairs, clock, facts, relay, switch, connector, minute_book=
     return connector(api_key=s.get(BINANCE_SECRET_KEYS[0]), secret=s.get(BINANCE_SECRET_KEYS[1]),
                      symbols=tuple(pairs), account=cfg.app.account, now=clock.now, sleep=time.sleep,
                      orders_enabled=bool(switch is not None and switch.enabled), sink=facts, on_alert=relay.alert,
-                     on_stream_state=relay.stream_state, halts=relay, **minute)
+                     on_stream_state=relay.stream_state, halts=relay, **minute,
+                     **({} if testnet_bars else {"daily_bars": False}))
 
 
 def _run_m2(mode: Mode, base: Path, cfg, caps, strategies: list[StrategyInput], pairs, gate_settings,  # type: ignore[no-untyped-def]
-            policy, max_seconds: float | None, *, connector=None, switch=None) -> int:
+            policy, max_seconds: float | None, *, connector=None, switch=None, signal_transport=None) -> int:
     from dataclasses import replace as dc_replace
 
     from trading_system.app.m2_relay import M2Relay
@@ -505,10 +543,19 @@ def _run_m2(mode: Mode, base: Path, cfg, caps, strategies: list[StrategyInput], 
         margin = timedelta(seconds=minute_cfg.confirm_margin_seconds)
         minute_book = SpotMinuteBook(tuple(pairs), margin=margin, account=app.account)
         minutes = M2MinuteInput(minute_book, lookback_bars=minute_cfg.lookback_bars, margin=margin,
-                                period_minutes=minute_cfg.period_minutes)   # 주기 판정 격자 검사 (T-052, DP-79)
+                                period_minutes=minute_cfg.period_minutes,   # 주기 판정 격자 검사 (T-052, DP-79)
+                                **({"source": PUBLIC_BAR_SOURCE} if app.signal_source.is_public else {}))
     run = None
-    if mode is Mode.PAPER:
+    signal_feed = signal_facts = None
+    if mode is Mode.PAPER and app.signal_source.is_public:
+        # [CP-039 D-243·D-248] 신호 출처 = 실서버 공개 시세: 봉(1d·1m)·참조 시세는 signal-feed가, 실행(주문·잔고·대조·
+        # 최근가·규칙)은 테스트넷 그대로. 테스트넷 공급의 1d 봉은 버리고 테스트넷 1m은 조회하지 않는다(출처를 섞지 않음)
+        from trading_system.marketdata.signal_feed import BarsDroppedSink
+        signal_facts, signal_feed = _signal_feed(cfg, pairs, clock, facts, relay, signal_transport, minute_book)
+        run = _m2_connect(cfg, pairs, clock, BarsDroppedSink(facts), relay, switch, connector, None, testnet_bars=False)
+    elif mode is Mode.PAPER:
         run = _m2_connect(cfg, pairs, clock, facts, relay, switch, connector, minute_book)
+    if mode is Mode.PAPER:
         if isinstance(run, str):
             print(f"시작 거부(주문 없음): {run} (D-209)")
             return 2
@@ -532,6 +579,9 @@ def _run_m2(mode: Mode, base: Path, cfg, caps, strategies: list[StrategyInput], 
     repo = Repository(cfg.storage_path, mode, order_identity=OrderIdentity.SYMBOL)   # M2 주문 식별 (D-110)
     try:
         bind_market(repo.connection, Market.M2, cfg.broker, created=not existed)
+        # [CP-039 D-248] 신호 출처 메타: binance-public은 새 DB에 기록, testnet(기본)은 검사만(쓰지 않음 — V-326)
+        bind_signal_source(repo.connection, app.signal_source.kind,
+                           created=not existed and app.signal_source.is_public)
     except ModeMismatch as exc:
         repo.close()
         print(f"시작 거부(브로커 연결 없음): {exc}")
@@ -557,7 +607,9 @@ def _run_m2(mode: Mode, base: Path, cfg, caps, strategies: list[StrategyInput], 
                                   fallback_log=base / "logs" / "alerts-fallback.log",
                                   reconcile_every=_minutes(app.reconcile_minutes),
                                   requery_wait=lambda: time.sleep(REQUERY_WAIT_SECONDS), market=Market.M2.value,
-                                  spot=SpotInputs(facts, pairs, cfg.universe.quote_asset, policy, minutes=minutes))
+                                  spot=SpotInputs(facts, pairs, cfg.universe.quote_asset, policy, minutes=minutes,
+                                                  signal=(SignalInputs(signal_facts, app.signal_source.max_divergence)
+                                                          if signal_facts is not None else None)))
         except ConfigError as exc:
             print(f"시작 거부(주문 없음): {exc}")
             return 2
@@ -580,6 +632,11 @@ def _run_m2(mode: Mode, base: Path, cfg, caps, strategies: list[StrategyInput], 
             print(f"분봉 조회 켜짐: {minute_cfg.period_minutes}분 격자, 창 {minute_cfg.lookback_bars}봉, 확정 여유 "
                   f"{minute_cfg.confirm_margin_seconds}초, 승인 {minute_cfg.approval} (CP-037 D-220)")
         io_threads = run.threads(stop) if run is not None else []
+        if signal_feed is not None:   # [CP-039 D-254] 죽으면 긴급 알림만(정지 없음 — 실행 경로 아님)
+            io_threads.append(threading.Thread(target=signal_feed.run, args=(stop,), name="signal-feed", daemon=True))
+            print(f"신호 출처: binance-public (승인 {app.signal_source.approval}), 괴리 임계 θ "
+                  f"{app.signal_source.max_divergence * 100}% — 봉·참조 시세 = 실서버 공개 시세, 주문·잔고·대조 = 테스트넷 "
+                  "(CP-039)")
         from .telegram_run import M2_CHAT_KEY, M2_TOKEN_KEY, telegram_threads
         io_threads += telegram_threads(engine, repo, mode is Mode.PAPER and app.telegram_enabled, cfg.secrets, clock,
                                        base / "KILL", stop, log_dir=base / "logs", market=Market.M2.value,
@@ -591,6 +648,7 @@ def _run_m2(mode: Mode, base: Path, cfg, caps, strategies: list[StrategyInput], 
             print(f"바이낸스 서버 시각 오차 {run.server_offset_ms}ms (경고 기준 {cfg.market_settings.server_time_warn_ms}ms)")
         halting = [(t, M2_THREAD_LABELS[t.name]) for t in io_threads if t.name in M2_THREAD_LABELS]
         _h, watched_k11, watched_alert_only = watched_threads(io_threads, None)   # 텔레그램: 알림 K11·수신 알림만
+        watched_alert_only += [(t, "신호 출처 공급(실서버 공개 시세)") for t in io_threads if t.name == "signal-feed"]
         sup = Supervisor(engine, heartbeat=base / "heartbeat", fallback=engine.fallback_file,
                          clock_monitor=clock_monitor, watched=halting, watched_k11=watched_k11,
                          watched_alert_only=watched_alert_only)
@@ -625,6 +683,24 @@ def _run_m2(mode: Mode, base: Path, cfg, caps, strategies: list[StrategyInput], 
 
 # 감시 스레드가 생존을 보는 M2 입출력 스레드 — 죽으면 긴급 알림 + K5 (D-215)
 M2_THREAD_LABELS = {"binance-feed": "바이낸스 시세 공급", "binance-user-stream": "바이낸스 사용자 스트림"}
+
+
+def _signal_feed(cfg, pairs, clock, facts, relay, transport, minute_book):  # type: ignore[no-untyped-def]
+    """[CP-039 T-061] 신호 출처 공급 조립: 공개 시세 가드(데이터 출처 행) → 별도 예산 → 공개 조회 클라이언트 → signal-feed.
+    자격정보를 넘기지 않는다(모듈에 그런 인자가 없다). 연결 전 조건은 _check_signal_start가 이미 봤다."""
+    from trading_system.marketdata.binance_public import (
+        BinancePublicClient, PublicBudget, PublicDataGuard, data_source_rule,
+    )
+    from trading_system.marketdata.signal_feed import SignalFacts, SignalFeed
+
+    def now_ms() -> int:
+        return int(clock.now().timestamp() * 1000)
+    guard = PublicDataGuard(transport, data_source_rule(Mode.PAPER, Market.M2, cfg.app.signal_source.kind))
+    client = BinancePublicClient(guard, PublicBudget(now_ms), now_ms=now_ms, sleep=time.sleep, on_alert=relay.notify)
+    ref = SignalFacts(tuple(pairs))
+    feed = SignalFeed(client, tuple(pairs), now=clock.now, notify=relay.notify, daily_sink=facts, reference=ref,
+                      plan=_signal_plan(cfg), minute_sink=minute_book)
+    return ref, feed
 
 
 def _record_order_switch(engine: Engine, switch) -> None:  # type: ignore[no-untyped-def]

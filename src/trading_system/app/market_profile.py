@@ -22,9 +22,10 @@ from trading_system.domain.clock import KST, last_kst_time_at_or_before
 from trading_system.domain.daily_input import DailyInput, final_daily, m2_daily_input
 from trading_system.domain.enums import OrderType, Side
 from trading_system.domain.limits import AccountLimits
-from trading_system.domain.market import SessionInfo
+from trading_system.domain.market import Quote, SessionInfo
 from trading_system.domain.market_time import M2_TIME, Market, session_247
 from trading_system.domain.models import GateRequest
+from trading_system.domain.signal_source import signal_basis_avg_price
 from trading_system.domain.strategy import Bar, EvaluationSnapshot, InstrumentView, PositionView
 from trading_system.domain.trading_rules import (
     DustVerdict, SpotOrderPolicy, SymbolRules, apply_spot_terms, market_qty_step,
@@ -41,6 +42,12 @@ if TYPE_CHECKING:
     from .engine import Engine, LoadedStrategy, _UbInput
 
 ORDER_TERMS_UNAVAILABLE = "ORDER_TERMS_UNAVAILABLE"   # M2: 주문 유형·가격을 정할 수 없어 의도를 만들지 않음 (V-281 (e))
+
+
+class SignalPrices(Protocol):
+    """[CP-039 D-248] 신호 출처 참조 시세 (marketdata/signal_feed.SignalFacts)."""
+
+    def reference_quote(self, instrument: str) -> Quote | None: ...
 
 
 class SpotFacts(MarketFacts, SymbolRulesSource, Protocol):
@@ -93,6 +100,10 @@ class MarketProfile:
         """게이트 전 요청 변환 (D-201 (5)). M1 = 항등."""
         return req
 
+    def evaluation_record(self, snap: EvaluationSnapshot) -> dict[str, object]:
+        """판정 감사(EVALUATION)에 더할 항목. M1 = 없음(기록 불변)."""
+        return {}
+
 
 class SpotProfile(MarketProfile):
     """M2(크립토 현물, 24/7, UTC) 프로파일 (D-201·D-207·D-208 이전 규칙은 T-046에서 통일)."""
@@ -102,8 +113,13 @@ class SpotProfile(MarketProfile):
 
     def __init__(self, *, facts: SpotFacts, pairs: Mapping[str, tuple[str, str]], quote_asset: str,
                  account_facts: SpotAccountFacts, order_policy: SpotOrderPolicy, dust: DustHandler,
-                 schedule: SpotReconcileSchedule, minutes: M2MinuteInput | None = None) -> None:
+                 schedule: SpotReconcileSchedule, minutes: M2MinuteInput | None = None,
+                 signal: SignalPrices | None = None) -> None:
         self.facts = facts
+        # [CP-039 D-248] 신호 출처 binance-public이면 실서버 참조 시세(봉은 facts에 신호 출처 봉만 들어온다 — 조립 지점).
+        # None = testnet 출처(종전 동작, reference_price = 실행 출처 최근가)
+        self.signal = signal
+        self._avg_fallback: set[str] = set()   # [CP-039 D-252] 원장 평균으로 대신한 종목(경고 1회)
         self.minutes = minutes   # [CP-037 D-220] 1분봉 저장·판정 입력 (None = 분봉 공급 꺼짐)
         self.pairs = dict(pairs)
         self.quote_asset = quote_asset
@@ -221,14 +237,42 @@ class SpotProfile(MarketProfile):
         # [DP-78 — DP-75 (6) 해소, CLAUDE.md §8-3] 1분봉 누락·결측·품질·저장 실패·조회 시한 초과·공급 꺼짐(D-220)은 data_ok가
         # 아니라 minute_ok False로 전달한다(minute_bars ()). 판정 실행기가 이 종목 신규 진입·증액을 버리고, 청산·감액은 분봉 외
         # 입력(data_ok)으로만 검사한다 — 분봉이 무효라고 위험 축소 신호까지 조용히 막지 않는다.
+        last = q.price if q is not None and q.at <= now else None
         return InstrumentView(inst, daily_bars=di.bars, minute_bars=minute.bars if minute is not None else (),
-                              last_price=q.price if q is not None and q.at <= now else None,
+                              last_price=last,
                               statuses=statuses or frozenset(), position=position,
                               has_pending_order=pending, data_ok=data_ok,
                               minute_ok=minute.ok if minute is not None else True,
                               agg_bars=minute.agg_bars if minute is not None else (),
                               agg_missing=minute.agg_missing if minute is not None else (),
-                              daily_ok=di.ok, daily_exit=di.daily_exit)
+                              daily_ok=di.ok, daily_exit=di.daily_exit,
+                              reference_price=last if self.signal is None else self._reference(inst, now))
+
+    def _reference(self, inst: str, now: datetime) -> Decimal | None:
+        """[CP-039 D-248] 신호 출처 참조 시세 — 미래 시각이거나 시세 신선도(A-064 60초)를 넘겨 늙었으면 None."""
+        assert self.signal is not None
+        r = self.signal.reference_quote(inst)
+        if r is None or r.at > now or now - r.at > self.policy.quote_max_age or r.price <= 0:
+            return None
+        return r.price
+
+    def evaluation_record(self, snap: EvaluationSnapshot) -> dict[str, object]:
+        """[CP-039 D-248·D-251] 신호 출처 binance-public이면 판정 감사에 출처·판정 시점 P_s·P_x·사용 일봉 범위·지문.
+        testnet 출처면 없음(기록 불변, V-326)."""
+        if self.signal is None:
+            return {}
+        prices: dict[str, dict[str, str | None]] = {}
+        daily: dict[str, dict[str, object]] = {}
+        for v in snap.instruments:
+            r = self.signal.reference_quote(v.instrument)
+            prices[v.instrument] = {"signal": None if v.reference_price is None else str(v.reference_price),
+                                    "signal_at": None if r is None else r.at.isoformat(),
+                                    "exec": None if v.last_price is None else str(v.last_price)}
+            bars = v.daily_bars
+            daily[v.instrument] = {"count": len(bars), "first": bars[0].at.isoformat() if bars else None,
+                                   "last": bars[-1].at.isoformat() if bars else None,
+                                   "fingerprint": daily_fingerprint(bars)}
+        return {"signal_source": "binance-public", "prices": prices, "daily": daily}
 
     def _daily_warning(self, inst: str, owner: str, di: DailyInput, position: PositionView | None) -> None:
         """[DP-82 (나)] 일봉 판정 입력이 불완전하면 텔레그램 경고(WARNING — 감사 ALERT를 텔레그램이 보냄) 1건, 보유 여부 포함.
@@ -273,12 +317,30 @@ class SpotProfile(MarketProfile):
             return None
         own = e.repo.active_ownership(e.account, inst)
         mine = own is not None and own.owner == owner
+        avg = p.avg_price if self.signal is None else self._signal_avg(inst, p.avg_price)
         if rules is None:
-            return PositionView(p.quantity, p.avg_price, 0, mine)
+            return PositionView(p.quantity, avg, 0, mine)
         c = self.dust.check(e.account, inst)
         if c is None or c.verdict is not DustVerdict.SEND:
             return None
-        return PositionView(c.quantity, p.avg_price, 0, mine)
+        return PositionView(c.quantity, avg, 0, mine)
+
+    def _signal_avg(self, inst: str, ledger: Decimal) -> Decimal:
+        """[CP-039 D-252, A-115 Q-5 (가)] 전략 상태 입력 평균 매입가 = 체결 시각 P_s를 체결 수량으로 가중한 값(원장은 그대로).
+        지금 보유를 만든 체결 가운데 P_s가 없는 것이 있으면 원장 평균(테스트넷 체결가)으로 대신하고 경고 1회 [임시 판단 —
+        청산 판정을 막지 않기 위해, 불확실성은 알림으로]."""
+        e = self._engine
+        rows = e.repo.fill_signal_prices(e.account, inst)
+        avg = signal_basis_avg_price((r["side"], Decimal(r["quantity"]),
+                                      None if r["ref_price"] is None else Decimal(r["ref_price"])) for r in rows)
+        if avg is not None:
+            self._avg_fallback.discard(inst)
+            return avg
+        if inst not in self._avg_fallback:
+            self._avg_fallback.add(inst)
+            e.alerts.alert("WARNING", f"신호 기준 평균 매입가를 정할 수 없음 {inst} (체결 시각 신호 출처 시세 없음 또는 신호 출처 "
+                                      "기록 전 보유) — 원장 평균(테스트넷 체결가)으로 판정 (CP-039 D-252)", None)
+        return ledger
 
     # --- 게이트 전 요청 변환 (D-201 (5)) -------------------------------------------------------
     def prepare(self, req: GateRequest) -> GateRequest | None:
@@ -325,6 +387,13 @@ class SpotProfile(MarketProfile):
         if step <= 0 or quantity % step != 0:
             raise ValueError(f"수량 {quantity}이 LOT_SIZE 단위 {step}의 배수가 아님 — 자동 반올림 없음, "
                              "사람이 수량을 다시 정한다 (D-211)")
+
+
+def daily_fingerprint(bars: tuple[Bar, ...]) -> str:
+    """[CP-039 D-248] 판정에 쓴 일봉 창의 지문(16자) — 날짜·OHLCV 문자열의 SHA-256 앞부분. 재수집본과 대조할 때 쓴다."""
+    import hashlib
+    text = "|".join(f"{b.at.isoformat()},{b.open},{b.high},{b.low},{b.close},{b.volume}" for b in bars)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 def final_daily_bars(bars: tuple[Bar, ...], as_of: datetime) -> tuple[Bar, ...]:

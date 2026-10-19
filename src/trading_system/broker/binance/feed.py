@@ -184,9 +184,11 @@ class BinanceFeed:
     def __init__(self, client: BinanceSpotClient, sink: SpotSink, symbols: Sequence[str], *,
                  now: Callable[[], datetime], alert: Callable[[str, str], None], halts: HaltControl | None = None,
                  account: str | None = None, plan: FeedPlan = FeedPlan(), minute: MinutePlan | None = None,
-                 minute_sink: MinuteSink | None = None) -> None:
+                 minute_sink: MinuteSink | None = None, daily_bars: bool = True) -> None:
         if minute is not None and minute_sink is None:
             raise ValueError("1m 조회 계획에는 받는 쪽(minute_sink)이 필요하다")
+        # [CP-039 D-248] False = 판정 입력 봉을 다른 출처(신호 출처)가 공급 — 테스트넷 1d klines를 조회하지 않는다(K10 없음)
+        self._daily_bars = daily_bars
         self._minute = minute
         self._minute_grid = minute.grid() if minute is not None else None
         self._minute_sink = minute_sink
@@ -225,7 +227,8 @@ class BinanceFeed:
         if self._day != today:
             if not first:
                 self._load_rules()
-            self._load_klines()
+            if self._daily_bars:
+                self._load_klines()
             self._day = today
         if self._reload.is_set():
             self._reload.clear()

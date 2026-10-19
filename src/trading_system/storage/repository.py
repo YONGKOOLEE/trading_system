@@ -189,6 +189,17 @@ CREATE TRIGGER IF NOT EXISTS minute_bar_ext_no_update BEFORE UPDATE ON minute_ba
   BEGIN SELECT RAISE(ABORT, 'minute_bar_ext is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS minute_bar_ext_no_delete BEFORE DELETE ON minute_bar_ext
   BEGIN SELECT RAISE(ABORT, 'minute_bar_ext is append-only'); END;
+-- 체결별 신호 기준가 (CP-039 D-251·D-252, 승인 A-115 Q-5 (가), T-062): 신호 출처 binance-public일 때만 체결마다 1행 —
+-- 그 체결을 기록한 시점의 신호 출처 최신 참조 시세(P_s)와 그 시각(없으면 NULL). 원장(fill·position)은 바꾸지 않는다.
+-- 추가 전용 표라 스키마 버전을 올리지 않는다(D-144·D-260 방식) — 기존 저장소도 열 때 생성(빈 표). 고치거나 지우지 않는다.
+-- 주문·대조·한도 경로는 이 표를 읽지 않는다(전략 상태 입력 "평균 매입가"와 paper-review 지표만)
+CREATE TABLE IF NOT EXISTS fill_signal_price (
+  fill_key TEXT PRIMARY KEY, mode TEXT NOT NULL, account TEXT NOT NULL, instrument TEXT NOT NULL, side TEXT NOT NULL,
+  quantity TEXT NOT NULL, fill_price TEXT NOT NULL, ref_price TEXT, ref_at TEXT, recorded_at TEXT NOT NULL);
+CREATE TRIGGER IF NOT EXISTS fill_signal_price_no_update BEFORE UPDATE ON fill_signal_price
+  BEGIN SELECT RAISE(ABORT, 'fill_signal_price is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS fill_signal_price_no_delete BEFORE DELETE ON fill_signal_price
+  BEGIN SELECT RAISE(ABORT, 'fill_signal_price is append-only'); END;
 -- 투자자별 일별 순매수 (CAP-DAT-05a, CP-033 D-190·02 ENT-33, T-035): 키 (종목, 일자, 단위, 회차, 투자자 구분). 추가 전용
 -- 표라 스키마 버전을 올리지 않는다(D-144·A-086 ③과 같은 방식) — 기존 저장소도 열 때 생성. 고치거나 지우지 않는다(트리거,
 -- 자동 삭제 없음). 재수집 값이 다르면 새 회차 행 + 감사 INVESTOR_FLOW_CORRECTED, 같으면 관측(investor_flow_seen)만 추가.
@@ -990,6 +1001,19 @@ class Repository:
                       "VALUES(?,?,?,?,?,?,?)",
                       (f"{order_key}|{fill_id}", self.mode.value, order_key, fill_id, str(quantity), str(price), to_iso(at)))
         return cur.rowcount == 1
+
+    def insert_fill_signal_price(self, fill_key: str, account: str, instrument: str, side: str, quantity: Decimal,
+                                 fill_price: Decimal, ref: tuple[Decimal, datetime] | None, at: datetime) -> None:
+        """[CP-039 D-251] 체결별 신호 기준가 — 체결 행을 기록한 같은 저장 단위에서 부른다. ref None = 그 시점 참조 시세 없음."""
+        self._x("INSERT OR IGNORE INTO fill_signal_price(fill_key, mode, account, instrument, side, quantity, fill_price, "
+                "ref_price, ref_at, recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (fill_key, self.mode.value, account, instrument, side, str(quantity), str(fill_price),
+                 None if ref is None else str(ref[0]), None if ref is None else to_iso(ref[1]), to_iso(at)))
+
+    def fill_signal_prices(self, account: str, instrument: str) -> list[dict]:
+        """[CP-039 D-252] 체결별 신호 기준가 — 기록 순서."""
+        return [dict(r) for r in self._x("SELECT * FROM fill_signal_price WHERE account=? AND instrument=? ORDER BY rowid",
+                                         (account, instrument))]
 
     def insert_fill_fee(self, fill_key: str, commission: Decimal | None, commission_asset: str | None,
                         quote_qty: Decimal, confirmed: bool, at: datetime) -> None:

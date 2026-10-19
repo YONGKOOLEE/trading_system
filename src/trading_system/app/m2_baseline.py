@@ -15,6 +15,8 @@ CP-041 D-273·V-343). 사람이 직접 실행한다.
   보유)으로 기록. 설정 유니버스 밖·이미 있는 심볼·기준선(DB) 없음·승인 기록 표에 없는 --approval이면 거부. USDT 기준선·다른
   심볼·PAPER 기간은 그대로. BACKTEST(fake 연습)는 --base-amount로 가상 기초 자산 잔고.
 - K4는 풀지 않는다 — 다음 run의 대조 일치 + 사용자 재개(D-099).
+- [CP-039 D-248] signal-source-change: 설정 `[signal_source] kind`가 DB 신호 출처 메타와 다를 때 PAPER 기간 재시작 기록
+  (감사 PAPER_PERIOD_RESTART — 사유·이전·새 출처·승인 A-ID) + 메타 갱신. 거래소 조회·연결 없음. 같은 출처면 거부.
 - DB: M2 메타·SYMBOL 식별. 다른 시장 DB면 거부. 없으면 M2 메타로 만든다(run 첫 시작과 같은 기록).
 비밀 값은 출력하지 않는다. 이 모듈은 바이낸스 패키지를 import하지 않는다(D-119).
 """
@@ -38,14 +40,16 @@ from trading_system.domain.market import CostRates
 from trading_system.domain.market_time import M2_TIME, Market
 from trading_system.monitoring.spot_cash import SpotAccountFacts
 from trading_system.reconciliation.spot import ResetError, add_universe_asset, confirm_reset, initial_baseline
-from trading_system.storage.market_meta import bind_market
+from trading_system.storage.market_meta import (
+    LEGACY_SIGNAL_KIND, bind_market, read_signal_meta, restamp_signal_source,
+)
 from trading_system.storage.repository import ModeMismatch, OrderIdentity, Repository, StorageFailure
 
 from .instance_lock import InstanceLocked, acquire_instance_lock, instance_running
 from .preflight import engine_alive
 from .startup import APPROVALS_FILE, BINANCE_SECRET_KEYS, LiveNotAvailable, check_m2_startup, recorded_approval_ids
 
-SUBCOMMANDS = ("initial-baseline", "reset-confirm", "universe-add")
+SUBCOMMANDS = ("initial-baseline", "reset-confirm", "universe-add", "signal-source-change")
 UNIVERSE_ADD = "universe-add"
 # PAPER 잔고 조회 자리: (api_key, secret, symbols, account, now_ms) → query_balances(account)를 가진 객체 또는 거부 사유
 BalanceSource = Callable[..., Any]
@@ -83,7 +87,7 @@ def m2_baseline_main(argv: Sequence[str], root: Path, *, open_balances: BalanceS
     root = Path(ns.root)
     print(f"시장: {ns.market} · 디렉터리: {root.resolve()}")
     if ns.market != Market.M2.value:
-        return _refuse("initial-baseline·reset-confirm·universe-add는 M2 전용 (--market M2)")
+        return _refuse("initial-baseline·reset-confirm·universe-add·signal-source-change는 M2 전용 (--market M2)")
     adding = ns.command == UNIVERSE_ADD
     if not adding and (ns.symbol, ns.approval, ns.base_amount) != (None, None, None):
         return _refuse("--symbol·--approval·--base-amount는 universe-add만")
@@ -101,9 +105,12 @@ def m2_baseline_main(argv: Sequence[str], root: Path, *, open_balances: BalanceS
         return _refuse(alive)
     try:
         env_file = None if mode is Mode.BACKTEST else root / f".env.{mode.value.lower()}"
-        cfg = check_m2_startup(mode, root, base / "trading.db", env_file)
+        cfg = check_m2_startup(mode, root, base / "trading.db", env_file,
+                               signal_meta=ns.command != "signal-source-change")
     except (LiveNotAvailable, ConfigError) as exc:
         return _refuse(str(exc))
+    if ns.command == "signal-source-change":
+        return _signal_source_change(ns, cfg, mode, clock, base)
     quote = cfg.universe.quote_asset
     pairs = {s: (cfg.universe.base_asset(s) or "", quote) for s in cfg.universe.symbols}
     if adding:
@@ -171,6 +178,43 @@ def _universe_add_problem(ns: argparse.Namespace, cfg: Any, root: Path, pairs: M
     if not cfg.storage_path.exists():
         return "DB가 없다(기준선 없음) — 처음이면 initial-baseline이 유니버스 전체를 기록한다 (D-272 ⑥)"
     return None
+
+
+def _signal_source_change(ns: argparse.Namespace, cfg: Any, mode: Mode, clock: Clock, base: Path) -> int:
+    """[CP-039 D-248] 신호 출처 변경 = PAPER 기간 재시작(사람 절차). 실행 잠금을 쥔 채로 메타 갱신 + 감사 한 저장 단위."""
+    if not cfg.storage_path.exists():
+        return _refuse("DB 없음 — 새 DB는 run 첫 시작이 신호 출처를 기록한다 (기간 재시작 불필요)")
+    try:
+        lock = acquire_instance_lock(base)
+    except InstanceLocked:
+        return _refuse("엔진 실행 중(실행 잠금 보유) — 엔진을 멈춘 뒤 실행 (D-210)")
+    try:
+        try:
+            repo = Repository(cfg.storage_path, mode, order_identity=OrderIdentity.SYMBOL)
+        except (StorageFailure, ModeMismatch) as exc:
+            return _refuse(f"저장소: {exc}")
+        try:
+            try:
+                bind_market(repo.connection, Market.M2, cfg.broker, created=False)
+            except ModeMismatch as exc:
+                return _refuse(f"DB 메타 불일치: {exc}")
+            sig = cfg.app.signal_source
+            before = read_signal_meta(repo.connection) or LEGACY_SIGNAL_KIND
+            if before == sig.kind:
+                return _refuse(f"DB 신호 출처가 이미 {sig.kind} — 바꿀 것이 없다")
+            now = clock.now()
+            operator = ns.operator or getpass.getuser()
+            with repo.tx():
+                restamp_signal_source(repo.connection, sig.kind)
+                repo.audit(now, "PAPER_PERIOD_RESTART", operator, cfg.account, {
+                    "at": now.isoformat(), "reason": "신호 출처 변경 — PAPER 기간은 이 시점부터 다시 계산 (CP-039 D-248)",
+                    "signal_source": sig.kind, "previous": before, "approval": sig.approval})
+        finally:
+            repo.close()
+    finally:
+        lock.release()
+    print(f"signal-source-change 완료: 신호 출처 {before} → {sig.kind}, PAPER 기간 재시작 기록 (CP-039 D-248)")
+    return 0
 
 
 def _write(ns: argparse.Namespace, cfg: Any, mode: Mode, clock: Clock, source: Any,  # noqa: PLR0913

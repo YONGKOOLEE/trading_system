@@ -195,12 +195,13 @@ class M2RunConnector:
                  now: Callable[[], datetime], sleep: Callable[[float], None], orders_enabled: bool, sink: SpotSink,
                  on_alert: Alert, on_stream_state: Callable[[str, str], None], halts: HaltControl,
                  minute_plan: tuple[int, int, int] | None = None, minute_sink: MinuteSink | None = None,
-                 backfill_per_minute: int = 0) -> M2Run | str:
+                 backfill_per_minute: int = 0, daily_bars: bool = True) -> M2Run | str:
         """준비 실패면 거부 사유(문자열) — 호출자는 시작 거부(종료 코드 2).
 
         minute_plan = (판정 주기 N분, 판정 창 봉 수, 확정 여유 초) — 1m klines 조회(CP-037 D-220). 기본 None = 조회 없음.
         app이 설정 `[minute] enabled = true`와 승인 A-ID를 확인했을 때만 넘긴다. 호출 예산 시작 검사를 넘지 못하면 거부.
-        backfill_per_minute > 0 = 이력 채우기 분당 상한(CP-040 D-261) — 예산 시작 검사에 그 몫을 더한다(기본 0 = 채우기 없음)."""
+        backfill_per_minute > 0 = 이력 채우기 분당 상한(CP-040 D-261) — 예산 시작 검사에 그 몫을 더한다(기본 0 = 채우기 없음).
+        daily_bars False = 판정 입력 1d 봉을 다른 출처(CP-039 신호 출처)가 공급 — 테스트넷 1d klines 조회 없음(기본 True)."""
         minute: MinutePlan | None = None
         if minute_plan is not None:
             if minute_sink is None:
@@ -226,7 +227,8 @@ class M2RunConnector:
             if problem is not None:
                 return problem
         feed = BinanceFeed(session.client, sink, symbols, now=now, alert=on_alert, halts=halts, account=account,
-                           plan=self._plan, minute=minute, minute_sink=minute_sink if minute is not None else None)
+                           plan=self._plan, minute=minute, minute_sink=minute_sink if minute is not None else None,
+                           daily_bars=daily_bars)
         feed_box.append(feed)
         stream = UserStream(self._ws_connect, session.credentials, session.adapter, now_ms=now_ms,
                             on_state=lambda st, m: on_stream_state(st.value, m), url=self._ws_url)

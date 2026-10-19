@@ -107,6 +107,20 @@ class GatePolicy:
             raise ValueError("price_limit_ratio는 0보다 큰 Decimal이어야 한다")
 
 
+class SignalPrices(Protocol):
+    """[CP-039 D-250] 신호 출처(실서버 공개 시세) 참조 시세. 모르면 None."""
+
+    def reference_quote(self, instrument: str) -> Quote | None: ...
+
+
+@dataclass(frozen=True)
+class SignalCheck:
+    """[CP-039 D-250, A-115 Q-3] G11-S 입력: 참조 시세 공급과 괴리 임계 θ(비율, 1.0% = 0.01). 신호 출처 binance-public일 때만."""
+
+    prices: SignalPrices
+    max_divergence: Decimal
+
+
 @dataclass(frozen=True)
 class GateInputs:
     limits: LimitsSource
@@ -117,3 +131,5 @@ class GateInputs:
     spot_rules: SymbolRulesSource | None = None  # M2 현물 거래 규칙 (D-106). None = M1 (기존 G10 검사만)
     # [CP-034 D-197] 전략 소유자("전략ID:버전") → 보유 슬롯. None = 슬롯 검사 없음(기존 동작). 있으면 표에 없는 전략은 0
     strategy_slots: Mapping[str, int] | None = None
+    # [CP-039 D-250] G11-S(신호가–실행가 괴리·참조 시세 신선도, 위험 확대만). None = 검사 없음(기존 동작, M1·testnet 출처)
+    signal: SignalCheck | None = None

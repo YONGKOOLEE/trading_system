@@ -204,6 +204,10 @@ class InstrumentView:
     # 불러 감액·청산 신호만 쓴다(전략에게는 None으로 지워 보인다). 기본값(True, None) = 종전 동작(M1·일봉 미사용 전략)
     daily_ok: bool = True
     daily_exit: tuple[Bar, ...] | None = None
+    # [CP-039 D-248·D-249] M2 신호 출처 참조 시세(P_s). 신호 출처 testnet(기본)이면 last_price와 같은 값, binance-public이면 실서버
+    # 공개 시세(모르거나 60초 넘게 늙었으면 None). 신호 조건은 봉·이 값으로, 수량 산정·주문 가격은 last_price(실행 출처)로 쓴다.
+    # M1·백테스트는 None(종전 그대로)
+    reference_price: Decimal | None = None
 
 
 @dataclass(frozen=True)

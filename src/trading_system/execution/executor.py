@@ -56,6 +56,9 @@ class Executor:
         self._parked: list[OrderEvent] = []  # 짝 없는 통보 (접수 응답보다 먼저 온 체결 등). 주문이 연결되면 다시 반영
         # 명시 거부 후처리 (의도, 전송 결과). M2 dust 확정(-1013, D-102)이 쓴다. M1은 비어 있음 — 동작 그대로
         self.reject_listeners: list[Callable[[IntentRow, SubmitResult], None]] = []
+        # [CP-039 D-251] 신호 출처 binance-public일 때만(조립 지점): 체결 기록 시점의 신호 출처 참조 시세(가격, 시각).
+        # None(기본) = 기록 없음 — M1·testnet 출처 동작 그대로
+        self.fill_reference: Callable[[str], tuple[Decimal, datetime] | None] | None = None
 
     @property
     def blocked_reason(self) -> str | None:
@@ -396,6 +399,9 @@ class Executor:
             quote = ev.quote_qty if reported and ev.quote_qty is not None else ev.quantity * ev.price
             self._repo.insert_fill_fee(fill_key, ev.commission, ev.commission_asset, quote,
                                        reported and ev.quote_confirmed, now)
+        if self.fill_reference is not None:   # [CP-039 D-251] 체결 시각 P_s — 원장과 같은 저장 단위, 원장 값은 바꾸지 않음
+            self._repo.insert_fill_signal_price(fill_key, intent.account, intent.instrument, intent.side, ev.quantity,
+                                                ev.price, self.fill_reference(intent.instrument), now)
         order_open = order.state in ("ACCEPTED", "PARTIAL")
         # 종결된 주문(취소·만료·정정됨)에 늦게 온 체결은 수량만 기록하고 주문을 다시 열지 않는다
         new_state = ("FILLED" if filled >= order.quantity else "PARTIAL") if order_open else order.state

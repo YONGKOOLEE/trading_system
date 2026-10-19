@@ -4,6 +4,9 @@
 결과: 마크다운 집계를 var/<mode>/review/review-<시각>.md(기본)에 쓰고 경로를 출력한다.
 --market M2 (CP-037 T-055, D-232): M2 체크아웃(config/m2)에서만. 비용 요율은 config/m2/market.<mode>.toml, 끝에 M2 PAPER-1
 집계 표(reporting/m2_paper1 — 판정 없음, 표만)를 붙인다. M1(기본)은 기존 동작 그대로.
+[CP-039 T-063] M2 DB의 신호 출처가 binance-public이면 신호 출처 분리 집계(①실행 ②신호 대비 ③괴리 ④백테스트 가정 대비 —
+reporting/m2_signal_review)를 더 붙인다(testnet DB는 붙이는 것 없음 — 기존 결과 불변). --compare-bars CSV --symbol SYM:
+A-110 수집 도구가 같은 기간을 재수집한 1분봉 CSV와 저장 봉(binance-public)을 대조한다(D-255 (a), 판정 아님).
 """
 
 from __future__ import annotations
@@ -26,6 +29,8 @@ def review_main(argv: list[str] | None = None) -> int:
     p.add_argument("--root", default=".")
     p.add_argument("--out", help="출력 파일 (기본 var/<mode>/review/review-<시각>.md)")
     p.add_argument("--market", default="M1", help="M1|M2 (기본 M1). M2는 M2 체크아웃에서 — PAPER-1 집계 표 추가")
+    p.add_argument("--compare-bars", help="(M2) 재수집 1분봉 CSV(A-110 형식) — 저장 신호 출처 봉과 대조 (CP-039 D-255)")
+    p.add_argument("--symbol", help="(M2) --compare-bars 대상 심볼")
     ns = p.parse_args(argv)
     try:
         mode = parse_trade_mode(ns.mode)
@@ -41,6 +46,9 @@ def review_main(argv: list[str] | None = None) -> int:
         print(f"거부: --market {ns.market!r}는 M1·M2만")
         return 2
     m2 = ns.market == "M2"
+    if ns.compare_bars and (not m2 or not ns.symbol):
+        print("거부: --compare-bars는 --market M2와 --symbol이 함께 필요")
+        return 2
     if m2 and not (root / "config" / "m2" / f"app.{mode.value.lower()}.toml").is_file():
         print(f"거부: --market M2인데 config/m2/app.{mode.value.lower()}.toml이 없음 — M2 체크아웃에서 실행")
         return 2
@@ -59,10 +67,50 @@ def review_main(argv: list[str] | None = None) -> int:
     text = render_markdown(result)
     if m2:
         text += "\n" + _m2_paper1_section(root, mode, base / "trading.db")
+        text += m2_signal_section(base / "trading.db", mode, _m2_account(root, mode),
+                                  Path(ns.compare_bars) if ns.compare_bars else None, ns.symbol)
     out.write_text(text, encoding="utf-8")
     print(f"집계 완료: {out} (거래일 {len(result.trade_dates)}, 의도 {sum(result.intent_states.values())}, "
           f"정지 {len(result.halts)}, 긴급 알림 {len(result.emergencies)})")
     return 0
+
+
+def _m2_account(root: Path, mode: Mode) -> str | None:
+    from trading_system.config.app_file import load_app_settings
+    try:
+        return load_app_settings(root / "config" / "m2" / f"app.{mode.value.lower()}.toml", mode, root).account
+    except (ConfigError, OSError):
+        return None
+
+
+def m2_signal_section(db: Path, mode: Mode, account: str | None, bars_csv: Path | None = None,
+                      symbol: str | None = None) -> str:
+    """[CP-039 T-063] 신호 출처 분리 집계 + (선택) 봉 대조. testnet DB·계좌 미확인이면 빈 문자열(봉 대조는 계좌와 무관)."""
+    from datetime import timedelta
+
+    from trading_system.reporting.m2_signal_review import (
+        collect_signal_review, compare_recollected_bars, load_recollected_csv, render_bar_compare, render_signal_review,
+    )
+    from trading_system.storage.repository import OrderIdentity, Repository
+    try:
+        repo = Repository(db, mode, order_identity=OrderIdentity.SYMBOL)
+    except Exception as exc:  # noqa: BLE001 — 집계 실패가 기존 집계 파일을 막지 않게
+        return f"\n## M2 신호 출처 분리 집계\n\n저장소를 열지 못해 생략 ({type(exc).__name__})\n"
+    out = ""
+    try:
+        if account is not None:
+            out += render_signal_review(collect_signal_review(repo, account))
+        if bars_csv is not None and symbol:
+            try:
+                recol = load_recollected_csv(bars_csv)
+            except (OSError, KeyError, ValueError) as exc:
+                return out + f"\n## 신호 출처 봉 대조\n\n재수집본을 읽지 못함 ({type(exc).__name__})\n"
+            if recol:
+                out += "\n" + render_bar_compare(symbol, compare_recollected_bars(
+                    repo, symbol, recol, start=min(recol), end=max(recol) + timedelta(minutes=1)))
+    finally:
+        repo.close()
+    return ("\n" + out) if out else ""
 
 
 def _m2_rates(root: Path, mode: Mode):  # type: ignore[no-untyped-def]
