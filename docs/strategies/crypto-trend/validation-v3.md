@@ -1,6 +1,6 @@
 # crypto-trend v3 — 운영 공식 검증 기록 (M2, CP-030 M2판 + CP-038 저빈도 예외)
 
-- 실행: 2026-10-19 16~17시 KST, 리드(에이전트), 사용자 실행 승인 A-128 ④. **판정 제안 — 판정·상태 전환은 사용자.**
+- 실행: 2026-10-19 16~17시 KST, 리드(에이전트), 사용자 실행 승인 A-128 ④. **사용자 판정 A-129(2026-10-19): 통과 인정 + BACKTEST_PASSED 전환 승인**(PAPER 전환은 별도).
 - 코드: 브랜치 `fix/T-068-zero-length-minute` **dfd3d79**(main d3f0a9a + 길이 0 1분봉 결측 처리). 결과 폴더 `var/backtest/crypto-trend-v3-official-2/`(git 제외)
   - `validation.md` SHA-256 `20179492657bdcb24086c2102677329f2825fd6430aaabaa122959fd0df597bb`
   - `validation.json` SHA-256 `b2eee25a1271bac2abfc64390827bae47ad8dec082aa36f0db8fc7e9c686c5d3`
