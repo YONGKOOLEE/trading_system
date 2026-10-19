@@ -409,6 +409,66 @@ def initial_baseline(repo: Repository, clock: Clock, balances: Mapping[str, tupl
     return ResetReport(resolved, quote_total, positions)
 
 
+# --- 기준선 이후 유니버스 추가 (CP-041 D-273) ------------------------------------------------------------------
+
+UNIVERSE_ASSET_ADDED = "UNIVERSE_ASSET_ADDED"
+
+
+class UniverseAddError(ResetError):
+    """유니버스 추가를 진행할 수 없음 (유니버스 밖·이미 있는 심볼·기준선 없음·활성 의도·열린 주문)."""
+
+
+@dataclass(frozen=True)
+class UniverseAddReport:
+    instrument: str
+    base_asset: str
+    quantity: Decimal
+    manual: bool                     # 0보다 커서 수동 보유(manual)로 기록했는가
+    open_items: list[str]            # 이 심볼의 열린 대조 항목 — 해소하지 않는다(안내만)
+
+
+def add_universe_asset(repo: Repository, clock: Clock, balances: Mapping[str, tuple[Decimal, Decimal]], account: str,
+                       *, instrument: str, universe: Mapping[str, tuple[str, str]],
+                       existing_baseline: Decimal | None, operator: str, approval: str) -> UniverseAddReport:
+    """기준선 이후 설정 유니버스에 넣은 심볼 하나의 보유를 기록한다 (사람이 실행, CP-041 D-273).
+
+    - 거부(아무것도 쓰지 않음): 설정 유니버스 밖 심볼, 기준선 없음(→ initial-baseline이 유니버스 전체를 기록),
+      DB에 그 심볼의 포지션·소유권 기록이 있음(이미 있는 심볼), 활성 의도(결과 불명 포함)·열린 내부 주문(D-210과 같음).
+    - 거래소 기초 자산 free + locked를 내부 포지션으로, 0보다 크면 수동 보유(manual — 전략 신호 금지 INV-16) 확정.
+    - USDT 기준선·다른 심볼 포지션·소유권·열린 대조 항목은 건드리지 않고, PAPER 기간을 다시 시작하지 않는다(reset-confirm과 다름).
+    - 감사 UNIVERSE_ASSET_ADDED(심볼·기초 자산·수량·근거 승인 A-ID·운영자) 1건. K4는 풀지 않는다 — 다음 대조 일치 + 사용자 재개."""
+    pair = universe.get(instrument)
+    if pair is None:
+        raise UniverseAddError(f"유니버스 밖 심볼 {instrument} — 설정 유니버스에 먼저 넣는다 (D-272 ④)")
+    if existing_baseline is None:
+        raise UniverseAddError("기준선이 없다 — 처음이면 initial-baseline이 유니버스 전체를 기록한다 (D-272 ⑥)")
+    if (repo.select("SELECT 1 FROM position WHERE account=? AND instrument=? LIMIT 1", (account, instrument))
+            or repo.select("SELECT 1 FROM ownership WHERE account=? AND instrument=? LIMIT 1", (account, instrument))):
+        raise UniverseAddError(f"이미 있는 심볼 {instrument} — 포지션·소유권 기록이 있다 (D-273 (6))")
+    active = [i for i in repo.intents() if i.account == account and not i.state.is_terminal]
+    if active:
+        raise UniverseAddError(f"활성 의도 {len(active)}건 — 결과 불명·미체결을 먼저 해소한 뒤 유니버스 추가")
+    if repo.open_orders(account):
+        raise UniverseAddError("열린 내부 주문이 있음 — 먼저 해소한 뒤 유니버스 추가")
+    base = pair[0]
+    qty = SpotReconciler._total(balances, base)
+    open_items = [i["item_id"] for i in repo.open_recon_items(account) if i["instrument"] == instrument]
+    now = clock.now()
+    with repo.tx():
+        repo.set_position(account, instrument, qty, _ZERO)
+        if qty > 0:
+            repo.insert_ownership(account, instrument, MANUAL_OWNER, None, now)
+            own = repo.active_ownership(account, instrument)
+            if own is not None:
+                repo.set_ownership_state(own.ownership_id, "CONFIRMED", None)
+        repo.audit(now, UNIVERSE_ASSET_ADDED, operator, account,
+                   {"instrument": instrument, "base_asset": base, "quantity": str(qty),
+                    "holding": MANUAL_OWNER if qty > 0 else "none", "approval": approval,
+                    "open_items_untouched": open_items,
+                    "basis": "CP-041 D-273 기준선 이후 유니버스 추가 — USDT 기준선·다른 심볼·PAPER 기간 불변"})
+    return UniverseAddReport(instrument, base, qty, qty > 0, open_items)
+
+
 # --- 대조 시점 (D-109) ----------------------------------------------------------------------------
 
 class SpotReconcileSchedule:
