@@ -139,7 +139,7 @@ def iter_binance_minute_csv(path: Path, start: datetime, stop: datetime, *, fina
     """A-110 공개 1m CSV → 1분봉(Bar.at = 봉 시작 UTC). start ≤ 봉 시작 < min(stop, final_from 00:00 UTC)만 해석해 넘긴다.
     파일은 읽기만 한다. 형식·품질 위반은 ConfigError(파일 이름·줄 번호, 값 없음). ext면 확장 열(quote_volume·trades·
     taker_buy_base·taker_buy_quote)도 해석한다(흐름 열 선언 전략, D-260 — 형식 오류인 확장 값은 None).
-    불완전 봉(거래소 거래 중단으로 분 안에서 일찍 끝난 봉 — 시작 < 끝 < 시작 + 59.999초)은 기본 거부. `incomplete` 집합을
+    불완전 봉(거래소 거래 중단으로 분 안에서 일찍 끝난 봉 — 시작 ≤ 끝 < 시작 + 59.999초, 끝 = 시작인 길이 0 봉 포함)은 기본 거부. `incomplete` 집합을
     넘기면 그 봉만 건너뛰고 시작 시각을 기록한다 — 결측 분이 되어 그 창의 판정은 무효(보수적). 일봉
     load_binance_daily_csv(incomplete=)와 같은 규칙(A-112 선례). 다른 끝 시각 위반은 여전히 거부."""
     limit = min(stop, datetime(final_from.year, final_from.month, final_from.day, tzinfo=UTC))
@@ -175,7 +175,7 @@ def iter_binance_minute_csv(path: Path, start: datetime, stop: datetime, *, fina
             if prev is not None and opened <= prev:
                 raise ConfigError(f"{name}:{i}: 봉 시작이 오름차순이 아님(중복·역순)")
             if closed != opened + _CLOSE_OFFSET:
-                if incomplete is not None and opened < closed < opened + _CLOSE_OFFSET:
+                if incomplete is not None and opened <= closed < opened + _CLOSE_OFFSET:   # 길이 0 봉 포함
                     incomplete.add(opened.astimezone(UTC))   # 일찍 끝난 불완전 봉 → 결측 (넘기지 않음)
                     prev = opened
                     continue
