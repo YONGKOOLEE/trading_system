@@ -1,6 +1,8 @@
-"""M2 기준선 확정·테스트넷 리셋 확인 — 로컬 운영 도구 (CP-036 D-210, CP-024 D-099·D-103, V-288). 사람이 직접 실행한다.
+"""M2 기준선 확정·테스트넷 리셋 확인·유니버스 추가 — 로컬 운영 도구 (CP-036 D-210, CP-024 D-099·D-103, V-288,
+CP-041 D-273·V-343). 사람이 직접 실행한다.
 
-`scripts/reconcile-resolve.py --mode PAPER --market M2 initial-baseline` / `... reset-confirm`
+`scripts/reconcile-resolve.py --mode PAPER --market M2 initial-baseline` / `... reset-confirm` /
+`... universe-add --symbol ETHUSDT --approval A-xxx`
 - 로컬 전용: 원격(텔레그램) 명령은 없다 — 운영 명령 표(ops_command)를 거치지 않고 이 프로세스가 직접 쓴다.
 - **엔진 정지 중에만**: 실행 잠금(var/<mode>/run.lock)이 잡혀 있거나 하트비트가 살아 있으면 거부(아무것도 쓰지 않음).
   DB를 열기 직전 실행 잠금을 **잡고 도구가 끝날 때까지 쥔다**(재검토) — 쓰는 사이 엔진이 시작하지 못한다(엔진은 이중 실행
@@ -9,6 +11,9 @@
 - 연결은 조회만(A-096 범위): PAPER = 바이낸스 테스트넷 계좌 잔고 조회(주문 스위치 꺼짐 전송 계층, scripts가 주입).
   BACKTEST(fake 연습) = 거래소가 없으므로 사람이 --quote-amount로 USDT 가상 잔고를 적는다.
 - initial-baseline: 기준선이 이미 있으면 거부. reset-confirm: 리셋 확인(confirm_reset). 둘 다 활성 의도·열린 주문 있으면 거부.
+- universe-add(D-273): 기준선 뒤 설정 유니버스에 넣은 심볼 하나의 기초 자산 free + locked를 내부 포지션(0보다 크면 수동
+  보유)으로 기록. 설정 유니버스 밖·이미 있는 심볼·기준선(DB) 없음·승인 기록 표에 없는 --approval이면 거부. USDT 기준선·다른
+  심볼·PAPER 기간은 그대로. BACKTEST(fake 연습)는 --base-amount로 가상 기초 자산 잔고.
 - K4는 풀지 않는다 — 다음 run의 대조 일치 + 사용자 재개(D-099).
 - DB: M2 메타·SYMBOL 식별. 다른 시장 DB면 거부. 없으면 M2 메타로 만든다(run 첫 시작과 같은 기록).
 비밀 값은 출력하지 않는다. 이 모듈은 바이낸스 패키지를 import하지 않는다(D-119).
@@ -32,15 +37,16 @@ from trading_system.domain.enums import Mode
 from trading_system.domain.market import CostRates
 from trading_system.domain.market_time import M2_TIME, Market
 from trading_system.monitoring.spot_cash import SpotAccountFacts
-from trading_system.reconciliation.spot import ResetError, confirm_reset, initial_baseline
+from trading_system.reconciliation.spot import ResetError, add_universe_asset, confirm_reset, initial_baseline
 from trading_system.storage.market_meta import bind_market
 from trading_system.storage.repository import ModeMismatch, OrderIdentity, Repository, StorageFailure
 
 from .instance_lock import InstanceLocked, acquire_instance_lock, instance_running
 from .preflight import engine_alive
-from .startup import BINANCE_SECRET_KEYS, LiveNotAvailable, check_m2_startup
+from .startup import APPROVALS_FILE, BINANCE_SECRET_KEYS, LiveNotAvailable, check_m2_startup, recorded_approval_ids
 
-SUBCOMMANDS = ("initial-baseline", "reset-confirm")
+SUBCOMMANDS = ("initial-baseline", "reset-confirm", "universe-add")
+UNIVERSE_ADD = "universe-add"
 # PAPER 잔고 조회 자리: (api_key, secret, symbols, account, now_ms) → query_balances(account)를 가진 객체 또는 거부 사유
 BalanceSource = Callable[..., Any]
 
@@ -48,8 +54,8 @@ BalanceSource = Callable[..., Any]
 class _Balances:
     """BACKTEST(fake 연습)의 사람이 적은 가상 잔고 — 조회 계약 모양만."""
 
-    def __init__(self, quote_asset: str, amount: Decimal) -> None:
-        self._b = {quote_asset: (amount, Decimal("0"))}
+    def __init__(self, asset: str, amount: Decimal) -> None:
+        self._b = {asset: (amount, Decimal("0"))}
 
     def query_balances(self, account: str) -> dict[str, tuple[Decimal, Decimal]]:
         return dict(self._b)
@@ -69,12 +75,18 @@ def m2_baseline_main(argv: Sequence[str], root: Path, *, open_balances: BalanceS
     p.add_argument("--root", default=str(root))
     p.add_argument("--operator", default=None, help="확정한 사람(기본: 로그인 사용자)")
     p.add_argument("--quote-amount", help="BACKTEST(fake 연습)만: USDT 가상 잔고 (사람이 적음)")
+    p.add_argument("--symbol", help="universe-add만: 추가할 심볼 (설정 유니버스에 이미 넣은 것)")
+    p.add_argument("--approval", help="universe-add만: 근거 승인 A-ID (docs/approvals.md 표에 있는 것)")
+    p.add_argument("--base-amount", help="universe-add·BACKTEST(fake 연습)만: 기초 자산 가상 잔고 (사람이 적음)")
     ns = p.parse_args(list(argv))
     clock = clock or SystemClock()
     root = Path(ns.root)
     print(f"시장: {ns.market} · 디렉터리: {root.resolve()}")
     if ns.market != Market.M2.value:
-        return _refuse("initial-baseline·reset-confirm은 M2 전용 (--market M2)")
+        return _refuse("initial-baseline·reset-confirm·universe-add는 M2 전용 (--market M2)")
+    adding = ns.command == UNIVERSE_ADD
+    if not adding and (ns.symbol, ns.approval, ns.base_amount) != (None, None, None):
+        return _refuse("--symbol·--approval·--base-amount는 universe-add만")
     try:
         mode = parse_trade_mode(ns.mode)
     except ConfigError as exc:
@@ -94,14 +106,20 @@ def m2_baseline_main(argv: Sequence[str], root: Path, *, open_balances: BalanceS
         return _refuse(str(exc))
     quote = cfg.universe.quote_asset
     pairs = {s: (cfg.universe.base_asset(s) or "", quote) for s in cfg.universe.symbols}
-    if mode is Mode.BACKTEST:
+    if adding:
+        problem = _universe_add_problem(ns, cfg, root, pairs, mode)
+        if problem:
+            return _refuse(problem)
+    if mode is Mode.BACKTEST and adding:
+        source: Any = _Balances(pairs[ns.symbol][0], Decimal(ns.base_amount))   # 기초 자산 가상 잔고만
+    elif mode is Mode.BACKTEST:
         try:
             amount = Decimal(ns.quote_amount) if ns.quote_amount is not None else None
         except InvalidOperation:
             amount = None
         if amount is None or not amount.is_finite() or amount < 0:
             return _refuse("BACKTEST는 --quote-amount(USDT 가상 잔고, 0 이상 소수)가 필요하다")
-        source: Any = _Balances(quote, amount)
+        source = _Balances(quote, amount)
     else:
         if ns.quote_amount is not None:
             return _refuse("--quote-amount는 BACKTEST만 — PAPER는 테스트넷 잔고를 조회한다")
@@ -129,6 +147,32 @@ def m2_baseline_main(argv: Sequence[str], root: Path, *, open_balances: BalanceS
         lock.release()
 
 
+def _universe_add_problem(ns: argparse.Namespace, cfg: Any, root: Path, pairs: Mapping[str, tuple[str, str]],
+                          mode: Mode) -> str | None:
+    """universe-add 사전 거부 (연결·DB 쓰기 전). 거부 사유 또는 None."""
+    if not ns.symbol:
+        return "universe-add는 --symbol이 필요하다 (예: --symbol ETHUSDT)"
+    if ns.symbol not in pairs:
+        return (f"유니버스 밖 심볼 {ns.symbol} — config/m2/universe.{mode.value.lower()}.toml symbols에 먼저 넣는다 "
+                "(D-272 ④)")
+    if not ns.approval or ns.approval not in recorded_approval_ids(root / APPROVALS_FILE):
+        return f"--approval(근거 승인 A-ID)이 없거나 {APPROVALS_FILE.as_posix()} 승인 기록 표에 없다"
+    if ns.quote_amount is not None:
+        return "--quote-amount는 universe-add에 쓰지 않는다 — USDT 기준선은 바꾸지 않는다 (D-273 (4))"
+    if mode is Mode.BACKTEST:
+        try:
+            amount = Decimal(ns.base_amount) if ns.base_amount is not None else None
+        except InvalidOperation:
+            amount = None
+        if amount is None or not amount.is_finite() or amount < 0:
+            return "BACKTEST universe-add는 --base-amount(기초 자산 가상 잔고, 0 이상 소수)가 필요하다"
+    elif ns.base_amount is not None:
+        return "--base-amount는 BACKTEST만 — PAPER는 테스트넷 잔고를 조회한다"
+    if not cfg.storage_path.exists():
+        return "DB가 없다(기준선 없음) — 처음이면 initial-baseline이 유니버스 전체를 기록한다 (D-272 ⑥)"
+    return None
+
+
 def _write(ns: argparse.Namespace, cfg: Any, mode: Mode, clock: Clock, source: Any,  # noqa: PLR0913
            pairs: dict[str, tuple[str, str]], quote: str) -> int:
     """실행 잠금을 쥔 채로: DB(M2 메타) → 잔고 조회 → 기준선 확정 또는 리셋 확인."""
@@ -154,6 +198,10 @@ def _write(ns: argparse.Namespace, cfg: Any, mode: Mode, clock: Clock, source: A
         except BrokerQueryError as exc:
             return _refuse(f"잔고 조회 실패: {exc}")
         try:
+            if ns.command == UNIVERSE_ADD:
+                return _report_added(add_universe_asset(
+                    repo, clock, balances, cfg.account, instrument=ns.symbol, universe=pairs,
+                    existing_baseline=facts.baseline(cfg.account), operator=operator, approval=ns.approval))
             if ns.command == "initial-baseline":
                 rep = initial_baseline(repo, clock, balances, cfg.account, universe=pairs, quote_asset=quote,
                                        existing_baseline=facts.baseline(cfg.account),
@@ -169,5 +217,16 @@ def _write(ns: argparse.Namespace, cfg: Any, mode: Mode, clock: Clock, source: A
         repo.close()
     print(f"{ns.command} 완료: USDT 기준선 {rep.quote_baseline}, 유니버스 보유 {rep.positions} (수동 보유로 기록), "
           f"해소한 대조 항목 {len(rep.resolved_items)}건")
+    print("K4는 풀지 않았다 — 다음 run의 대조 일치 뒤 사용자 재개 (scripts/resume.py --market M2 ... K4)")
+    return 0
+
+
+def _report_added(rep: Any) -> int:
+    holding = "수동 보유로 기록" if rep.manual else "보유 0 — 포지션 0만 기록"
+    print(f"universe-add 완료: {rep.instrument} 기초 자산 {rep.base_asset} {rep.quantity} ({holding}), "
+          "감사 UNIVERSE_ASSET_ADDED 1건. USDT 기준선·다른 심볼·PAPER 기간은 그대로")
+    if rep.open_items:
+        print(f"주의: 이 심볼의 열린 대조 항목 {len(rep.open_items)}건은 해소하지 않았다 — 다음 대조도 불일치로 남는다 "
+              f"({', '.join(rep.open_items)})")
     print("K4는 풀지 않았다 — 다음 run의 대조 일치 뒤 사용자 재개 (scripts/resume.py --market M2 ... K4)")
     return 0

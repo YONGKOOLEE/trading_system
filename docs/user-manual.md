@@ -567,7 +567,62 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\schedule-unregiste
 ```
 기대 결과: `해제: TradingSystem-PAPER-M2-Supervisor`, `해제: TradingSystem-PAPER-M2-ClockSync`, `남은 TradingSystem-PAPER-M2- 작업: 0개`. 도는 중인 감독은 멈추지 않는다 → 위 `--stop`.
 
-### 13.6 아직 확인되지 않은 것 (2026-10-19)
+### 13.6 유니버스에 ETHUSDT 넣기 — 기준선 뒤 (CP-041 D-272·D-273, T-071)
+- **언제**: crypto-trend PAPER 준비 때(A-122 Q-5 (다)). m2-verify PAPER-0 동안은 BTCUSDT만이다. 순서를 바꾸지 않는다 — 설정을 먼저 바꾸고 도구 없이 run을 켜면 지급 ETH가 내부 0과 달라 `QTY_MISMATCH`(ETHUSDT) → K4가 걸린다(V-343 기록).
+- **도구가 하는 일**(`universe-add`): 테스트넷 ETH 잔고(free + locked)를 내부 포지션으로 기록하고, 0보다 크면 **수동 보유**(전략 신호 없음)로 둔다. USDT 기준선·BTCUSDT 포지션·소유권(m2-verify 보유 포함)·PAPER 기간은 **바꾸지 않는다**(`reset-confirm`과 다름). 감사 기록 `UNIVERSE_ASSET_ADDED` 1건. 주문은 내지 않고 잔고 조회만 한다. K4는 풀지 않는다.
+- **하지 않는 것**: 유니버스에서 심볼을 **빼는** 절차는 없다(범위 밖). 텔레그램 원격 명령도 없다(PC에서만).
+
+1) run 정지(엔진이 돌고 있으면 도구가 거부한다). 감독을 쓰는 중이면 §13.5의 `--stop`, 아니면:
+```
+cd C:\AI\trading_system\m2-binance
+C:\AI\trading_system\trading_system\.venv\Scripts\python.exe scripts\ops-stop.py --mode PAPER --market M2
+```
+기대 결과: `정지 요청 파일 작성: ...` → `run 종료 확인(실행 잠금 해제)`. M2 PAPER 판정 기간 중이면 에이전트에게 "유니버스 반영 계획 정지"라고 알린다(계획 정지 기록).
+
+2) 설정 반영: 에이전트에게 "universe.paper.toml에 ETHUSDT 추가" 지시 → 에이전트가 `config/...` 브랜치에서 한 줄 변경·커밋 → 사용자 지시로 main 병합 → M2 폴더 갱신(PAPER-0 가이드 4-2와 같은 방식, 새 브랜치 이름):
+```
+git -C C:\AI\trading_system\m2-binance status --short
+git -C C:\AI\trading_system\m2-binance checkout -b m2/run-eth main
+Select-String -Path C:\AI\trading_system\m2-binance\config\m2\universe.paper.toml -Pattern '^symbols'
+```
+기대 결과: 첫 명령은 손으로 바꾼 설정 파일 줄만(` M config/m2/app.paper.toml`), 둘째는 `Switched to a new branch 'm2/run-eth'`, 셋째는 `symbols = ["BTCUSDT", "ETHUSDT"]`가 들어간 한 줄. 다르면 멈추고 출력을 보낸다. 이 절의 명령에는 쉼표 목록 인자가 없다(쉼표 목록을 쓰는 명령은 `"BTCUSDT,ETHUSDT"`처럼 따옴표로 감싼다 — 안 하면 PowerShell이 목록으로 바꾼다).
+
+3) 근거 승인 번호가 M2 폴더 승인 기록 표에 있는지 확인(도구가 표에 없는 번호를 거부한다):
+```
+Select-String -Path C:\AI\trading_system\m2-binance\docs\approvals.md -Pattern '^\| A-122 \|'
+```
+기대 결과: `A-122`로 시작하는 표 한 줄. 반영 시점에 새 승인 번호를 받았으면 그 번호로 바꿔 3)·4)에 쓴다.
+
+4) 유니버스 추가(run 꺼진 상태, 처음 한 번):
+```
+Set-Location C:\AI\trading_system\m2-binance
+C:\AI\trading_system\trading_system\.venv\Scripts\python.exe scripts\reconcile-resolve.py universe-add --mode PAPER --market M2 --symbol ETHUSDT --approval A-122
+```
+기대 결과:
+- `시장: M2 · 디렉터리: C:\AI\trading_system\m2-binance`
+- `universe-add 완료: ETHUSDT 기초 자산 ETH <수량> (수동 보유로 기록), 감사 UNIVERSE_ASSET_ADDED 1건. USDT 기준선·다른 심볼·PAPER 기간은 그대로` (지급 ETH가 0이면 `(보유 0 — 포지션 0만 기록)`)
+- `K4는 풀지 않았다 — 다음 run의 대조 일치 뒤 사용자 재개 (scripts/resume.py --market M2 ... K4)`
+
+`거부(아무것도 쓰지 않음): ...`이면 아무것도 바뀌지 않은 것이다:
+| 문구 | 뜻·할 일 |
+|---|---|
+| `엔진 실행 중(실행 잠금 보유)` | 1)을 먼저 |
+| `유니버스 밖 심볼 ETHUSDT` | 2)의 설정 갱신이 안 됨 — 셋째 명령 출력을 보낸다 |
+| `이미 있는 심볼 ETHUSDT` | 이미 기록됨(두 번 하지 않는다) — 다음 단계로 가지 말고 출력을 보낸다 |
+| `--approval(근거 승인 A-ID)이 없거나 docs/approvals.md 승인 기록 표에 없다` | 3) 확인 |
+| `DB가 없다(기준선 없음)` 또는 `기준선이 없다` | 아직 기준선 전 — 이 도구 대신 `initial-baseline`(PAPER-0 가이드 4-5)이 ETH까지 기록한다 |
+| `활성 의도 N건` / `열린 내부 주문이 있음` | 멈추고 출력을 보낸다(결과 불명·미체결 먼저 해소) |
+| `잔고 조회 실패: ...` | 연결 문제 — 잠시 뒤 다시. 반복되면 출력을 보낸다 |
+
+- 완료 줄 뒤에 `주의: 이 심볼의 열린 대조 항목 N건은 해소하지 않았다`가 나오면(도구 전에 run을 켠 경우) 다음 대조도 불일치로 남는다 — 멈추고 출력을 보낸다(처리 절차 미정).
+
+5) run 시작 → 재개: §13.2 3) 또는 PAPER-0 가이드 4-6으로 시작. 시작 직후 K8은 정상. 1~2분 뒤 텔레그램 M2 봇 `/status`에서 "대조 불일치: 0건" 확인 → 정지 목록에 K4가 있으면 `/resume K4`·`/confirm <코드>` 먼저, 그다음 `/resume K8`·`/confirm <코드>`(PAPER-0 가이드 4-7과 같음). 불일치가 남아 있으면 재개하지 말고 출력을 보낸다.
+
+6) 지급 ETH 처리(Q-5 (다) — `/exit`): **테스트넷 주문 별도 승인 뒤에만**(A-125는 m2-verify·지급 BTC만). 승인과 주문 스위치가 갖춰졌으면 텔레그램 M2 봇에서 `/exit ETHUSDT <수량>` → `/confirm <코드>`. 기대: "원격 명령 EXIT DONE: 의도 … ACCEPTED". 수량은 4)의 완료 줄 수량, 0.0001 단위(ETHUSDT 수량 단위, broker-specs/binance-spot.md §15)가 아니면 거부(자동 반올림 없음). 부분 체결로 남으면 남은 수량으로 다시. 보유 0은 `/review` 또는 PC `status.py`로 확인. `/exit`는 run 안에서 처리되므로 5) 재개 뒤에 한다.
+
+7) 관찰(V-352): 그 뒤 run 기록에서 m2-verify 신호·주문이 BTCUSDT만이고 ETH 신호·주문이 0인지 에이전트가 확인한다(읽기만).
+
+### 13.7 아직 확인되지 않은 것 (2026-10-19)
 - 감독·예약 작업 경로는 실제로 돈 적이 없다(시험은 가짜 run·가짜 시계로만 — T-054 시험). T-056 관찰 run으로 확인한다.
 - 작업 스케줄러 실행 시간 상한 0의 뜻(상한 없음)과 작업 끝내기 때 run 자식 동반 종료 여부 — 공식 문서 미확인.
 - 표의 텔레그램 문구는 코드 문구 그대로지만, 실제 봇 화면 모양은 확인하지 않았다.
