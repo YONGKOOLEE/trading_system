@@ -12,7 +12,7 @@
 | T-050 관찰 run | 종료(10-18 23:53). 결과 [t050-observation.md](strategies/m2-verify/t050-observation.md) |
 
 ## 다음 세션 첫 행동
-1. **crypto-trend v3 공식 검증 결과 확인**(10-19 16시 main에서 실행 — `varacktest\crypto-trend-v3-official-1alidation.md`, 로그 scratchpad). 판정 문구(일반 → 저빈도 예외 LF-0~LF-8)를 사용자에게 권장안과 함께 질문(A-127 (2)). 통과면 BACKTEST_PASSED·PAPER 전환 승인 → PAPER-1 준비(CP-039 T-060~063 실서버 시세 신호, T-071 ETH 유니버스, T-072, T-059, T-056 무인 관찰·D-231 등록 승인).
+1. **crypto-trend v3 공식 검증 결과 확인**(10-19 16시 main에서 실행 — `var/backtest/crypto-trend-v3-official-1/validation.md`, 로그 scratchpad). 판정 문구(일반 → 저빈도 예외 LF-0~LF-8)를 사용자에게 권장안과 함께 질문(A-127 (2)). 통과면 BACKTEST_PASSED·PAPER 전환 승인 → PAPER-1 준비(CP-039 T-060~063 실서버 시세 신호, T-071 ETH 유니버스, T-072, T-059, T-056 무인 관찰·D-231 등록 승인).
 2. M2 PAPER-0 관찰 계속(PV-M2-01~11 기록 문서 정하기 — 07 M2 절 권장). 종료·판정 시점은 사용자와(M1은 5거래일이었음).
 3. CP-041 다음 draft: D-276 (2)·(4) 문구(일봉 = m2_daily_input, 결측 = DP-82 (b)) 정정. CP-038 D-244 (5)에 [CP-042] 표시.
 4. 비차단 정리: 재검토 지적(LF-8 blocked_entries 이중 계산, 일봉 백테스트 창 길이, 감독 STOP 파일 지움 경쟁, 예약 작업 해제 안내).
